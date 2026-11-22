@@ -19,10 +19,11 @@ type Store struct {
 	AssetsDir string
 	OutputDir string
 
-	campaigns map[string]*model.Campaign
-	projects  map[string]*model.Project
-	jobs      map[string]*model.RenderJob
-	settings  model.AppSettings
+	campaigns  map[string]*model.Campaign
+	projects   map[string]*model.Project
+	jobs       map[string]*model.RenderJob
+	autopilots map[string]*model.AutopilotRule
+	settings   model.AppSettings
 }
 
 func NewStore(baseDir string) (*Store, error) {
@@ -42,9 +43,10 @@ func NewStore(baseDir string) (*Store, error) {
 		DataDir:   dataDir,
 		AssetsDir: assetsDir,
 		OutputDir: outputDir,
-		campaigns: make(map[string]*model.Campaign),
-		projects:  make(map[string]*model.Project),
-		jobs:      make(map[string]*model.RenderJob),
+		campaigns:  make(map[string]*model.Campaign),
+		projects:   make(map[string]*model.Project),
+		jobs:       make(map[string]*model.RenderJob),
+		autopilots: make(map[string]*model.AutopilotRule),
 		settings: model.AppSettings{
 			MaxWorkers:      2,
 			DefaultEncoder:  "libx264",
@@ -57,6 +59,7 @@ func NewStore(baseDir string) (*Store, error) {
 
 	s.loadAll()
 	s.ensureDefaultCampaigns()
+	s.ensureDefaultAutopilots()
 	return s, nil
 }
 
@@ -128,6 +131,110 @@ func (s *Store) loadAll() {
 			}
 		}
 	}
+
+	// Load autopilot rules
+	if b, err := os.ReadFile(filepath.Join(s.DataDir, "autopilot.json")); err == nil {
+		var list []*model.AutopilotRule
+		if json.Unmarshal(b, &list) == nil {
+			for _, r := range list {
+				if r.ID != "" {
+					s.autopilots[r.ID] = r
+				}
+			}
+		}
+	}
+}
+
+func (s *Store) ensureDefaultAutopilots() {
+	if len(s.autopilots) > 0 {
+		return
+	}
+	now := time.Now()
+	rule := &model.AutopilotRule{
+		ID:               "auto-windah-gtavi",
+		Name:             "Windah Basudara — GTA VI Auto-Watcher",
+		Enabled:          false, // Toggle ON when ready for autonomous scheduled clipping!
+		ChannelURL:       "https://www.youtube.com/@WindahBasudara/streams",
+		KeywordFilter:    []string{"GTA VI", "GTA 6", "Grand Theft Auto"},
+		CampaignID:       "windah-gtavi-motionklip",
+		IntervalMinutes:  60,
+		MaxVideosPerRun:  1,
+		TopClipsPerVideo: 5,
+		LastStatus:       "Belum pernah dijalankan (aktifkan toggle atau klik Jalankan Sekarang)",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	s.autopilots[rule.ID] = rule
+	_ = s.saveAutopilotsLocked()
+}
+
+func (s *Store) saveAutopilotsLocked() error {
+	list := make([]*model.AutopilotRule, 0, len(s.autopilots))
+	for _, r := range s.autopilots {
+		list = append(list, r)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].CreatedAt.Before(list[j].CreatedAt)
+	})
+	return writeJSONAtomic(filepath.Join(s.DataDir, "autopilot.json"), list)
+}
+
+// --- Autopilot CRUD ---
+
+func (s *Store) ListAutopilots() []*model.AutopilotRule {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	list := make([]*model.AutopilotRule, 0, len(s.autopilots))
+	for _, r := range s.autopilots {
+		cp := *r
+		list = append(list, &cp)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].CreatedAt.Before(list[j].CreatedAt)
+	})
+	return list
+}
+
+func (s *Store) GetAutopilot(id string) (*model.AutopilotRule, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r, ok := s.autopilots[id]
+	if !ok {
+		return nil, false
+	}
+	cp := *r
+	return &cp, true
+}
+
+func (s *Store) SaveAutopilot(r *model.AutopilotRule) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	if ex, ok := s.autopilots[r.ID]; ok {
+		r.CreatedAt = ex.CreatedAt
+	} else if r.CreatedAt.IsZero() {
+		r.CreatedAt = now
+	}
+	if r.IntervalMinutes < 5 {
+		r.IntervalMinutes = 60
+	}
+	if r.TopClipsPerVideo < 1 {
+		r.TopClipsPerVideo = 3
+	}
+	if r.MaxVideosPerRun < 1 {
+		r.MaxVideosPerRun = 1
+	}
+	r.UpdatedAt = now
+	cp := *r
+	s.autopilots[r.ID] = &cp
+	return s.saveAutopilotsLocked()
+}
+
+func (s *Store) DeleteAutopilot(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.autopilots, id)
+	return s.saveAutopilotsLocked()
 }
 
 func (s *Store) ensureDefaultCampaigns() {

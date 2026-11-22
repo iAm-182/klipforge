@@ -17,6 +17,7 @@ import (
 
 	"klipforge/internal/analyzer"
 	"klipforge/internal/audiofx"
+	"klipforge/internal/autopilot"
 	"klipforge/internal/deps"
 	"klipforge/internal/events"
 	"klipforge/internal/model"
@@ -28,12 +29,13 @@ import (
 
 // Server wires all REST endpoints, SSE streaming, media serving, and embedded dashboard UI.
 type Server struct {
-	Store  *store.Store
-	Deps   *deps.Manager
-	YT     *youtube.Client
-	Audio  *audiofx.Library
-	Broker *events.Broker
-	Worker *renderer.WorkerPool
+	Store     *store.Store
+	Deps      *deps.Manager
+	YT        *youtube.Client
+	Audio     *audiofx.Library
+	Broker    *events.Broker
+	Worker    *renderer.WorkerPool
+	Autopilot *autopilot.Scheduler
 
 	// Cache raw signals in memory for instant re-analysis without re-fetching YouTube
 	cacheMu    sync.RWMutex
@@ -52,7 +54,7 @@ func New(st *store.Store, d *deps.Manager, broker *events.Broker) *Server {
 	yt := youtube.NewClient(d)
 	audioLib := audiofx.NewLibrary(st.DataDir, d)
 	wp := renderer.NewWorkerPool(st, d, yt, audioLib, broker)
-	return &Server{
+	s := &Server{
 		Store:      st,
 		Deps:       d,
 		YT:         yt,
@@ -60,6 +62,50 @@ func New(st *store.Store, d *deps.Manager, broker *events.Broker) *Server {
 		Broker:     broker,
 		Worker:     wp,
 		rawSignals: make(map[string]*cachedSignals),
+	}
+	s.Autopilot = autopilot.NewScheduler(st, yt, wp, broker, s.analyzeSyncFast)
+	go s.recoverIncompleteProjects()
+	return s
+}
+
+// recoverIncompleteProjects finishes any cached project that already downloaded subs/preview on disk before restart.
+func (s *Server) recoverIncompleteProjects() {
+	for _, p := range s.Store.ListProjects() {
+		if len(p.Candidates) > 0 {
+			continue
+		}
+		dir := s.Store.ProjectDir(p.ID)
+		if p.PreviewFrame == "" {
+			if _, err := os.Stat(filepath.Join(dir, "preview.jpg")); err == nil {
+				p.PreviewFrame = filepath.Join(dir, "preview.jpg")
+			}
+		}
+		if p.SubtitlePath == "" {
+			if matches, _ := filepath.Glob(filepath.Join(dir, "subs*.vtt")); len(matches) > 0 {
+				p.SubtitlePath = matches[0]
+			}
+		}
+		if p.SubtitlePath != "" {
+			cs := s.loadCachedSignals(p)
+			if len(cs.Transcript) > 0 || len(cs.Heatmap) > 0 || len(cs.Chats) > 0 {
+				res := analyzer.DetectHype(analyzer.AnalysisInput{
+					DurationSec: p.DurationSec,
+					Heatmap:     cs.Heatmap,
+					Chats:       cs.Chats,
+					AudioEnergy: cs.AudioEnergy,
+					Transcript:  cs.Transcript,
+					Chapters:    p.Chapters,
+					Settings:    p.DetectConfig,
+				})
+				p.Timeline = res.Timeline
+				p.Candidates = res.Candidates
+				p.Signals = res.Signals
+				p.Status = "ready"
+				p.StatusMessage = fmt.Sprintf("Siap! Ditemukan %d momen hits dari transkrip & sinyal tersimpan.", len(res.Candidates))
+				_ = s.Store.SaveProject(p)
+				s.Broker.Publish("project_update", p)
+			}
+		}
 	}
 }
 
@@ -93,14 +139,22 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/projects/{id}/preview-frame", s.handleServePreviewFrame)
 	mux.HandleFunc("GET /api/projects/{id}/video", s.handleServeProjectVideo)
 
-	// Render Jobs & Clips
+	// Render Jobs, Clips & Human-in-the-Loop Review
 	mux.HandleFunc("GET /api/jobs", s.handleListJobs)
 	mux.HandleFunc("POST /api/jobs/render", s.handleRenderSingle)
 	mux.HandleFunc("POST /api/jobs/batch", s.handleRenderBatch)
+	mux.HandleFunc("POST /api/jobs/{id}/review", s.handleReviewJob)
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.handleCancelJob)
 	mux.HandleFunc("POST /api/jobs/{id}/retry", s.handleRetryJob)
 	mux.HandleFunc("DELETE /api/jobs/{id}", s.handleDeleteJob)
 	mux.HandleFunc("GET /api/jobs/{id}/video", s.handleServeJobVideo)
+
+	// Autonomous Scheduler / Autopilot (n8n-style HITL workflow)
+	mux.HandleFunc("GET /api/autopilot", s.handleListAutopilots)
+	mux.HandleFunc("POST /api/autopilot", s.handleCreateAutopilot)
+	mux.HandleFunc("PUT /api/autopilot/{id}", s.handleUpdateAutopilot)
+	mux.HandleFunc("DELETE /api/autopilot/{id}", s.handleDeleteAutopilot)
+	mux.HandleFunc("POST /api/autopilot/{id}/run", s.handleRunAutopilot)
 
 	// Audio Library (BGM & SFX starter pack + custom uploads)
 	mux.HandleFunc("GET /api/audio", s.handleListAudio)
@@ -434,6 +488,42 @@ func (s *Server) handleAnalyzeProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, proj)
 }
 
+// analyzeSyncFast runs Phase-1 fast scan synchronously (used by Autopilot scheduler & n8n triggers).
+func (s *Server) analyzeSyncFast(ctx context.Context, videoURL, campaignID string) (*model.Project, error) {
+	videoID := youtube.ExtractVideoID(videoURL)
+	projID := fmt.Sprintf("proj-%s-%d", videoID, time.Now().Unix())
+	if videoID == "" {
+		projID = fmt.Sprintf("proj-%d", time.Now().UnixNano())
+	}
+	proj := &model.Project{
+		ID:            projID,
+		VideoID:       videoID,
+		SourceURL:     videoURL,
+		Title:         "Memindai video YouTube...",
+		Status:        "scanning",
+		StatusMessage: "Autopilot memindai metadata, heatmap & transkrip...",
+		CampaignID:    campaignID,
+		DetectConfig:  model.DefaultDetectionSettings(),
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+	}
+	if err := s.Store.SaveProject(proj); err != nil {
+		return nil, err
+	}
+	s.Broker.Publish("project_update", proj)
+	s.runAnalysisPipeline(proj.ID, false, false, false)
+
+	res, ok := s.Store.GetProject(proj.ID)
+	if !ok || res.Status == "error" {
+		msg := "gagal analisis"
+		if res != nil {
+			msg = res.StatusMessage
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
+	return res, nil
+}
+
 func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat, includeAudio bool) {
 	ctx := context.Background()
 	proj, ok := s.Store.GetProject(projectID)
@@ -451,8 +541,9 @@ func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat
 		s.Broker.Log("analyzer", "info", msg)
 	}
 
-	// 1. Fetch Metadata + Heatmap + Chapters
-	update("scanning", "Mengambil metadata YouTube, chapters & Most Replayed Heatmap...")
+	// ============ PHASE 1: ULTRA-FAST SCAN (~8-15 detik!) ============
+	// Metadata + Heatmap + HD Preview Frame + Indonesian/English Auto-Captions (NO slow blocking live_chat!)
+	update("scanning", "Fase 1 (Cepat): Mengambil metadata YouTube, heatmap & chapters...")
 	meta, err := s.YT.FetchMetadata(ctx, proj.SourceURL, settings)
 	if err != nil {
 		update("error", err.Error())
@@ -472,16 +563,14 @@ func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat
 	_ = s.Store.SaveProject(proj)
 	s.Broker.Publish("project_update", proj)
 
-	// Cache heatmap to disk so project survives restarts
 	if len(meta.Heatmap) > 0 {
 		if b, err := json.Marshal(meta.Heatmap); err == nil {
 			_ = os.WriteFile(filepath.Join(projDir, "heatmap.json"), b, 0o644)
 		}
 	}
 
-	// 2. Concurrent sidecars: Live Chat Replay + Subtitles + HD Preview Frame!
+	update("scanning", "Mengambil preview frame HD & transkrip ucapan (cepat ~5-10 detik)...")
 	var wg sync.WaitGroup
-	var chatMsgs []youtube.ChatMessage
 	var subCues []model.TranscriptCue
 	var audioEnergy []float64
 
@@ -491,7 +580,6 @@ func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat
 		defer wg.Done()
 		seek := meta.Duration * 0.20
 		if len(meta.Heatmap) > 0 {
-			// Pick the single hottest timestamp after first 15s for the preview frame!
 			bestV := -1.0
 			for _, h := range meta.Heatmap {
 				if h.StartTime >= 15 && h.Value > bestV {
@@ -506,35 +594,16 @@ func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat
 		}
 	}()
 
-	// Subtitles / Auto-captions
+	// Subtitles / Auto-captions (fast ~5s even on 4-hour streams -> enables instant Transcript Hype!)
 	if meta.SubLang != "" {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.Broker.Log("analyzer", "info", fmt.Sprintf("Mengunduh auto-caption (%s)...", meta.SubLang))
 			if subPath, err := s.YT.DownloadSubtitles(ctx, proj.SourceURL, projDir, meta.SubLang, meta.IsAutoSub, settings); err == nil && subPath != "" {
 				proj.SubtitlePath = subPath
 				if cues, err := youtube.ParseSubtitleFile(subPath); err == nil {
 					subCues = cues
-					s.Broker.Log("analyzer", "success", fmt.Sprintf("Caption berhasil diparse: %d baris", len(cues)))
-				}
-			}
-		}()
-	}
-
-	// Live Chat Replay (Goldmine for Windah Basudara & livestream VODs!)
-	if includeChat && meta.HasLiveChat {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			update("scanning", "Mengunduh YouTube Live Chat Replay untuk deteksi momen meledak...")
-			chatCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-			defer cancel()
-			if chatPath, err := s.YT.DownloadLiveChat(chatCtx, proj.SourceURL, projDir, settings); err == nil && chatPath != "" {
-				proj.LiveChatPath = chatPath
-				if msgs, err := youtube.ParseLiveChatFile(chatPath); err == nil {
-					chatMsgs = msgs
-					s.Broker.Log("analyzer", "success", fmt.Sprintf("Live Chat diparse: %d pesan!", len(msgs)))
+					s.Broker.Log("analyzer", "success", fmt.Sprintf("Transkrip siap: %d baris ucapan!", len(cues)))
 				}
 			}
 		}()
@@ -542,7 +611,7 @@ func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat
 
 	wg.Wait()
 
-	// 3. Optional Full Video Download OR Lightweight Audio Track for Audio Loudness Spike Detection
+	// Optional Full Video Download OR Audio-only Peak Analysis
 	if downloadFull {
 		update("downloading", "Mengunduh video full MP4 (untuk scrub lokal + deteksi audio keras + render instan)...")
 		localMP4 := filepath.Join(projDir, "source.mp4")
@@ -554,7 +623,6 @@ func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat
 		})
 		if err == nil {
 			proj.LocalVideoPath = localMP4
-			// Grab an even sharper preview frame directly from the local video
 			_ = s.YT.GrabFrameFromLocalFile(ctx, localMP4, meta.Duration*0.20, filepath.Join(projDir, "preview.jpg"))
 			proj.PreviewFrame = filepath.Join(projDir, "preview.jpg")
 
@@ -566,9 +634,8 @@ func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat
 		} else {
 			s.Broker.Log("analyzer", "warn", "Download full gagal, lanjut mode Quick Scan: "+err.Error())
 		}
-	} else if includeAudio || (len(meta.Heatmap) == 0 && len(chatMsgs) == 0) {
-		// If video has NEITHER heatmap NOR live chat (e.g., brand new upload!), automatically download lightweight audio track for loudness peak detection!
-		update("scanning", "Heatmap & chat belum tersedia — menganalisis puncak audio untuk deteksi momen seru...")
+	} else if includeAudio || (len(meta.Heatmap) == 0 && len(subCues) == 0) {
+		update("scanning", "Menganalisis puncak audio untuk deteksi teriakan/momen seru...")
 		if audioPath, err := s.YT.DownloadAudioOnly(ctx, proj.SourceURL, filepath.Join(projDir, "audio.m4a"), settings); err == nil {
 			if energy, err := analyzer.AnalyzeAudioEnergy(ctx, s.Deps.GetStatus().FFmpegPath, audioPath, meta.Duration); err == nil {
 				audioEnergy = energy
@@ -578,36 +645,85 @@ func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat
 		}
 	}
 
-	// 4. Multi-Signal Hype Fusion!
-	update("scanning", "Menghitung Multi-Signal Hype Score (Heatmap + Chat + Audio)...")
+	// Publish Phase-1 results IMMEDIATELY so user can start previewing & clipping right away!
 	res := analyzer.DetectHype(analyzer.AnalysisInput{
 		DurationSec: proj.DurationSec,
 		Heatmap:     meta.Heatmap,
-		Chats:       chatMsgs,
 		AudioEnergy: audioEnergy,
 		Transcript:  subCues,
 		Chapters:    proj.Chapters,
 		Settings:    proj.DetectConfig,
 	})
 
-	s.cacheMu.Lock()
-	s.rawSignals[projectID] = &cachedSignals{
+	cs := &cachedSignals{
 		Heatmap:     meta.Heatmap,
-		Chats:       chatMsgs,
 		AudioEnergy: audioEnergy,
 		Transcript:  subCues,
 		StreamURL:   meta.StreamURL,
 	}
+	s.cacheMu.Lock()
+	s.rawSignals[projectID] = cs
 	s.cacheMu.Unlock()
 
 	proj.Timeline = res.Timeline
 	proj.Candidates = res.Candidates
 	proj.Signals = res.Signals
 	proj.Status = "ready"
-	proj.StatusMessage = fmt.Sprintf("Selesai! Ditemukan %d momen hits/ramai.", len(res.Candidates))
+	proj.StatusMessage = fmt.Sprintf("Siap! Ditemukan %d momen hits.", len(res.Candidates))
 	_ = s.Store.SaveProject(proj)
 	s.Broker.Publish("project_update", proj)
-	s.Broker.Log("analyzer", "success", fmt.Sprintf("Analisis selesai: '%s' -> %d kandidat klip!", proj.Title, len(res.Candidates)))
+	s.Broker.Log("analyzer", "success", fmt.Sprintf("Fase 1 selesai cepat: '%s' -> %d kandidat klip siap preview!", proj.Title, len(res.Candidates)))
+
+	// ============ PHASE 2: NON-BLOCKING BACKGROUND LIVE CHAT (Smart Guard!) ============
+	// Live chat replay on viral 4-hour streams (14M+ views) has 10,000+ fragments & takes 20+ mins.
+	// So we only auto-download live chat in background for streams <= 90 mins (with strict 90s process-tree kill!).
+	if includeChat && meta.HasLiveChat {
+		if meta.Duration > 5400 {
+			s.Broker.Log("analyzer", "info", fmt.Sprintf("VOD berdurasi %.0f menit (sangat panjang) — Live Chat dilewati otomatis agar tidak lemot; deteksi memakai Heatmap + Transkrip Hype!", meta.Duration/60))
+			return
+		}
+		go func() {
+			s.Broker.Log("analyzer", "info", "Fase 2 (Background): Memperkaya skor dengan YouTube Live Chat Replay (maks 90 dtk)...")
+			chatCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			chatPath, err := s.YT.DownloadLiveChat(chatCtx, proj.SourceURL, projDir, settings)
+			if err != nil || chatPath == "" {
+				s.Broker.Log("analyzer", "warn", "Background Live Chat selesai/timeout — hasil Fase 1 tetap aktif.")
+				return
+			}
+			msgs, err := youtube.ParseLiveChatFile(chatPath)
+			if err != nil || len(msgs) < 20 {
+				return
+			}
+			latestProj, ok := s.Store.GetProject(projectID)
+			if !ok {
+				return
+			}
+			latestProj.LiveChatPath = chatPath
+			s.cacheMu.Lock()
+			if cur, ok := s.rawSignals[projectID]; ok {
+				cur.Chats = msgs
+			}
+			s.cacheMu.Unlock()
+
+			upgraded := analyzer.DetectHype(analyzer.AnalysisInput{
+				DurationSec: latestProj.DurationSec,
+				Heatmap:     cs.Heatmap,
+				Chats:       msgs,
+				AudioEnergy: cs.AudioEnergy,
+				Transcript:  cs.Transcript,
+				Chapters:    latestProj.Chapters,
+				Settings:    latestProj.DetectConfig,
+			})
+			latestProj.Timeline = upgraded.Timeline
+			latestProj.Candidates = upgraded.Candidates
+			latestProj.Signals = upgraded.Signals
+			latestProj.StatusMessage = fmt.Sprintf("Diperkaya dengan %d pesan Live Chat! %d momen hits ditemukan.", len(msgs), len(upgraded.Candidates))
+			_ = s.Store.SaveProject(latestProj)
+			s.Broker.Publish("project_update", latestProj)
+			s.Broker.Log("analyzer", "success", fmt.Sprintf("Fase 2 Live Chat selesai: %d pesan ditambahkan!", len(msgs)))
+		}()
+	}
 }
 
 func (s *Server) loadCachedSignals(proj *model.Project) *cachedSignals {
@@ -942,4 +1058,126 @@ func (s *Server) handleServeAudio(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRegenerateAudio(w http.ResponseWriter, r *http.Request) {
 	s.Audio.EnsureBuiltIns()
 	writeJSON(w, http.StatusOK, s.Audio.List())
+}
+
+// --- Human-in-the-Loop (HITL) Review & Autopilot Scheduler ---
+
+func (s *Server) handleReviewJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	job, ok := s.Store.GetJob(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "Job tidak ditemukan")
+		return
+	}
+	var req struct {
+		ReviewStatus       string `json:"reviewStatus"` // approved, rejected, pending_review
+		ReviewNote         string `json:"reviewNote"`
+		PostCaption        string `json:"postCaption"`
+		DeleteFileOnReject bool   `json:"deleteFileOnReject"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "Format JSON review tidak valid")
+		return
+	}
+	if req.ReviewStatus != "approved" && req.ReviewStatus != "rejected" && req.ReviewStatus != "pending_review" {
+		writeErr(w, http.StatusBadRequest, "reviewStatus harus approved, rejected, atau pending_review")
+		return
+	}
+	job.ReviewStatus = req.ReviewStatus
+	if req.ReviewNote != "" {
+		job.ReviewNote = req.ReviewNote
+	}
+	if strings.TrimSpace(req.PostCaption) != "" {
+		job.PostCaption = req.PostCaption
+	}
+	if req.ReviewStatus == "rejected" && req.DeleteFileOnReject && job.OutputPath != "" {
+		_ = os.Remove(job.OutputPath)
+		job.OutputPath = ""
+	}
+	if err := s.Store.SaveJob(job); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.Broker.Publish("job_update", job)
+	s.Broker.Log("review", "success", fmt.Sprintf("Human Review [%s]: %s", strings.ToUpper(req.ReviewStatus), job.Title))
+
+	// Fire optional n8n Approve Webhook when human approves a clip!
+	if req.ReviewStatus == "approved" && job.AutopilotID != "" {
+		if rule, ok := s.Store.GetAutopilot(job.AutopilotID); ok && rule.ApproveWebhookURL != "" {
+			autopilot.FireApproveWebhook(rule.ApproveWebhookURL, job)
+		}
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) handleListAutopilots(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.Store.ListAutopilots())
+}
+
+func (s *Server) handleCreateAutopilot(w http.ResponseWriter, r *http.Request) {
+	var rule model.AutopilotRule
+	if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+		writeErr(w, http.StatusBadRequest, "Format JSON autopilot tidak valid")
+		return
+	}
+	if strings.TrimSpace(rule.Name) == "" || strings.TrimSpace(rule.ChannelURL) == "" {
+		writeErr(w, http.StatusBadRequest, "Nama rule & Channel URL wajib diisi")
+		return
+	}
+	if rule.ID == "" {
+		rule.ID = fmt.Sprintf("auto-%d", time.Now().UnixNano())
+	}
+	if err := s.Store.SaveAutopilot(&rule); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.Broker.Publish("autopilot_update", &rule)
+	writeJSON(w, http.StatusCreated, rule)
+}
+
+func (s *Server) handleUpdateAutopilot(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	ex, ok := s.Store.GetAutopilot(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "Autopilot rule tidak ditemukan")
+		return
+	}
+	var updated model.AutopilotRule
+	if err := json.NewDecoder(r.Body).Decode(&updated); err != nil {
+		writeErr(w, http.StatusBadRequest, "Format JSON tidak valid")
+		return
+	}
+	updated.ID = ex.ID
+	if len(updated.ProcessedVideoIDs) == 0 && len(ex.ProcessedVideoIDs) > 0 {
+		updated.ProcessedVideoIDs = ex.ProcessedVideoIDs
+	}
+	if updated.Enabled && updated.NextRunAt == nil {
+		next := time.Now().Add(time.Duration(updated.IntervalMinutes) * time.Minute)
+		updated.NextRunAt = &next
+	}
+	if err := s.Store.SaveAutopilot(&updated); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.Broker.Publish("autopilot_update", &updated)
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) handleDeleteAutopilot(w http.ResponseWriter, r *http.Request) {
+	_ = s.Store.DeleteAutopilot(r.PathValue("id"))
+	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
+}
+
+func (s *Server) handleRunAutopilot(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	rule, ok := s.Store.GetAutopilot(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "Autopilot rule tidak ditemukan")
+		return
+	}
+	go s.Autopilot.RunRule(id)
+	writeJSON(w, http.StatusAccepted, map[string]interface{}{
+		"started": true,
+		"rule":    rule,
+	})
 }

@@ -180,13 +180,14 @@ type DetectionSettings struct {
 
 // SignalAvailability tracks which signals were successfully collected for a video.
 type SignalAvailability struct {
-	HasHeatmap    bool `json:"hasHeatmap"`
-	HasLiveChat   bool `json:"hasLiveChat"`
-	HasAudio      bool `json:"hasAudio"`
-	HasSubtitles  bool `json:"hasSubtitles"`
-	ChatMsgCount  int  `json:"chatMsgCount"`
-	SubCueCount   int  `json:"subCueCount"`
-	HeatmapPoints int  `json:"heatmapPoints"`
+	HasHeatmap        bool `json:"hasHeatmap"`
+	HasLiveChat       bool `json:"hasLiveChat"`
+	HasAudio          bool `json:"hasAudio"`
+	HasSubtitles      bool `json:"hasSubtitles"`
+	HasTranscriptHype bool `json:"hasTranscriptHype"`
+	ChatMsgCount      int  `json:"chatMsgCount"`
+	SubCueCount       int  `json:"subCueCount"`
+	HeatmapPoints     int  `json:"heatmapPoints"`
 }
 
 // Project represents an analyzed YouTube video/VOD.
@@ -270,9 +271,42 @@ type RenderJob struct {
 	PostCaption   string          `json:"postCaption"`
 	HashtagLine   string          `json:"hashtagLine"`
 	Compliance    ComplianceCheck `json:"compliance"`
+	ReviewStatus  string          `json:"reviewStatus"` // "", "pending_review", "approved", "rejected"
+	ReviewNote    string          `json:"reviewNote,omitempty"`
+	AutopilotID   string          `json:"autopilotId,omitempty"`
 	Error         string          `json:"error,omitempty"`
 	CreatedAt     time.Time       `json:"createdAt"`
 	CompletedAt   *time.Time      `json:"completedAt,omitempty"`
+}
+
+// AutopilotRule defines a scheduled autonomous channel watcher & HITL clipper workflow (n8n-style).
+type AutopilotRule struct {
+	ID                string     `json:"id"`
+	Name              string     `json:"name"`
+	Enabled           bool       `json:"enabled"`
+	ChannelURL        string     `json:"channelUrl"`        // e.g. https://www.youtube.com/@WindahBasudara/streams
+	KeywordFilter     []string   `json:"keywordFilter"`     // Match any keyword in title (empty = match all)
+	CampaignID        string     `json:"campaignId"`        // Campaign preset to apply
+	IntervalMinutes   int        `json:"intervalMinutes"`   // Schedule interval (default 60)
+	MaxVideosPerRun   int        `json:"maxVideosPerRun"`   // Default 1
+	TopClipsPerVideo  int        `json:"topClipsPerVideo"`  // Default 5
+	NotifyWebhookURL  string     `json:"notifyWebhookUrl"`  // n8n Webhook or Discord Webhook when clips ready for review
+	ApproveWebhookURL string     `json:"approveWebhookUrl"` // Optional n8n Webhook triggered when human clicks Approve
+	ProcessedVideoIDs []string   `json:"processedVideoIds"`
+	LastRunAt         *time.Time `json:"lastRunAt,omitempty"`
+	NextRunAt         *time.Time `json:"nextRunAt,omitempty"`
+	LastStatus        string     `json:"lastStatus"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	UpdatedAt         time.Time  `json:"updatedAt"`
+}
+
+// ChannelVideo is a lightweight video entry returned by channel scanning.
+type ChannelVideo struct {
+	ID         string  `json:"id"`
+	Title      string  `json:"title"`
+	URL        string  `json:"url"`
+	Duration   float64 `json:"duration"`
+	LiveStatus string  `json:"liveStatus"`
 }
 
 // AppSettings stores user-configurable runtime settings.

@@ -20,6 +20,7 @@
 
       <nav class="nav-tabs" id="navTabs">
         <button class="nav-btn active" data-tab="studio">🎬 Studio Clipper</button>
+        <button class="nav-btn" data-tab="autopilot">🤖 Autopilot &amp; Review <span class="pill-count pill-amber" id="navReviewCount">0</span></button>
         <button class="nav-btn" data-tab="audio">🎵 BGM &amp; SFX Pack</button>
         <button class="nav-btn" data-tab="campaigns">🏆 Campaign Rules</button>
         <button class="nav-btn" data-tab="queue">📦 Queue &amp; Clips <span class="pill-count" id="navJobCount">0</span></button>
@@ -56,8 +57,8 @@
         </div>
 
         <div class="intake-options-row">
-          <label class="check-inline" title="Analisa YouTube Live Chat Replay untuk menangkap ledakan komentar (WKWK, NJIR, GILA, dll)">
-            <input type="checkbox" id="optIncludeChat" checked /> Analisis Live Chat Replay
+          <label class="check-inline" title="Berjalan di background tanpa memblokir scan (otomatis dilewati pada VOD >90 menit agar super cepat)">
+            <input type="checkbox" id="optIncludeChat" checked /> Live Chat Background (≤90m)
           </label>
           <label class="check-inline" title="Download audio ringan untuk deteksi teriakan/tawa keras (otomatis aktif jika heatmap kosong)">
             <input type="checkbox" id="optIncludeAudio" /> Analisis Puncak Audio
@@ -429,6 +430,89 @@
           </div>
         </div>
       </div>
+    </main>
+
+    <!-- ==================== TAB: AUTOPILOT & HUMAN-IN-THE-LOOP REVIEW ==================== -->
+    <main id="tab-autopilot" class="tab-panel">
+      <div class="campaigns-layout">
+        <aside class="card camp-sidebar">
+          <div class="card-head">
+            <h3>🤖 Jadwal Autopilot</h3>
+            <button class="btn btn-xs btn-primary" id="btnNewAutopilot">+ Rule</button>
+          </div>
+          <p class="muted text-xs" style="margin:0 0 10px;">
+            Pantau channel YouTube terjadwal otomatis, render Top N klip ke Review Inbox, lalu tunggu analisis &amp; approval kamu!
+          </p>
+          <div id="autopilotList" class="camp-list"></div>
+        </aside>
+
+        <section class="card" id="autopilotEditor">
+          <div class="card-head">
+            <div>
+              <h2 id="autoEditorTitle">⚙️ Pengaturan Autopilot Rule (n8n-Style)</h2>
+              <div class="muted text-xs" id="autoStatusLine">—</div>
+            </div>
+            <div class="head-actions">
+              <button class="btn btn-sm btn-accent" id="btnRunAutopilotNow">▶ Jalankan Sekarang</button>
+              <button class="btn btn-sm btn-primary" id="btnSaveAutopilot">💾 Simpan Rule</button>
+              <button class="btn btn-sm btn-danger-ghost" id="btnDeleteAutopilot">🗑️</button>
+            </div>
+          </div>
+
+          <div class="form-grid-2">
+            <label>Nama Jadwal / Rule
+              <input type="text" id="aName" class="input" placeholder="Windah Basudara — GTA VI Auto-Watcher" />
+            </label>
+            <label class="check-box" style="margin-top:18px;">
+              <input type="checkbox" id="aEnabled" />
+              <span><strong>Aktifkan Jadwal Otomatis</strong> (jalan di background)</span>
+            </label>
+            <label>URL Channel YouTube (/streams atau /videos)
+              <input type="text" id="aChannelUrl" class="input" placeholder="https://www.youtube.com/@WindahBasudara/streams" />
+            </label>
+            <label>Filter Keyword Judul (pisahkan koma, kosong = semua video)
+              <input type="text" id="aKeywords" class="input" placeholder="GTA VI, GTA 6, Grand Theft Auto" />
+            </label>
+            <label>Campaign Preset (Watermark + Outro + Layout + FX)
+              <select id="aCampaignId" class="input"></select>
+            </label>
+            <label>Interval Cek Jadwal (Menit)
+              <input type="number" id="aInterval" class="input" min="5" max="1440" value="60" />
+            </label>
+            <label>Maks VOD Baru per Siklus
+              <input type="number" id="aMaxVideos" class="input" min="1" max="5" value="1" />
+            </label>
+            <label>Auto-Render Top N Klip ke Review Inbox
+              <input type="number" id="aTopClips" class="input" min="1" max="15" value="5" />
+            </label>
+          </div>
+
+          <div class="form-grid-2 mt-12">
+            <label>Notify Webhook URL — n8n / Discord (Opsional: notif saat klip siap review)
+              <input type="text" id="aNotifyWebhook" class="input" placeholder="https://discord.com/api/webhooks/... atau https://n8n.../webhook/klipforge-ready-review" />
+            </label>
+            <label>Approve Webhook URL — n8n (Opsional: terpicu saat kamu klik Approve!)
+              <input type="text" id="aApproveWebhook" class="input" placeholder="https://n8n.../webhook/klipforge-approved" />
+            </label>
+          </div>
+        </section>
+      </div>
+
+      <!-- Human-in-the-Loop Final Review & Approval Inbox -->
+      <section class="card">
+        <div class="card-head">
+          <div>
+            <h2>🕵️ Human-in-the-Loop Review Inbox (Analisis Akhir Kamu)</h2>
+            <div class="muted text-xs">Semua klip hasil Autopilot (atau yang ditandai review) menunggu keputusan kamu: <strong>Approve (Siap Upload)</strong> atau <strong>Reject</strong>.</div>
+          </div>
+          <div class="head-actions">
+            <button class="btn btn-xs btn-secondary review-filter active" data-rfilter="pending_review">⏳ Menunggu Review (<span id="cntPending">0</span>)</button>
+            <button class="btn btn-xs btn-ghost review-filter" data-rfilter="approved">✅ Approved (<span id="cntApproved">0</span>)</button>
+            <button class="btn btn-xs btn-ghost review-filter" data-rfilter="rejected">❌ Rejected (<span id="cntRejected">0</span>)</button>
+          </div>
+        </div>
+        <div id="reviewInboxList" class="jobs-grid"></div>
+      </section>
     </main>
 
     <!-- ==================== TAB: AUDIO & SFX LIBRARY ==================== -->

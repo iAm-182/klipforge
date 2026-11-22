@@ -1,0 +1,143 @@
+{
+  "name": "KlipForge Autonomous Clipper (Human-in-the-Loop)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "node-schedule",
+      "name": "Schedule Every 1 Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [220, 260]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://klip.breakthematrix.id/api/autopilot/auto-windah-gtavi/run",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "node-trigger-autopilot",
+      "name": "Trigger KlipForge Autopilot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 260]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "klipforge-ready-review",
+        "options": {}
+      },
+      "id": "node-webhook-ready",
+      "name": "Webhook: Clips Ready For Human Review",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [220, 480]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DISCORD_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"content\": \"🎬 **{{ $json.body.clipsQueued }} Klip Baru Siap Analisis Akhir!**\\nRule: {{ $json.body.ruleName }}\\nBuka Review Inbox: https://klip.breakthematrix.id\"\n}",
+        "options": {}
+      },
+      "id": "node-notify-human",
+      "name": "Notify Human (Discord / Replace with Telegram)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 480]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "klipforge-approved",
+        "options": {}
+      },
+      "id": "node-webhook-approved",
+      "name": "Webhook: Human Clicked APPROVE",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [220, 700]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "status",
+              "value": "APPROVED_BY_HUMAN"
+            },
+            {
+              "name": "title",
+              "value": "={{ $json.body.title }}"
+            },
+            {
+              "name": "caption",
+              "value": "={{ $json.body.postCaption }}"
+            },
+            {
+              "name": "mp4Url",
+              "value": "={{ $json.body.videoUrl }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-format-publish",
+      "name": "Prepare Upload Payload (Connect YT/TikTok/Sheets Here)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [520, 700]
+    }
+  ],
+  "connections": {
+    "Schedule Every 1 Hour": {
+      "main": [
+        [
+          {
+            "node": "Trigger KlipForge Autopilot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Clips Ready For Human Review": {
+      "main": [
+        [
+          {
+            "node": "Notify Human (Discord / Replace with Telegram)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Human Clicked APPROVE": {
+      "main": [
+        [
+          {
+            "node": "Prepare Upload Payload (Connect YT/TikTok/Sheets Here)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

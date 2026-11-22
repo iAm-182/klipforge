@@ -6,6 +6,9 @@
     deps: null,
     settings: null,
     campaigns: [],
+    autopilots: [],
+    editingAutopilotId: '',
+    reviewFilter: 'pending_review',
     audioAssets: [],
     customSFXCues: [
       { assetId: 'sfx-whoosh', atSec: 0.1, atPeak: false, volume: 0.8 },
@@ -125,6 +128,8 @@
           onProjectUpdate(msg.payload);
         } else if (msg.type === 'job_update') {
           onJobUpdate(msg.payload);
+        } else if (msg.type === 'autopilot_update') {
+          onAutopilotUpdate(msg.payload);
         }
       } catch (e) {}
     };
@@ -154,6 +159,7 @@
     else state.jobs.unshift(job);
     updateJobBadge();
     renderJobs();
+    renderReviewInbox();
     if (job.status === 'done') {
       toast(`Clip selesai: ${job.title}`, 'ok');
     } else if (job.status === 'error') {
@@ -161,16 +167,27 @@
     }
   }
 
+  function onAutopilotUpdate(rule) {
+    const idx = state.autopilots.findIndex((r) => r.id === rule.id);
+    if (idx >= 0) state.autopilots[idx] = rule;
+    else state.autopilots.push(rule);
+    renderAutopilotList();
+    if (state.editingAutopilotId === rule.id) {
+      $('autoStatusLine').textContent = rule.lastStatus || '—';
+    }
+  }
+
   // ==================== Initial Data Load ====================
   async function init() {
     connectSSE();
     try {
-      const [status, campaigns, projects, jobs, audioAssets] = await Promise.all([
+      const [status, campaigns, projects, jobs, audioAssets, autopilots] = await Promise.all([
         api('/api/status'),
         api('/api/campaigns'),
         api('/api/projects'),
         api('/api/jobs'),
         api('/api/audio'),
+        api('/api/autopilot'),
       ]);
       state.deps = status.deps;
       state.settings = status.settings;
@@ -178,6 +195,7 @@
       state.projects = projects || [];
       state.jobs = jobs || [];
       state.audioAssets = audioAssets || [];
+      state.autopilots = autopilots || [];
 
       renderDepsAndSettings();
       renderAudioLibrary();
@@ -190,6 +208,12 @@
       renderCampaignList();
       loadCampaignIntoEditor(state.editingCampaignId);
 
+      if (state.autopilots.length > 0) {
+        state.editingAutopilotId = state.autopilots[0].id;
+      }
+      renderAutopilotList();
+      loadAutopilotIntoEditor(state.editingAutopilotId);
+
       renderProjectDropdown();
       if (state.projects.length > 0) {
         state.activeProject = state.projects[0];
@@ -198,6 +222,7 @@
       }
       updateJobBadge();
       renderJobs();
+      renderReviewInbox();
     } catch (e) {
       const badge = $('depBadge');
       if (badge) {
@@ -529,9 +554,9 @@
     const sig = p.signals || {};
     $('signalPills').innerHTML = `
       <span class="sig-pill ${sig.hasHeatmap ? '' : 'off'}">🔥 Heatmap: ${sig.hasHeatmap ? sig.heatmapPoints + ' pts' : 'N/A'}</span>
+      <span class="sig-pill ${sig.hasTranscriptHype ? '' : 'off'}">🎙️ Transcript Hype: ${sig.hasTranscriptHype ? sig.subCueCount + ' baris' : 'N/A'}</span>
       <span class="sig-pill ${sig.hasLiveChat ? '' : 'off'}">💬 Live Chat: ${sig.hasLiveChat ? sig.chatMsgCount.toLocaleString() + ' msg' : 'N/A'}</span>
       <span class="sig-pill ${sig.hasAudio ? '' : 'off'}">🔊 Audio Peak: ${sig.hasAudio ? 'Aktif' : 'Belum'}</span>
-      <span class="sig-pill ${sig.hasSubtitles ? '' : 'off'}">📝 Subtitles: ${sig.hasSubtitles ? sig.subCueCount + ' baris' : 'N/A'}</span>
     `;
 
     $('btnDownloadFullProj').classList.toggle('hidden', !!p.localVideoPath);
@@ -1779,6 +1804,229 @@
     state.audioAssets = await api('/api/audio/regenerate', { method: 'POST' });
     renderAudioLibrary();
     toast('Built-in SFX & BGM Starter Pack siap!', 'ok');
+  });
+
+  // ==================== Autopilot Scheduler & HITL Review Inbox ====================
+  function renderAutopilotList() {
+    const box = $('autopilotList');
+    if (!box) return;
+    // Also populate campaign selector inside autopilot editor
+    const campSel = $('aCampaignId');
+    if (campSel) {
+      const prev = campSel.value;
+      campSel.innerHTML = '';
+      state.campaigns.forEach((c) => {
+        const o = document.createElement('option');
+        o.value = c.id;
+        o.textContent = c.name;
+        campSel.appendChild(o);
+      });
+      if (prev) campSel.value = prev;
+    }
+
+    box.innerHTML = '';
+    state.autopilots.forEach((r) => {
+      const el = document.createElement('div');
+      el.className = 'camp-item' + (r.id === state.editingAutopilotId ? ' active' : '');
+      el.innerHTML = `
+        <div class="camp-item-name">${r.enabled ? '🟢' : '⚪'} ${escapeHtml(r.name)}</div>
+        <div class="camp-item-meta">Tiap ${r.intervalMinutes}m · Top ${r.topClipsPerVideo} klip · ${(r.processedVideoIds || []).length} VOD diproses</div>
+      `;
+      el.addEventListener('click', () => {
+        state.editingAutopilotId = r.id;
+        renderAutopilotList();
+        loadAutopilotIntoEditor(r.id);
+      });
+      box.appendChild(el);
+    });
+  }
+
+  function loadAutopilotIntoEditor(id) {
+    const r = state.autopilots.find((x) => x.id === id);
+    if (!r) return;
+    $('autoEditorTitle').textContent = `🤖 ${r.name}`;
+    $('autoStatusLine').textContent = `${r.lastStatus || 'Siap'} ${r.nextRunAt && r.enabled ? '· Cek berikutnya: ' + new Date(r.nextRunAt).toLocaleTimeString('id-ID') : ''}`;
+    $('aName').value = r.name || '';
+    $('aEnabled').checked = !!r.enabled;
+    $('aChannelUrl').value = r.channelUrl || '';
+    $('aKeywords').value = (r.keywordFilter || []).join(', ');
+    if (r.campaignId) $('aCampaignId').value = r.campaignId;
+    $('aInterval').value = r.intervalMinutes || 60;
+    $('aMaxVideos').value = r.maxVideosPerRun || 1;
+    $('aTopClips').value = r.topClipsPerVideo || 5;
+    $('aNotifyWebhook').value = r.notifyWebhookUrl || '';
+    $('aApproveWebhook').value = r.approveWebhookUrl || '';
+  }
+
+  function renderReviewInbox() {
+    const box = $('reviewInboxList');
+    if (!box) return;
+    const pending = state.jobs.filter((j) => j.reviewStatus === 'pending_review' || (!j.reviewStatus && j.status === 'done'));
+    const approved = state.jobs.filter((j) => j.reviewStatus === 'approved');
+    const rejected = state.jobs.filter((j) => j.reviewStatus === 'rejected');
+
+    $('cntPending').textContent = pending.length;
+    $('cntApproved').textContent = approved.length;
+    $('cntRejected').textContent = rejected.length;
+    $('navReviewCount').textContent = pending.length;
+
+    const list = state.reviewFilter === 'approved' ? approved : (state.reviewFilter === 'rejected' ? rejected : pending);
+    if (list.length === 0) {
+      box.innerHTML = `<div class="muted" style="padding:20px;">Tidak ada klip pada kategori ini. Aktifkan Autopilot atau render klip dari Studio!</div>`;
+      return;
+    }
+
+    box.innerHTML = '';
+    list.forEach((j) => {
+      const card = document.createElement('div');
+      card.className = 'job-card';
+      const comp = j.compliance || {};
+      const badges = [];
+      if (comp.watermarkApplied) badges.push('<span class="comp-ok">✅ Watermark</span>');
+      if (comp.outroApplied) badges.push('<span class="comp-ok">✅ Outro 3s</span>');
+      if (comp.hasValueAdd) badges.push('<span class="comp-ok">✅ Value-Add</span>');
+      (comp.warnings || []).forEach((w) => badges.push(`<span class="comp-warn">⚠️ ${escapeHtml(w)}</span>`));
+
+      card.innerHTML = `
+        <div class="job-head">
+          <div>
+            <div class="job-title">${escapeHtml(j.title)}</div>
+            <div class="text-xs muted">${escapeHtml(j.campaignName)} · ${j.finalDuration ? j.finalDuration.toFixed(1) + 's' : j.stage} · ${fmtBytes(j.fileSizeBytes)}</div>
+          </div>
+          <span class="job-status st-${j.status}">${j.reviewStatus || j.status}</span>
+        </div>
+        ${j.status === 'done' && j.outputPath ? `<video class="job-video" src="/api/jobs/${encodeURIComponent(j.id)}/video" controls preload="metadata"></video>` : `<div class="progress-bar"><div class="progress-fill" style="width:${Math.round(j.progress || 0)}%"></div></div>`}
+        <div class="compliance-row">${badges.join('')}</div>
+        <label class="text-xs">Edit Caption / Hashtag Sebelum Approve
+          <textarea class="input textarea rev-caption" rows="3">${escapeHtml(j.postCaption || '')}</textarea>
+        </label>
+        <input type="text" class="input input-sm rev-note" value="${escapeAttr(j.reviewNote || '')}" placeholder="Catatan analisis kamu (opsional)..." />
+        <div class="job-actions">
+          <button class="btn btn-xs btn-accent btn-rev-approve">✅ Approve (Siap Upload)</button>
+          <button class="btn btn-xs btn-danger-ghost btn-rev-reject">❌ Reject &amp; Hapus</button>
+          ${j.status === 'done' && j.outputPath ? `<a class="btn btn-xs btn-secondary" href="/api/jobs/${encodeURIComponent(j.id)}/video?download=1">⬇️ MP4</a>` : ''}
+          <button class="btn btn-xs btn-ghost btn-rev-copy">📋 Copy Caption</button>
+        </div>
+      `;
+
+      card.querySelector('.btn-rev-approve').addEventListener('click', async () => {
+        const cap = card.querySelector('.rev-caption').value;
+        const note = card.querySelector('.rev-note').value;
+        await api(`/api/jobs/${encodeURIComponent(j.id)}/review`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reviewStatus: 'approved', postCaption: cap, reviewNote: note }),
+        });
+        toast('✅ Klip Approved & siap upload!', 'ok');
+      });
+      card.querySelector('.btn-rev-reject').addEventListener('click', async () => {
+        if (!confirm('Reject dan hapus file MP4 klip ini?')) return;
+        const note = card.querySelector('.rev-note').value;
+        await api(`/api/jobs/${encodeURIComponent(j.id)}/review`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reviewStatus: 'rejected', reviewNote: note, deleteFileOnReject: true }),
+        });
+        toast('❌ Klip ditolak & file dihapus.', 'info');
+      });
+      card.querySelector('.btn-rev-copy').addEventListener('click', () => {
+        copyText(card.querySelector('.rev-caption').value, 'Caption + Hashtags disalin!');
+      });
+
+      box.appendChild(card);
+    });
+  }
+
+  document.querySelectorAll('.review-filter').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.review-filter').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.reviewFilter = btn.dataset.rfilter;
+      renderReviewInbox();
+    });
+  });
+
+  $('btnNewAutopilot').addEventListener('click', async () => {
+    const name = prompt('Nama Autopilot Rule baru (contoh: MiawAug Auto-Watcher):');
+    if (!name || !name.trim()) return;
+    try {
+      const created = await api('/api/autopilot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: name.trim(),
+          enabled: false,
+          channelUrl: 'https://www.youtube.com/@WindahBasudara/streams',
+          keywordFilter: [],
+          campaignId: state.activeCampaignId,
+          intervalMinutes: 60,
+          maxVideosPerRun: 1,
+          topClipsPerVideo: 5,
+        }),
+      });
+      state.autopilots.push(created);
+      state.editingAutopilotId = created.id;
+      renderAutopilotList();
+      loadAutopilotIntoEditor(created.id);
+      toast('Rule Autopilot dibuat!', 'ok');
+    } catch (e) {
+      toast(e.message, 'err');
+    }
+  });
+
+  $('btnSaveAutopilot').addEventListener('click', async () => {
+    const orig = state.autopilots.find((x) => x.id === state.editingAutopilotId);
+    if (!orig) return;
+    const kws = $('aKeywords').value.split(',').map((s) => s.trim()).filter(Boolean);
+    const payload = {
+      ...orig,
+      name: $('aName').value.trim() || orig.name,
+      enabled: $('aEnabled').checked,
+      channelUrl: $('aChannelUrl').value.trim(),
+      keywordFilter: kws,
+      campaignId: $('aCampaignId').value,
+      intervalMinutes: parseInt($('aInterval').value, 10) || 60,
+      maxVideosPerRun: parseInt($('aMaxVideos').value, 10) || 1,
+      topClipsPerVideo: parseInt($('aTopClips').value, 10) || 5,
+      notifyWebhookUrl: $('aNotifyWebhook').value.trim(),
+      approveWebhookUrl: $('aApproveWebhook').value.trim(),
+    };
+    try {
+      const saved = await api(`/api/autopilot/${encodeURIComponent(orig.id)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      onAutopilotUpdate(saved);
+      loadAutopilotIntoEditor(saved.id);
+      toast('Jadwal Autopilot tersimpan!', 'ok');
+    } catch (e) {
+      toast(e.message, 'err');
+    }
+  });
+
+  $('btnRunAutopilotNow').addEventListener('click', async () => {
+    if (!state.editingAutopilotId) return;
+    try {
+      await api(`/api/autopilot/${encodeURIComponent(state.editingAutopilotId)}/run`, { method: 'POST' });
+      toast('🤖 Siklus Autopilot dijalankan sekarang!', 'info');
+    } catch (e) {
+      toast(e.message, 'err');
+    }
+  });
+
+  $('btnDeleteAutopilot').addEventListener('click', async () => {
+    if (state.autopilots.length <= 1) {
+      toast('Minimal sisakan 1 Autopilot rule.', 'err');
+      return;
+    }
+    if (!confirm('Hapus rule Autopilot ini?')) return;
+    await api(`/api/autopilot/${encodeURIComponent(state.editingAutopilotId)}`, { method: 'DELETE' });
+    state.autopilots = state.autopilots.filter((x) => x.id !== state.editingAutopilotId);
+    state.editingAutopilotId = state.autopilots[0].id;
+    renderAutopilotList();
+    loadAutopilotIntoEditor(state.editingAutopilotId);
+    toast('Rule Autopilot dihapus.', 'info');
   });
 
   window.addEventListener('resize', () => {

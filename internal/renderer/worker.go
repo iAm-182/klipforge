@@ -54,6 +54,11 @@ func NewWorkerPool(st *store.Store, d *deps.Manager, yt *youtube.Client, audioLi
 
 // Enqueue creates and queues a new RenderJob.
 func (wp *WorkerPool) Enqueue(opts model.RenderOptions) (*model.RenderJob, error) {
+	return wp.EnqueueWithReview(opts, "", "")
+}
+
+// EnqueueWithReview creates a RenderJob optionally tagged for Human-in-the-Loop (HITL) Autopilot Review.
+func (wp *WorkerPool) EnqueueWithReview(opts model.RenderOptions, reviewStatus, autopilotID string) (*model.RenderJob, error) {
 	proj, ok := wp.Store.GetProject(opts.ProjectID)
 	if !ok {
 		return nil, fmt.Errorf("project tidak ditemukan: %s", opts.ProjectID)
@@ -121,6 +126,8 @@ func (wp *WorkerPool) Enqueue(opts model.RenderOptions) (*model.RenderJob, error
 		PostCaption:  caption,
 		HashtagLine:  hashtags,
 		Compliance:   compliance,
+		ReviewStatus: reviewStatus,
+		AutopilotID:  autopilotID,
 		CreatedAt:    time.Now(),
 	}
 

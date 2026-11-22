@@ -90,6 +90,8 @@ html, body {
   padding: 1px 7px;
   border-radius: 99px;
 }
+.pill-amber { background: var(--amber); color: #0b0f17; font-weight: 800; }
+.review-filter.active { background: rgba(99, 102, 241, 0.28); border-color: var(--primary-hi); color: #fff; }
 
 .topbar-right { display: flex; align-items: center; gap: 10px; }
 .status-dot {

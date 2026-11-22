@@ -53,6 +53,9 @@ func (c *Client) baseArgs(settings model.AppSettings) []string {
 		"--no-playlist",
 		"--no-warnings",
 	}
+	if _, err := exec.LookPath("node"); err == nil {
+		args = append(args, "--js-runtimes", "node")
+	}
 	if dir := c.Deps.FFmpegDir(); dir != "" {
 		args = append(args, "--ffmpeg-location", dir)
 	}
@@ -64,6 +67,64 @@ func (c *Client) baseArgs(settings model.AppSettings) []string {
 		args = append(args, "--cookies-from-browser", settings.CookiesBrowser)
 	}
 	return args
+}
+
+// FetchChannelVideos quickly lists the latest N videos/streams from a YouTube channel URL using --flat-playlist (~3s).
+func (c *Client) FetchChannelVideos(ctx context.Context, channelURL string, limit int, settings model.AppSettings) ([]model.ChannelVideo, error) {
+	ytBin := c.Deps.GetStatus().YtDlpPath
+	if ytBin == "" {
+		return nil, fmt.Errorf("yt-dlp tidak ditemukan")
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	args := []string{
+		"--flat-playlist",
+		"--playlist-end", strconv.Itoa(limit),
+		"--no-warnings",
+		"-J",
+		channelURL,
+	}
+	if _, err := exec.LookPath("node"); err == nil {
+		args = append(args, "--js-runtimes", "node")
+	}
+	cmd := exec.CommandContext(ctx, ytBin, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("gagal scan channel: %s", strings.TrimSpace(stderr.String()))
+	}
+	var parsed struct {
+		Entries []struct {
+			ID         string  `json:"id"`
+			Title      string  `json:"title"`
+			URL        string  `json:"url"`
+			Duration   float64 `json:"duration"`
+			LiveStatus string  `json:"live_status"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &parsed); err != nil {
+		return nil, err
+	}
+	var out []model.ChannelVideo
+	for _, e := range parsed.Entries {
+		if e.ID == "" {
+			continue
+		}
+		u := e.URL
+		if u == "" || !strings.HasPrefix(u, "http") {
+			u = "https://www.youtube.com/watch?v=" + e.ID
+		}
+		out = append(out, model.ChannelVideo{
+			ID:         e.ID,
+			Title:      e.Title,
+			URL:        u,
+			Duration:   e.Duration,
+			LiveStatus: e.LiveStatus,
+		})
+	}
+	return out, nil
 }
 
 // FetchMetadata extracts video metadata, Most Replayed heatmap, chapters, and available chat/subtitles.
@@ -196,7 +257,7 @@ func (c *Client) FetchMetadata(ctx context.Context, videoURL string, settings mo
 	return meta, nil
 }
 
-// DownloadLiveChat downloads the YouTube live chat replay JSON into destDir.
+// DownloadLiveChat downloads the YouTube live chat replay JSON into destDir with proper Windows process-tree timeout.
 func (c *Client) DownloadLiveChat(ctx context.Context, videoURL, destDir string, settings model.AppSettings) (string, error) {
 	outTmpl := filepath.Join(destDir, "source.%(ext)s")
 	args := append(c.baseArgs(settings),
@@ -207,11 +268,28 @@ func (c *Client) DownloadLiveChat(ctx context.Context, videoURL, destDir string,
 		videoURL,
 	)
 
-	cmd := exec.CommandContext(ctx, c.Deps.GetStatus().YtDlpPath, args...)
+	cmd := exec.Command(c.Deps.GetStatus().YtDlpPath, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("download live chat gagal: %s", strings.TrimSpace(stderr.String()))
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return "", fmt.Errorf("download live chat gagal: %s", strings.TrimSpace(stderr.String()))
+		}
+	case <-ctx.Done():
+		// Kill entire process tree on Windows so PyInstaller yt-dlp child doesn't linger!
+		if cmd.Process != nil {
+			_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run()
+		}
+		<-done
+		return "", fmt.Errorf("download live chat melebihi batas waktu (VOD terlalu besar)")
 	}
 
 	matches, _ := filepath.Glob(filepath.Join(destDir, "*.live_chat.json"))

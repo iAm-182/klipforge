@@ -39,7 +39,16 @@ var hypeKeywords = []string{
 	"😂", "🤣", "😭", "🔥", "💀", "😱", "🤯", "👏", "❤️",
 }
 
-// DetectHype runs multi-signal fusion (Heatmap + Live Chat + Audio Energy) and extracts ranked clip candidates.
+// Speech reaction & panic keywords spoken by Indonesian/English gaming streamers (instant transcript hype!).
+var speechHypeKeywords = []string{
+	"anjir", "njir", "bjir", "anjay", "gila", "parah", "kaget", "panik", "tolong", "mati",
+	"aduh", "waduh", "astaga", "buset", "kabur", "polisi", "meledak", "tamat", "hancur",
+	"ngakak", "lucu", "kocak", "gokil", "mantap", "keren", "serius", "kacau", "sialan",
+	"bangsat", "woy", "woi", "wkwk", "haha", "gg", "epic", "clutch", "omg", "wtf", "oh my god",
+	"no way", "crazy", "what the", "tertawa", "tepuk tangan", "wah", "eh eh", "jangan", "lari",
+}
+
+// DetectHype runs multi-signal fusion (Heatmap + Live Chat + Audio Energy + Instant Transcript Hype) and extracts ranked clip candidates.
 func DetectHype(in AnalysisInput) AnalysisResult {
 	dur := int(math.Ceil(in.DurationSec))
 	if dur <= 0 {
@@ -52,6 +61,11 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 		for _, c := range in.Chats {
 			if int(math.Ceil(c.OffsetSec)) > dur {
 				dur = int(math.Ceil(c.OffsetSec))
+			}
+		}
+		for _, s := range in.Transcript {
+			if int(math.Ceil(s.End)) > dur {
+				dur = int(math.Ceil(s.End))
 			}
 		}
 		if len(in.AudioEnergy) > dur {
@@ -72,11 +86,13 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 	chatGrid := make([]float64, dur)
 	chatCounts := make([]int, dur)
 	audioGrid := make([]float64, dur)
+	transcriptGrid := make([]float64, dur)
 	chatBucketSamples := make([][]string, dur)
 
 	hasHeatmap := len(in.Heatmap) > 0
 	hasChat := len(in.Chats) > 20
 	hasAudio := len(in.AudioEnergy) > 5
+	hasTranscript := len(in.Transcript) > 15
 
 	// 1. Populate Heatmap grid
 	if hasHeatmap {
@@ -117,12 +133,10 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 			}
 		}
 
-		// Smooth chat with a 7-second rolling window (captures sustained chat explosions)
 		smoothed := make([]float64, dur)
 		win := 3
 		for i := 0; i < dur; i++ {
-			var sum float64
-			var cnt float64
+			var sum, cnt float64
 			for j := i - win; j <= i+win; j++ {
 				if j >= 0 && j < dur {
 					sum += rawHype[j]
@@ -134,7 +148,6 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 			}
 		}
 
-		// Normalize using robust 98th percentile so a single spam bot spike doesn't crush the whole VOD
 		p98 := percentile(smoothed, 0.985)
 		if p98 <= 0 {
 			p98 = 1.0
@@ -155,9 +168,52 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 		}
 	}
 
-	// 4. Dynamic Multi-Signal Weight Redistribution
-	// If a VOD is brand new and has no heatmap yet, Chat + Audio automatically take 100% weight!
-	wH, wC, wA := 0.0, 0.0, 0.0
+	// 4. Populate Instant Transcript Hype grid (speech burst velocity + panic/funny reaction keywords!)
+	if hasTranscript {
+		rawSpeech := make([]float64, dur)
+		for _, cue := range in.Transcript {
+			s := clampInt(int(math.Floor(cue.Start)), 0, dur-1)
+			e := clampInt(int(math.Ceil(cue.End)), s+1, dur)
+			score := scoreTranscriptCue(cue)
+			span := float64(e - s)
+			if span < 1 {
+				span = 1
+			}
+			perSec := score / span
+			for t := s; t < e; t++ {
+				rawSpeech[t] += perSec
+			}
+		}
+		smoothed := make([]float64, dur)
+		win := 6 // 13-second window catches comedic exchanges & panic bursts
+		for i := 0; i < dur; i++ {
+			var sum, cnt float64
+			for j := i - win; j <= i+win; j++ {
+				if j >= 0 && j < dur {
+					sum += rawSpeech[j]
+					cnt++
+				}
+			}
+			if cnt > 0 {
+				smoothed[i] = sum / cnt
+			}
+		}
+		p98 := percentile(smoothed, 0.985)
+		if p98 <= 0 {
+			p98 = 1.0
+		}
+		for i := 0; i < dur; i++ {
+			v := smoothed[i] / p98
+			if v > 1.0 {
+				v = 1.0
+			}
+			transcriptGrid[i] = v
+		}
+	}
+
+	// 5. Dynamic Multi-Signal Weight Redistribution
+	// Works fast & accurately even on 4-hour VODs that have NO YouTube heatmap yet!
+	wH, wC, wA, wT := 0.0, 0.0, 0.0, 0.0
 	if hasHeatmap {
 		wH = cfg.HeatmapWeight
 	}
@@ -167,22 +223,29 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 	if hasAudio {
 		wA = cfg.AudioWeight
 	}
-	wTotal := wH + wC + wA
+	if hasTranscript {
+		// Give transcript strong weight when heatmap/chat absent, and supportive boost otherwise
+		if !hasHeatmap && !hasChat && !hasAudio {
+			wT = 1.0
+		} else {
+			wT = 0.25
+		}
+	}
+	wTotal := wH + wC + wA + wT
 	if wTotal <= 0 {
-		// No signals available — still build timeline evenly
 		wTotal = 1.0
 	} else {
 		wH /= wTotal
 		wC /= wTotal
 		wA /= wTotal
+		wT /= wTotal
 	}
 
 	combined := make([]float64, dur)
 	skipIntro := int(cfg.SkipIntroSec)
 	for i := 0; i < dur; i++ {
-		score := wH*heatGrid[i] + wC*chatGrid[i] + wA*audioGrid[i]
+		score := wH*heatGrid[i] + wC*chatGrid[i] + wA*audioGrid[i] + wT*transcriptGrid[i]
 
-		// Synergy bonus: when 2+ independent signals spike together, boost confidence!
 		activeHigh := 0
 		if hasHeatmap && heatGrid[i] >= 0.55 {
 			activeHigh++
@@ -193,11 +256,13 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 		if hasAudio && audioGrid[i] >= 0.60 {
 			activeHigh++
 		}
+		if hasTranscript && transcriptGrid[i] >= 0.65 {
+			activeHigh++
+		}
 		if activeHigh >= 2 {
 			score = math.Min(1.0, score*1.16)
 		}
 
-		// Fix classic YouTube Heatmap 0:00 intro bias: damp first N seconds unless chat/audio also explodes
 		if i < skipIntro && (!hasChat || chatGrid[i] < 0.65) && (!hasAudio || audioGrid[i] < 0.70) {
 			score *= 0.30
 		}
@@ -205,8 +270,8 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 		combined[i] = score
 	}
 
-	// 5. Peak Detection + Non-Maximum Suppression (NMS)
-	candidates := extractCandidates(dur, combined, heatGrid, chatGrid, audioGrid, chatBucketSamples, in.Transcript, in.Chapters, cfg, hasHeatmap, hasChat, hasAudio)
+	// If no live chat exists yet, mirror transcript hype into chatGrid only when displaying or keep separate via Reasons
+	candidates := extractCandidates(dur, combined, heatGrid, chatGrid, audioGrid, transcriptGrid, chatBucketSamples, in.Transcript, in.Chapters, cfg, hasHeatmap, hasChat, hasAudio, hasTranscript)
 
 	// 6. Downsample timeline to max ~360 chart points for buttery-smooth Canvas rendering
 	step := 1
@@ -250,25 +315,26 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 		Timeline:   timeline,
 		Candidates: candidates,
 		Signals: model.SignalAvailability{
-			HasHeatmap:    hasHeatmap,
-			HasLiveChat:   hasChat,
-			HasAudio:      hasAudio,
-			HasSubtitles:  len(in.Transcript) > 0,
-			ChatMsgCount:  len(in.Chats),
-			SubCueCount:   len(in.Transcript),
-			HeatmapPoints: len(in.Heatmap),
+			HasHeatmap:        hasHeatmap,
+			HasLiveChat:       hasChat,
+			HasAudio:          hasAudio,
+			HasSubtitles:      len(in.Transcript) > 0,
+			HasTranscriptHype: hasTranscript,
+			ChatMsgCount:      len(in.Chats),
+			SubCueCount:       len(in.Transcript),
+			HeatmapPoints:     len(in.Heatmap),
 		},
 	}
 }
 
 func extractCandidates(
 	dur int,
-	combined, heat, chat, audio []float64,
+	combined, heat, chat, audio, transcriptGrid []float64,
 	chatSamples [][]string,
 	transcript []model.TranscriptCue,
 	chapters []model.Chapter,
 	cfg model.DetectionSettings,
-	hasHeatmap, hasChat, hasAudio bool,
+	hasHeatmap, hasChat, hasAudio, hasTranscript bool,
 ) []model.ClipCandidate {
 	type peak struct {
 		sec   int
@@ -403,9 +469,10 @@ func extractCandidates(
 		maxH := windowMax(heat, left, right)
 		maxC := windowMax(chat, left, right)
 		maxA := windowMax(audio, left, right)
+		maxT := windowMax(transcriptGrid, left, right)
 		score100 := math.Round(math.Min(100, pk.score*100))
 
-		reasons := buildReasons(maxH, maxC, maxA, hasHeatmap, hasChat, hasAudio)
+		reasons := buildReasons(maxH, maxC, maxA, maxT, hasHeatmap, hasChat, hasAudio, hasTranscript)
 		samples := collectChatSamples(chatSamples, pk.sec-5, pk.sec+12, 5)
 		speech := collectTranscriptSnippet(transcript, float64(left), float64(right), 180)
 		chapTitle := findChapterTitle(chapters, float64(pk.sec))
@@ -416,7 +483,7 @@ func extractCandidates(
 			title = fmt.Sprintf("#%d %s (%s)", rank, chapTitle, FormatMMSS(float64(pk.sec)))
 		}
 
-		hookText := suggestHookText(reasons, samples, chapTitle)
+		hookText := suggestHookText(reasons, samples, speech, chapTitle)
 
 		selected = append(selected, model.ClipCandidate{
 			ID:           fmt.Sprintf("clip-%d-%d", left, right),
@@ -478,7 +545,32 @@ func scoreChatMessage(msg youtube.ChatMessage) float64 {
 	return w
 }
 
-func buildReasons(maxH, maxC, maxA float64, hasH, hasC, hasA bool) []string {
+func scoreTranscriptCue(cue model.TranscriptCue) float64 {
+	txt := strings.TrimSpace(cue.Text)
+	if txt == "" {
+		return 0
+	}
+	words := strings.Fields(txt)
+	dur := math.Max(0.4, cue.End-cue.Start)
+	wps := float64(len(words)) / dur
+	// Base weight from rapid speech intensity
+	score := math.Min(2.5, wps*0.45)
+
+	lower := strings.ToLower(txt)
+	kwHits := 0
+	for _, kw := range speechHypeKeywords {
+		if strings.Contains(lower, kw) {
+			kwHits++
+		}
+	}
+	score += float64(kwHits) * 1.6
+	if strings.Contains(txt, "!") || strings.Contains(txt, "?") {
+		score += 0.8
+	}
+	return score
+}
+
+func buildReasons(maxH, maxC, maxA, maxT float64, hasH, hasC, hasA, hasT bool) []string {
 	var reasons []string
 	highCount := 0
 	if hasH && maxH >= 0.60 {
@@ -493,6 +585,10 @@ func buildReasons(maxH, maxC, maxA float64, hasH, hasC, hasA bool) []string {
 		reasons = append(reasons, "Reaksi Keras")
 		highCount++
 	}
+	if hasT && maxT >= 0.65 {
+		reasons = append(reasons, "Ucapan & Reaksi Hype")
+		highCount++
+	}
 	if highCount >= 2 {
 		reasons = append([]string{"Multi-Signal Viral"}, reasons...)
 	}
@@ -502,18 +598,22 @@ func buildReasons(maxH, maxC, maxA float64, hasH, hasC, hasA bool) []string {
 	return reasons
 }
 
-func suggestHookText(reasons, sampleChats []string, chapterTitle string) string {
+func suggestHookText(reasons, sampleChats []string, speech, chapterTitle string) string {
 	if chapterTitle != "" && len(chapterTitle) <= 40 {
 		return strings.ToUpper(chapterTitle)
 	}
-	for _, c := range sampleChats {
-		low := strings.ToLower(c)
-		if strings.Contains(low, "wkwk") || strings.Contains(low, "ngakak") || strings.Contains(low, "kocak") {
-			return "MOMEN NGAKAK PARAH! 😭🔥"
-		}
-		if strings.Contains(low, "kaget") || strings.Contains(low, "panik") {
-			return "DETIK-DETIK PANIK KAGET! 😱"
-		}
+	combined := strings.ToLower(strings.Join(sampleChats, " ") + " " + speech)
+	if strings.Contains(combined, "polisi") || strings.Contains(combined, "kabur") {
+		return "PANIK DIKEJAR POLISI GTA VI! 🚨😱"
+	}
+	if strings.Contains(combined, "kaget") || strings.Contains(combined, "panik") || strings.Contains(combined, "tolong") {
+		return "DETIK-DETIK PANIK KAGET! 😱🔥"
+	}
+	if strings.Contains(combined, "wkwk") || strings.Contains(combined, "ngakak") || strings.Contains(combined, "kocak") || strings.Contains(combined, "tertawa") {
+		return "MOMEN NGAKAK PARAH! 😭🔥"
+	}
+	if strings.Contains(combined, "meledak") || strings.Contains(combined, "mati") {
+		return "AUTO KACAU MELEDAK! 💥🤯"
 	}
 	for _, r := range reasons {
 		if r == "Chat Meledak" {
