@@ -627,6 +627,47 @@ func buildLayoutFilter(layout model.LayoutConfig, outW, outH int, inLabel, outLa
 	}
 
 	switch mode {
+	case "facecam_top_neon":
+		// ATM SIGNATURE LAYOUT #1: Vice Neon Dark Bar (Modern GTA VI / Gaming Brand Look — NOT a plain white copy!)
+		// Top 33% Facecam + Slim Dark Obsidian Bar with Vice Pink (#FF2A85) & Cyan (#00E5FF) twin neon edges + Bottom 60% Gameplay!
+		gpBox, fcBox := resolveSplitBoxes(layout)
+		fcH := makeEven(int(float64(outH) * 0.33))
+		barH := makeEven(int(float64(outH) * 0.072))
+		gpH := outH - fcH - barH
+		if gpH < 200 {
+			gpH = 200
+			fcH = outH - gpH - barH
+		}
+		return fmt.Sprintf(
+			"%ssplit=2[fc_in][gp_in];"+
+				"[fc_in]crop=iw*%.4f:ih*%.4f:iw*%.4f:ih*%.4f,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d[fc_out];"+
+				"color=c=#0B0F1A:s=%dx%d:r=30,drawbox=x=0:y=0:w=iw:h=4:color=#FF2A85:t=fill,drawbox=x=0:y=ih-4:w=iw:h=4:color=#00E5FF:t=fill[bar_raw];"+
+				"[gp_in]crop=iw*%.4f:ih*%.4f:iw*%.4f:ih*%.4f,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d[gp_out];"+
+				"[fc_out][bar_raw][gp_out]vstack=inputs=3:shortest=1%s",
+			inLabel,
+			fcBox.W, fcBox.H, fcBox.X, fcBox.Y, outW, fcH, outW, fcH,
+			outW, barH,
+			gpBox.W, gpBox.H, gpBox.X, gpBox.Y, outW, gpH, outW, gpH,
+			outLabel,
+		)
+
+	case "facecam_top_float":
+		// ATM SIGNATURE LAYOUT #2: Seamless Full-Bleed Split (ZERO solid ribbon!)
+		// Top 34% Facecam + Razor-sharp glowing Vice Cyan divider + Bottom 66% Gameplay + Floating Kinetic Headline!
+		gpBox, fcBox := resolveSplitBoxes(layout)
+		fcH := makeEven(int(float64(outH) * 0.34))
+		gpH := outH - fcH
+		return fmt.Sprintf(
+			"%ssplit=2[fc_in][gp_in];"+
+				"[fc_in]crop=iw*%.4f:ih*%.4f:iw*%.4f:ih*%.4f,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d[fc_out];"+
+				"[gp_in]crop=iw*%.4f:ih*%.4f:iw*%.4f:ih*%.4f,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d[gp_out];"+
+				"[fc_out][gp_out]vstack=inputs=2,drawbox=x=0:y=%d:w=%d:h=5:color=#00E5FF@0.92:t=fill%s",
+			inLabel,
+			fcBox.W, fcBox.H, fcBox.X, fcBox.Y, outW, fcH, outW, fcH,
+			gpBox.W, gpBox.H, gpBox.X, gpBox.Y, outW, gpH, outW, gpH,
+			fcH-2, outW, outLabel,
+		)
+
 	case "facecam_top_ribbon":
 		// VIRAL WINNER 243K VIEWS STYLE (@bngrmz_):
 		// Top 33% zoomed Facecam + Pure White Headline Ribbon Strip + Bottom Gameplay!

@@ -1030,7 +1030,7 @@
 
     const mode = $('selCropMode').value;
     const isSplit = mode.startsWith('split_');
-    const isFaceTop = mode === 'facecam_top_ribbon' || mode === 'facecam_top_clean';
+    const isFaceTop = mode.startsWith('facecam_top_');
     const isCinema = mode === 'gaming_cinema';
     const { gp, fc } = getEffectiveBoxes();
 
@@ -1050,7 +1050,39 @@
     if (state.previewImg) {
       const iw = state.previewImg.naturalWidth || state.previewImg.width;
       const ih = state.previewImg.naturalHeight || state.previewImg.height;
-      if (mode === 'facecam_top_ribbon') {
+      if (mode === 'facecam_top_neon') {
+        const fcH = Math.round(oh * 0.33);
+        const barH = Math.round(oh * 0.072);
+        const gpH = oh - fcH - barH;
+        drawCoverSlice(oCtx, state.previewImg, fc.x * iw, fc.y * ih, fc.w * iw, fc.h * ih, 0, 0, ow, fcH);
+        oCtx.fillStyle = '#0b0f1a';
+        oCtx.fillRect(0, fcH, ow, barH);
+        oCtx.fillStyle = '#ff2a85';
+        oCtx.fillRect(0, fcH, ow, 2);
+        oCtx.fillStyle = '#00e5ff';
+        oCtx.fillRect(0, fcH + barH - 2, ow, 2);
+        oCtx.fillStyle = '#ffffff';
+        oCtx.font = 'bold 9.5px Impact, Segoe UI';
+        oCtx.textAlign = 'center';
+        oCtx.fillText('SIGNATURE VICE BAR', ow / 2, fcH + barH / 2 + 3.5);
+        oCtx.textAlign = 'left';
+        drawCoverSlice(oCtx, state.previewImg, gp.x * iw, gp.y * ih, gp.w * iw, gp.h * ih, 0, fcH + barH, ow, gpH);
+      } else if (mode === 'facecam_top_float') {
+        const fcH = Math.round(oh * 0.34);
+        const gpH = oh - fcH;
+        drawCoverSlice(oCtx, state.previewImg, fc.x * iw, fc.y * ih, fc.w * iw, fc.h * ih, 0, 0, ow, fcH);
+        drawCoverSlice(oCtx, state.previewImg, gp.x * iw, gp.y * ih, gp.w * iw, gp.h * ih, 0, fcH, ow, gpH);
+        oCtx.fillStyle = '#00e5ff';
+        oCtx.fillRect(0, fcH - 1, ow, 2);
+        oCtx.font = 'bold 10px Impact, Segoe UI';
+        oCtx.textAlign = 'center';
+        oCtx.lineWidth = 3;
+        oCtx.strokeStyle = '#000';
+        oCtx.strokeText('FLOATING VIRAL TITLE', ow / 2, fcH + 3);
+        oCtx.fillStyle = '#ffe600';
+        oCtx.fillText('FLOATING VIRAL TITLE', ow / 2, fcH + 3);
+        oCtx.textAlign = 'left';
+      } else if (mode === 'facecam_top_ribbon') {
         const fcH = Math.round(oh * 0.33);
         const ribH = Math.round(oh * 0.085);
         const gpH = oh - fcH - ribH;
@@ -1201,7 +1233,7 @@
 
     canvas.addEventListener('mousedown', (e) => {
       const curMode = $('selCropMode').value;
-      const keepModes = ['split_custom', 'gaming_cinema', 'facecam_top_ribbon', 'facecam_top_clean'];
+      const keepModes = ['split_custom', 'gaming_cinema', 'facecam_top_neon', 'facecam_top_float', 'facecam_top_ribbon', 'facecam_top_clean'];
       if (!keepModes.includes(curMode)) {
         const eff = getEffectiveBoxes();
         state.layout.gameplayBox = { ...eff.gp };

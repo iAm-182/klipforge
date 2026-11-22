@@ -105,11 +105,33 @@ func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, 
 		"Style: Viral,%s,%d,%s,%s,%s,%s,-1,0,0,0,100,100,1,0,%d,%d,%d,%d,56,56,%d,1\n",
 		fontName, scaledSize, baseColor, highlightColor, outlineColor, backColor, borderStyle, outline, shadow, alignment, marginV,
 	))
-	// Hook Banner Style:
-	// - In "facecam_top_ribbon" (@bngrmz_ 243K views style!): Pure bold BLACK text centered inside the white middle ribbon for full duration!
-	// - In all other layouts: Vibrant yellow headline pops in cleanly for first 4.8s, then fades out!
+	// Hook Banner Style tailored cleanly to the chosen layout (100% ATM Original Branding!):
+	// - "facecam_top_neon": Crisp electric white/yellow text centered inside the Dark Vice Neon Bar!
+	// - "facecam_top_float": Kinetic floating headline across the seamless split seam (pops in for first 5.5s, then fades cleanly!)
+	// - "facecam_top_ribbon": Black bold text centered inside the white strip
+	// - All others: Top animated headline for first 4.8s
+	isNeon := cropMode == "facecam_top_neon"
+	isFloat := cropMode == "facecam_top_float"
 	isRibbon := cropMode == "facecam_top_ribbon"
-	if isRibbon {
+	if isNeon {
+		barFont := int(float64(outW) * 0.056)
+		if barFont < 30 {
+			barFont = 30
+		}
+		sb.WriteString(fmt.Sprintf(
+			"Style: HookBanner,Impact,%d,&H00FFFFFF,&H0000EAFF,&H00000000,&H00000000,-1,0,0,0,100,100,1.5,0,1,3,1,5,36,36,0,1\n\n",
+			barFont,
+		))
+	} else if isFloat {
+		flFont := int(float64(outW) * 0.058)
+		if flFont < 32 {
+			flFont = 32
+		}
+		sb.WriteString(fmt.Sprintf(
+			"Style: HookBanner,Impact,%d,&H0000EAFF,&H00FFFFFF,&H00000000,&HAA000000,-1,0,0,0,100,100,1.5,0,1,9,4,5,48,48,0,1\n\n",
+			flFont,
+		))
+	} else if isRibbon {
 		ribFont := int(float64(outW) * 0.062)
 		if ribFont < 32 {
 			ribFont = 32
@@ -131,9 +153,27 @@ func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, 
 	clipDur := (clipEnd - clipStart) / speed
 	written := 0
 
-	// 1. Sleek Hook Headline (full duration inside white ribbon, OR 4.8s animated viral top headline!)
+	// 1. Sleek Signature Hook Headline
 	if cleanHook != "" {
-		if isRibbon {
+		if isNeon {
+			barCenterY := int(float64(outH)*0.33) + int(float64(outH)*0.072)/2
+			wrapped := strings.ReplaceAll(wrapText(strings.ToUpper(cleanHook), 28), "\n", `\N`)
+			sb.WriteString(fmt.Sprintf(
+				"Dialogue: 2,0:00:00.00,%s,HookBanner,,0,0,0,,{\\an5\\pos(%d,%d)\\fscx108\\fscy108\\t(0,160,\\fscx100\\fscy100)}%s\n",
+				formatASSTime(clipDur), outW/2, barCenterY, sanitizeASSText(wrapped),
+			))
+		} else if isFloat {
+			seamY := int(float64(outH) * 0.34)
+			hookEnd := 5.5
+			if clipDur < hookEnd {
+				hookEnd = clipDur
+			}
+			wrapped := strings.ReplaceAll(wrapText(strings.ToUpper(cleanHook), 24), "\n", `\N`)
+			sb.WriteString(fmt.Sprintf(
+				"Dialogue: 2,0:00:00.00,%s,HookBanner,,0,0,0,,{\\an5\\pos(%d,%d)\\fad(120,400)\\fscx116\\fscy116\\t(0,150,\\fscx100\\fscy100)}%s\n",
+				formatASSTime(hookEnd), outW/2, seamY, sanitizeASSText(wrapped),
+			))
+		} else if isRibbon {
 			ribCenterY := int(float64(outH)*0.33) + int(float64(outH)*0.085)/2
 			wrapped := strings.ReplaceAll(wrapText(strings.ToUpper(cleanHook), 26), "\n", `\N`)
 			sb.WriteString(fmt.Sprintf(

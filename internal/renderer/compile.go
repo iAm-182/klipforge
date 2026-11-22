@@ -354,9 +354,11 @@ func generateCompilationSegmentASS(
 		montageFontSize = 28
 	}
 
-	// Top-N List Position: right below the facecam split line on left side (exact @bng.ghan 23K style!)
-	listTopY := int(float64(outH) * 0.355)
-	if cropMode == "facecam_top_ribbon" {
+	// Top-N List Position: cleanly below the split line (supports Vice Neon, Floating, Clean, etc.)
+	listTopY := int(float64(outH) * 0.36)
+	if cropMode == "facecam_top_neon" {
+		listTopY = int(float64(outH) * 0.425)
+	} else if cropMode == "facecam_top_ribbon" {
 		listTopY = int(float64(outH) * 0.435)
 	} else if cropMode == "blur_bg" || cropMode == "gaming_cinema" {
 		listTopY = int(float64(outH) * 0.08)
@@ -364,21 +366,27 @@ func generateCompilationSegmentASS(
 
 	sb.WriteString("[V4+ Styles]\n")
 	sb.WriteString("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
-	// Iconic Bold Yellow Top-N Countdown list (left-aligned, thick black border!)
+	// Signature Two-Tone Cyber Top-N Style (Vice Cyan Header + Electric Yellow Active Rank + Crisp White History — distinct & modern!)
 	sb.WriteString(fmt.Sprintf(
-		"Style: TopList,Impact,%d,&H0000EAFF,&H00FFFFFF,&H00000000,&H90000000,-1,0,0,0,100,100,1,0,1,6,2,7,38,38,%d,1\n",
+		"Style: TopList,Impact,%d,&H00FFFFFF,&H0000EAFF,&H00000000,&H99000000,-1,0,0,0,100,100,1.2,0,1,7,3,7,40,40,%d,1\n",
 		listFontSize, listTopY,
 	))
-	// Rapid Montage clean centered theme text (gaya @rapzz05 170K views!)
+	// Rapid Montage clean centered theme text
 	sb.WriteString(fmt.Sprintf(
 		"Style: MontageTitle,Arial,%d,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0.5,0,1,5,2,5,48,48,0,1\n",
 		montageFontSize,
 	))
-	// White ribbon text if user combines Top-N with facecam_top_ribbon
-	ribFont := int(float64(outW) * 0.058)
+	// Dark Neon Bar / White Ribbon title
+	ribFont := int(float64(outW) * 0.054)
+	barColor := "&H00FFFFFF"
+	barOutline := 3
+	if cropMode == "facecam_top_ribbon" {
+		barColor = "&H00111111"
+		barOutline = 0
+	}
 	sb.WriteString(fmt.Sprintf(
-		"Style: RibbonTitle,Arial,%d,&H00111111,&H00111111,&H00FFFFFF,&H00000000,-1,0,0,0,100,100,1,0,1,0,0,5,32,32,0,1\n\n",
-		ribFont,
+		"Style: RibbonTitle,Impact,%d,%s,%s,&H00000000,&H00000000,-1,0,0,0,100,100,1.2,0,1,%d,0,5,32,32,0,1\n\n",
+		ribFont, barColor, barColor, barOutline,
 	))
 
 	sb.WriteString("[Events]\n")
@@ -386,8 +394,11 @@ func generateCompilationSegmentASS(
 
 	endTS := formatASSTime(effDur)
 	if mode == "rapid_montage" {
-		// Clean centered theme title (gaya @rapzz05!)
-		if cropMode == "facecam_top_ribbon" {
+		if cropMode == "facecam_top_neon" {
+			barY := int(float64(outH)*0.33) + int(float64(outH)*0.072)/2
+			sb.WriteString(fmt.Sprintf("Dialogue: 2,0:00:00.00,%s,RibbonTitle,,0,0,0,,{\\an5\\pos(%d,%d)}%s\n",
+				endTS, outW/2, barY, sanitizeASSText(strings.ToUpper(cleanTitle))))
+		} else if cropMode == "facecam_top_ribbon" {
 			ribY := int(float64(outH)*0.33) + int(float64(outH)*0.085)/2
 			sb.WriteString(fmt.Sprintf("Dialogue: 2,0:00:00.00,%s,RibbonTitle,,0,0,0,,{\\an5\\pos(%d,%d)}%s\n",
 				endTS, outW/2, ribY, sanitizeASSText(strings.ToUpper(cleanTitle))))
@@ -396,24 +407,27 @@ func generateCompilationSegmentASS(
 				endTS, outW/2, int(float64(outH)*0.48), sanitizeASSText(cleanTitle)))
 		}
 	} else {
-		// Progressive Top-N Countdown List (1..N, revealing from N down to 1!)
+		// Signature Progressive Top-N Countdown List (Vice Cyan header, Electric Yellow active rank with arrow, subtle ??? mystery slots!)
 		var lines []string
-		lines = append(lines, fmt.Sprintf("{\\c&H0000EAFF&}%s", sanitizeASSText(cleanTitle)))
+		if cropMode != "facecam_top_neon" {
+			lines = append(lines, fmt.Sprintf("{\\c&H00FFE500&}%s", sanitizeASSText(strings.ToUpper(cleanTitle))))
+		}
 		for rank := 1; rank <= totalRanks; rank++ {
 			lbl := StripUnsupportedEmojis(strings.TrimSpace(allLabels[rank]))
 			if rank == seg.RankNumber {
-				// Active current rank pops bright white/yellow!
-				lines = append(lines, fmt.Sprintf("{\\c&H00FFFFFF&\\fscx108\\fscy108}%d. %s{\\r}", rank, sanitizeASSText(lbl)))
+				lines = append(lines, fmt.Sprintf("{\\c&H0000EAFF&\\fscx110\\fscy110}> #%d  %s{\\r}", rank, sanitizeASSText(strings.ToUpper(lbl))))
 			} else if revealed[rank] && lbl != "" {
-				// Already revealed ranks stay visible in yellow
-				lines = append(lines, fmt.Sprintf("{\\c&H0000EAFF&}%d. %s", rank, sanitizeASSText(lbl)))
+				lines = append(lines, fmt.Sprintf("{\\c&H00FFFFFF&}#%d  %s", rank, sanitizeASSText(strings.ToUpper(lbl))))
 			} else {
-				// Mystery ranks not yet shown stay empty ("1.", "2.", ...) to build suspense!
-				lines = append(lines, fmt.Sprintf("{\\c&H0000EAFF&}%d.", rank))
+				lines = append(lines, fmt.Sprintf("{\\c&H00999999&}#%d  ???", rank))
 			}
 		}
 		sb.WriteString(fmt.Sprintf("Dialogue: 2,0:00:00.00,%s,TopList,,0,0,0,,%s\n", endTS, strings.Join(lines, `\N`)))
-		if cropMode == "facecam_top_ribbon" {
+		if cropMode == "facecam_top_neon" {
+			barY := int(float64(outH)*0.33) + int(float64(outH)*0.072)/2
+			sb.WriteString(fmt.Sprintf("Dialogue: 2,0:00:00.00,%s,RibbonTitle,,0,0,0,,{\\an5\\pos(%d,%d)}%s\n",
+				endTS, outW/2, barY, sanitizeASSText(strings.ToUpper(cleanTitle))))
+		} else if cropMode == "facecam_top_ribbon" {
 			ribY := int(float64(outH)*0.33) + int(float64(outH)*0.085)/2
 			sb.WriteString(fmt.Sprintf("Dialogue: 2,0:00:00.00,%s,RibbonTitle,,0,0,0,,{\\an5\\pos(%d,%d)}#%d - %s\n",
 				endTS, outW/2, ribY, seg.RankNumber, sanitizeASSText(strings.ToUpper(seg.Label))))
