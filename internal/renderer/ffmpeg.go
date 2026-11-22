@@ -627,6 +627,47 @@ func buildLayoutFilter(layout model.LayoutConfig, outW, outH int, inLabel, outLa
 	}
 
 	switch mode {
+	case "facecam_top_ribbon":
+		// VIRAL WINNER 243K VIEWS STYLE (@bngrmz_):
+		// Top 33% zoomed Facecam + Pure White Headline Ribbon Strip + Bottom Gameplay!
+		gpBox, fcBox := resolveSplitBoxes(layout)
+		fcH := makeEven(int(float64(outH) * 0.33))
+		ribH := makeEven(int(float64(outH) * 0.085))
+		gpH := outH - fcH - ribH
+		if gpH < 200 {
+			gpH = 200
+			fcH = outH - gpH - ribH
+		}
+		return fmt.Sprintf(
+			"%ssplit=2[fc_in][gp_in];"+
+				"[fc_in]crop=iw*%.4f:ih*%.4f:iw*%.4f:ih*%.4f,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d[fc_out];"+
+				"color=c=white:s=%dx%d:r=30[rib_raw];"+
+				"[gp_in]crop=iw*%.4f:ih*%.4f:iw*%.4f:ih*%.4f,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d[gp_out];"+
+				"[fc_out][rib_raw][gp_out]vstack=inputs=3:shortest=1%s",
+			inLabel,
+			fcBox.W, fcBox.H, fcBox.X, fcBox.Y, outW, fcH, outW, fcH,
+			outW, ribH,
+			gpBox.W, gpBox.H, gpBox.X, gpBox.Y, outW, gpH, outW, gpH,
+			outLabel,
+		)
+
+	case "facecam_top_clean":
+		// VIRAL TOP-5 STYLE (@bng.ghan 23K+ views):
+		// Top 33% zoomed Facecam + Clean divider + Bottom 67% Gameplay (room for Top-5 list overlay!)
+		gpBox, fcBox := resolveSplitBoxes(layout)
+		fcH := makeEven(int(float64(outH) * 0.33))
+		gpH := outH - fcH
+		return fmt.Sprintf(
+			"%ssplit=2[fc_in][gp_in];"+
+				"[fc_in]crop=iw*%.4f:ih*%.4f:iw*%.4f:ih*%.4f,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d[fc_out];"+
+				"[gp_in]crop=iw*%.4f:ih*%.4f:iw*%.4f:ih*%.4f,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d[gp_out];"+
+				"[fc_out][gp_out]vstack=inputs=2,drawbox=x=0:y=%d:w=%d:h=4:color=black@0.9:t=fill%s",
+			inLabel,
+			fcBox.W, fcBox.H, fcBox.X, fcBox.Y, outW, fcH, outW, fcH,
+			gpBox.W, gpBox.H, gpBox.X, gpBox.Y, outW, gpH, outW, gpH,
+			fcH-2, outW, outLabel,
+		)
+
 	case "gaming_cinema":
 		// PRO GAMING CINEMA: Blurred full-bleed background + Full crisp uncropped 16:9 Gameplay
 		// + Cleanly framed Streamer Facecam below! Zero left/right HUD cutoff & super clean!

@@ -68,10 +68,11 @@ func New(st *store.Store, d *deps.Manager, broker *events.Broker) *Server {
 	return s
 }
 
-// recoverIncompleteProjects finishes any cached project that already downloaded subs/preview on disk before restart.
+// recoverIncompleteProjects finishes cached projects and upgrades older projects with TranscriptHype curve.
 func (s *Server) recoverIncompleteProjects() {
 	for _, p := range s.Store.ListProjects() {
-		if len(p.Candidates) > 0 {
+		needsUpgrade := len(p.Candidates) == 0 || (p.Signals.HasSubtitles && !p.Signals.HasTranscriptHype)
+		if !needsUpgrade {
 			continue
 		}
 		dir := s.Store.ProjectDir(p.ID)
@@ -134,6 +135,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/projects/{id}", s.handleDeleteProject)
 	mux.HandleFunc("POST /api/projects/analyze", s.handleAnalyzeProject)
 	mux.HandleFunc("POST /api/projects/{id}/reanalyze", s.handleReanalyzeProject)
+	mux.HandleFunc("GET /api/projects/{id}/search", s.handleSearchTranscript)
 	mux.HandleFunc("POST /api/projects/{id}/scan-audio", s.handleScanAudioOnly)
 	mux.HandleFunc("POST /api/projects/{id}/download-full", s.handleDownloadFull)
 	mux.HandleFunc("POST /api/projects/{id}/grab-frame", s.handleGrabFrame)
@@ -144,6 +146,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/jobs", s.handleListJobs)
 	mux.HandleFunc("POST /api/jobs/render", s.handleRenderSingle)
 	mux.HandleFunc("POST /api/jobs/batch", s.handleRenderBatch)
+	mux.HandleFunc("POST /api/jobs/compile", s.handleRenderCompile)
 	mux.HandleFunc("POST /api/jobs/{id}/review", s.handleReviewJob)
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.handleCancelJob)
 	mux.HandleFunc("POST /api/jobs/{id}/retry", s.handleRetryJob)
@@ -803,6 +806,37 @@ func (s *Server) handleReanalyzeProject(w http.ResponseWriter, r *http.Request) 
 	_ = s.Store.SaveProject(proj)
 	s.Broker.Publish("project_update", proj)
 	writeJSON(w, http.StatusOK, proj)
+}
+
+func (s *Server) handleSearchTranscript(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	proj, ok := s.Store.GetProject(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "Project tidak ditemukan")
+		return
+	}
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	cs := s.loadCachedSignals(proj)
+	hits := analyzer.SearchTranscript(cs.Transcript, q, 40)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"query": q,
+		"total": len(hits),
+		"hits":  hits,
+	})
+}
+
+func (s *Server) handleRenderCompile(w http.ResponseWriter, r *http.Request) {
+	var opts model.CompileOptions
+	if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
+		writeErr(w, http.StatusBadRequest, "Format JSON compile tidak valid")
+		return
+	}
+	job, err := s.Worker.EnqueueCompilation(opts)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, job)
 }
 
 func (s *Server) handleScanAudioOnly(w http.ResponseWriter, r *http.Request) {

@@ -9,6 +9,7 @@
     autopilots: [],
     editingAutopilotId: '',
     reviewFilter: 'pending_review',
+    topNSlots: [], // Ordered compilation slots (first plays as #N, last plays as #1 climax!)
     audioAssets: [],
     customSFXCues: [
       { assetId: 'sfx-whoosh', atSec: 0.1, atPeak: false, volume: 0.8 },
@@ -223,6 +224,7 @@
       updateJobBadge();
       renderJobs();
       renderReviewInbox();
+      renderTopNBuilder();
     } catch (e) {
       const badge = $('depBadge');
       if (badge) {
@@ -702,7 +704,10 @@
       drawCurve('chatHype', '#10b981', 'rgba(16, 185, 129, 0.14)', 1.6);
     }
     if (proj.signals?.hasAudio) {
-      drawCurve('audioPeak', '#f43f5e', null, 1.3);
+      drawCurve('audioPeak', '#f43f5e', 'rgba(244, 63, 94, 0.10)', 1.5);
+    }
+    if (proj.signals?.hasTranscriptHype) {
+      drawCurve('transcriptHype', '#06b6d4', 'rgba(6, 182, 212, 0.12)', 1.5);
     }
     drawCurve('combined', '#c084fc', null, 2.2);
 
@@ -742,10 +747,11 @@
       tip.style.top = '12px';
       tip.innerHTML = `
         <strong>⏱️ ${fmtTime(best.timeSec)}</strong><br/>
-        ⚡ Combined: <b>${Math.round(best.combined * 100)}%</b><br/>
-        🔥 Heatmap: ${Math.round(best.heatmap * 100)}%<br/>
-        💬 Live Chat: ${Math.round(best.chatHype * 100)}% (${best.chatCount} msg)<br/>
-        🔊 Audio: ${Math.round(best.audioPeak * 100)}%
+        ⚡ Combined: <b>${Math.round((best.combined || 0) * 100)}%</b><br/>
+        🔊 Audio Keras: ${Math.round((best.audioPeak || 0) * 100)}%<br/>
+        🎙️ Reaksi Indo: ${Math.round((best.transcriptHype || 0) * 100)}%<br/>
+        🔥 Heatmap: ${Math.round((best.heatmap || 0) * 100)}%<br/>
+        💬 Live Chat: ${Math.round((best.chatHype || 0) * 100)}%
       `;
     });
 
@@ -829,7 +835,10 @@
         </div>
         <div class="cand-actions">
           <button class="btn btn-xs btn-secondary btn-preview-cand">▶ Preview (${fmtTime(c.peakSec)})</button>
-          <button class="btn btn-xs btn-primary btn-render-cand">🎬 Render Clip Ini</button>
+          <div style="display:flex;gap:5px;">
+            <button class="btn btn-xs btn-secondary btn-add-topn" title="Masukkan momen ini ke Top-N / Kompilasi Builder">➕ Top-N</button>
+            <button class="btn btn-xs btn-primary btn-render-cand">🎬 Render</button>
+          </div>
         </div>
       `;
 
@@ -856,6 +865,19 @@
         drawHypeChart();
         renderCandidates();
         setupPlayer(proj, c.startSec, true);
+      });
+      el.querySelector('.btn-add-topn').addEventListener('click', () => {
+        // Default tight 18s window around peak for snappy Top-N compilation!
+        const s = Math.max(0, Math.round(c.peakSec - 7));
+        const e = Math.min(Math.round(proj.durationSec || c.endSec), s + 18);
+        addSlotToTopN({
+          projectId: proj.id,
+          startSec: s,
+          endSec: e,
+          label: (c.hookText || c.title || 'momen').slice(0, 26),
+          endSfxId: 'sfx-metal-pipe',
+          endSfxOffset: 1.0,
+        });
       });
       el.querySelector('.btn-render-cand').addEventListener('click', () => {
         renderSingleCandidate(c);
@@ -1008,12 +1030,13 @@
 
     const mode = $('selCropMode').value;
     const isSplit = mode.startsWith('split_');
+    const isFaceTop = mode === 'facecam_top_ribbon' || mode === 'facecam_top_clean';
     const isCinema = mode === 'gaming_cinema';
     const { gp, fc } = getEffectiveBoxes();
 
-    if (isSplit) {
-      drawBoxOverlay(sCtx, gp, sw, sh, '#3b82f6', 'GAMEPLAY (ATAS)', state.editingBox === 'gameplay');
-      drawBoxOverlay(sCtx, fc, sw, sh, '#10b981', 'FACECAM (BAWAH)', state.editingBox === 'facecam');
+    if (isSplit || isFaceTop) {
+      drawBoxOverlay(sCtx, gp, sw, sh, '#3b82f6', isFaceTop ? 'GAMEPLAY (BAWAH)' : 'GAMEPLAY (ATAS)', state.editingBox === 'gameplay');
+      drawBoxOverlay(sCtx, fc, sw, sh, '#10b981', isFaceTop ? 'FACECAM (ATAS)' : 'FACECAM (BAWAH)', state.editingBox === 'facecam');
     } else if (isCinema) {
       drawBoxOverlay(sCtx, fc, sw, sh, '#10b981', 'FACECAM (FRAME)', true);
     }
@@ -1027,7 +1050,27 @@
     if (state.previewImg) {
       const iw = state.previewImg.naturalWidth || state.previewImg.width;
       const ih = state.previewImg.naturalHeight || state.previewImg.height;
-      if (isCinema) {
+      if (mode === 'facecam_top_ribbon') {
+        const fcH = Math.round(oh * 0.33);
+        const ribH = Math.round(oh * 0.085);
+        const gpH = oh - fcH - ribH;
+        drawCoverSlice(oCtx, state.previewImg, fc.x * iw, fc.y * ih, fc.w * iw, fc.h * ih, 0, 0, ow, fcH);
+        oCtx.fillStyle = '#ffffff';
+        oCtx.fillRect(0, fcH, ow, ribH);
+        oCtx.fillStyle = '#111111';
+        oCtx.font = 'bold 9.5px Arial, Segoe UI';
+        oCtx.textAlign = 'center';
+        oCtx.fillText('JUDUL PITA PUTIH', ow / 2, fcH + ribH / 2 + 3.5);
+        oCtx.textAlign = 'left';
+        drawCoverSlice(oCtx, state.previewImg, gp.x * iw, gp.y * ih, gp.w * iw, gp.h * ih, 0, fcH + ribH, ow, gpH);
+      } else if (mode === 'facecam_top_clean') {
+        const fcH = Math.round(oh * 0.33);
+        const gpH = oh - fcH;
+        drawCoverSlice(oCtx, state.previewImg, fc.x * iw, fc.y * ih, fc.w * iw, fc.h * ih, 0, 0, ow, fcH);
+        drawCoverSlice(oCtx, state.previewImg, gp.x * iw, gp.y * ih, gp.w * iw, gp.h * ih, 0, fcH, ow, gpH);
+        oCtx.fillStyle = '#000';
+        oCtx.fillRect(0, fcH - 1, ow, 2);
+      } else if (isCinema) {
         oCtx.save();
         oCtx.filter = 'blur(8px) brightness(0.75)';
         drawCoverSlice(oCtx, state.previewImg, 0, 0, iw, ih, 0, 0, ow, oh);
@@ -1158,7 +1201,8 @@
 
     canvas.addEventListener('mousedown', (e) => {
       const curMode = $('selCropMode').value;
-      if (curMode !== 'split_custom' && curMode !== 'gaming_cinema') {
+      const keepModes = ['split_custom', 'gaming_cinema', 'facecam_top_ribbon', 'facecam_top_clean'];
+      if (!keepModes.includes(curMode)) {
         const eff = getEffectiveBoxes();
         state.layout.gameplayBox = { ...eff.gp };
         state.layout.facecamBox = { ...eff.fc };
@@ -2061,6 +2105,291 @@
     renderAutopilotList();
     loadAutopilotIntoEditor(state.editingAutopilotId);
     toast('Rule Autopilot dihapus.', 'info');
+  });
+
+  // ==================== Instant Transcript Search & Top-N Compilation Builder ====================
+  async function runTranscriptSearch(q) {
+    if (!state.activeProject) return;
+    const query = (q ?? $('inpTransSearch').value).trim();
+    if (!query) {
+      $('transSearchResults').classList.add('hidden');
+      $('btnTransClear').classList.add('hidden');
+      return;
+    }
+    $('inpTransSearch').value = query;
+    $('btnTransClear').classList.remove('hidden');
+    try {
+      const data = await api(`/api/projects/${encodeURIComponent(state.activeProject.id)}/search?q=${encodeURIComponent(query)}`);
+      const box = $('transSearchResults');
+      box.classList.remove('hidden');
+      const hits = data.hits || [];
+      if (hits.length === 0) {
+        box.innerHTML = `<div class="muted text-xs" style="padding:8px;">Tidak ditemukan kata "${escapeHtml(query)}" di transkrip VOD ini.</div>`;
+        return;
+      }
+      box.innerHTML = '';
+      hits.forEach((h) => {
+        const row = document.createElement('div');
+        row.className = 'trans-hit';
+        row.innerHTML = `
+          <span class="trans-hit-time">${escapeHtml(h.timeText)}</span>
+          <span class="trans-hit-ctx">${escapeHtml(h.context)}</span>
+          <div class="trans-hit-acts">
+            <button class="btn btn-2xs btn-secondary btn-th-prev">▶ Preview</button>
+            <button class="btn btn-2xs btn-accent btn-th-topn">➕ Top-N</button>
+            <button class="btn btn-2xs btn-primary btn-th-clip">🎬 Klip</button>
+          </div>
+        `;
+        const startS = Math.max(0, Math.floor(h.startSec - 4));
+        const endS = Math.min(Math.floor(state.activeProject.durationSec || h.startSec + 25), startS + 22);
+        row.querySelector('.btn-th-prev').addEventListener('click', () => {
+          $('manualStart').value = startS;
+          $('manualEnd').value = endS;
+          setupPlayer(state.activeProject, startS, true);
+        });
+        row.querySelector('.btn-th-topn').addEventListener('click', () => {
+          addSlotToTopN({
+            projectId: state.activeProject.id,
+            startSec: startS,
+            endSec: Math.min(endS, startS + 18),
+            label: query,
+            endSfxId: 'sfx-metal-pipe',
+            endSfxOffset: 1.0,
+          });
+        });
+        row.querySelector('.btn-th-clip').addEventListener('click', async () => {
+          const opts = buildRenderOptions(`${query.toUpperCase()} (${h.timeText})`, startS, endS, query.toUpperCase());
+          await api('/api/jobs/render', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(opts) });
+          toast(`🎬 Klip "${query}" (${h.timeText}) masuk antrean render!`, 'ok');
+          switchTab('queue');
+        });
+        box.appendChild(row);
+      });
+    } catch (e) {
+      toast('Gagal cari transkrip: ' + e.message, 'err');
+    }
+  }
+
+  $('btnTransSearch').addEventListener('click', () => runTranscriptSearch());
+  $('inpTransSearch').addEventListener('keydown', (e) => { if (e.key === 'Enter') runTranscriptSearch(); });
+  $('btnTransClear').addEventListener('click', () => {
+    $('inpTransSearch').value = '';
+    $('transSearchResults').classList.add('hidden');
+    $('btnTransClear').classList.add('hidden');
+  });
+  document.querySelectorAll('.topic-pill').forEach((p) => {
+    p.addEventListener('click', () => runTranscriptSearch(p.dataset.q));
+  });
+
+  function addSlotToTopN(slot) {
+    state.topNSlots.push(slot);
+    renderTopNBuilder();
+    toast(`➕ Ditambahkan ke Top-N Builder (${state.topNSlots.length} klip)`, 'ok');
+  }
+
+  function renderTopNBuilder() {
+    const n = state.topNSlots.length;
+    $('navTopNCount').textContent = n;
+    $('btnRenderTopN').disabled = n === 0;
+    const box = $('topNSlotsList');
+    if (!box) return;
+
+    const bumperDur = $('topNMode').value === 'top_countdown' ? (parseFloat($('topNBumperDur').value) || 0.85) : 0;
+    let totalDur = 0;
+    state.topNSlots.forEach((s) => (totalDur += Math.max(1, (s.endSec || 0) - (s.startSec || 0))));
+    if (n > 1) totalDur += (n - 1) * bumperDur;
+    const outroExtra = $('topNOutro').checked ? 4 : 0;
+
+    $('topNSummaryText').textContent = `${n} klip dalam antrean Top-${n || 'N'}`;
+    $('topNDurEstimate').textContent = n > 0
+      ? `Estimasi total durasi: ~${Math.round(totalDur)} dtk + Outro ${outroExtra}s = ~${Math.round(totalDur + outroExtra)} detik ${totalDur >= 50 && totalDur <= 120 ? '(🔥 Durasi ideal FYP TikTok!)' : ''}`
+      : 'Tambahkan 3–5 klip pendek (10–20 dtk) dari Studio atau Search Transkrip untuk membuat video Top-5 viral!';
+
+    if (n === 0) {
+      box.innerHTML = '<div class="muted text-xs" style="padding:20px;text-align:center;">Belum ada klip di daftar Top-N.<br/>Klik tombol <strong>➕ Top-N</strong> di kartu momen atau di hasil Search Transkrip, atau klik <strong>⚡ Isi Otomatis Top 5</strong> di atas!</div>';
+      return;
+    }
+
+    const sfxs = state.audioAssets.filter((a) => a.kind === 'sfx');
+    box.innerHTML = '';
+    state.topNSlots.forEach((slot, idx) => {
+      const rankNum = n - idx; // Plays countdown: N, N-1, ..., 1!
+      const isClimax = rankNum === 1;
+      const el = document.createElement('div');
+      el.className = 'topn-slot' + (isClimax ? ' climax' : '');
+      const sfxOpts = ['<option value="">Tanpa SFX Akhir</option>']
+        .concat(sfxs.map((s) => `<option value="${escapeAttr(s.id)}" ${s.id === slot.endSfxId ? 'selected' : ''}>${escapeHtml(s.name)}</option>`))
+        .join('');
+
+      el.innerHTML = `
+        <div class="topn-slot-head">
+          <span class="rank-badge">#${rankNum}${isClimax ? ' 👑 KLIMAKS' : ''}</span>
+          <span class="text-xs muted">${fmtTime(slot.startSec)} – ${fmtTime(slot.endSec)} (${Math.round(slot.endSec - slot.startSec)}s)</span>
+          <div class="head-actions ml-auto">
+            <button class="btn btn-2xs btn-secondary btn-slot-prev" title="Preview">▶</button>
+            <button class="btn btn-2xs btn-ghost btn-slot-up" ${idx === 0 ? 'disabled' : ''}>⬆</button>
+            <button class="btn btn-2xs btn-ghost btn-slot-dn" ${idx === n - 1 ? 'disabled' : ''}>⬇</button>
+            <button class="btn btn-2xs btn-danger-ghost btn-slot-del">✕</button>
+          </div>
+        </div>
+        <div class="topn-slot-grid">
+          <label class="text-xs">Label Singkat (#${rankNum})
+            <input type="text" class="input input-sm slot-lbl" value="${escapeAttr(slot.label || '')}" placeholder="cth: ngetrail / el alasan / paling jago" />
+          </label>
+          <label class="text-xs">Start (s)
+            <input type="number" class="input input-sm slot-start" value="${Math.round(slot.startSec)}" min="0" />
+          </label>
+          <label class="text-xs">End (s)
+            <input type="number" class="input input-sm slot-end" value="${Math.round(slot.endSec)}" min="1" />
+          </label>
+          <label class="text-xs">SFX Punch Akhir
+            <select class="input input-sm slot-sfx">${sfxOpts}</select>
+          </label>
+        </div>
+      `;
+
+      el.querySelector('.slot-lbl').addEventListener('input', (e) => (slot.label = e.target.value));
+      el.querySelector('.slot-start').addEventListener('change', (e) => {
+        slot.startSec = Math.max(0, parseFloat(e.target.value) || 0);
+        renderTopNBuilder();
+      });
+      el.querySelector('.slot-end').addEventListener('change', (e) => {
+        slot.endSec = Math.max(slot.startSec + 2, parseFloat(e.target.value) || slot.startSec + 15);
+        renderTopNBuilder();
+      });
+      el.querySelector('.slot-sfx').addEventListener('change', (e) => (slot.endSfxId = e.target.value));
+      el.querySelector('.btn-slot-prev').addEventListener('click', () => {
+        const proj = state.projects.find((p) => p.id === slot.projectId);
+        if (proj) {
+          state.activeProject = proj;
+          switchTab('studio');
+          setupPlayer(proj, slot.startSec, true);
+        }
+      });
+      el.querySelector('.btn-slot-up').addEventListener('click', () => {
+        if (idx > 0) {
+          [state.topNSlots[idx - 1], state.topNSlots[idx]] = [state.topNSlots[idx], state.topNSlots[idx - 1]];
+          renderTopNBuilder();
+        }
+      });
+      el.querySelector('.btn-slot-dn').addEventListener('click', () => {
+        if (idx < n - 1) {
+          [state.topNSlots[idx + 1], state.topNSlots[idx]] = [state.topNSlots[idx], state.topNSlots[idx + 1]];
+          renderTopNBuilder();
+        }
+      });
+      el.querySelector('.btn-slot-del').addEventListener('click', () => {
+        state.topNSlots.splice(idx, 1);
+        renderTopNBuilder();
+      });
+      box.appendChild(el);
+    });
+  }
+
+  $('btnAddManualToTopN').addEventListener('click', () => {
+    if (!state.activeProject) return;
+    const s = parseFloat($('manualStart').value) || 0;
+    const e = parseFloat($('manualEnd').value) || s + 18;
+    const lbl = $('manualHook').value.trim() || `momen ${fmtTime(s)}`;
+    addSlotToTopN({ projectId: state.activeProject.id, startSec: s, endSec: e, label: lbl, endSfxId: 'sfx-metal-pipe', endSfxOffset: 1.0 });
+  });
+
+  $('btnSendSelectedToTopN').addEventListener('click', () => {
+    if (!state.activeProject) return;
+    const sel = (state.activeProject.candidates || []).filter((c) => c.selected);
+    if (sel.length === 0) {
+      toast('Centang minimal 2 kandidat momen dulu!', 'err');
+      return;
+    }
+    // Reverse so lowest rank plays first (#5 -> #4 -> ... -> #1 climax!)
+    const ordered = [...sel].reverse();
+    ordered.forEach((c) => {
+      const s = Math.max(0, Math.round(c.peakSec - 7));
+      const e = Math.min(Math.round(state.activeProject.durationSec || c.endSec), s + 18);
+      state.topNSlots.push({
+        projectId: state.activeProject.id,
+        startSec: s,
+        endSec: e,
+        label: (c.hookText || c.title || 'momen').slice(0, 24).toLowerCase(),
+        endSfxId: 'sfx-metal-pipe',
+        endSfxOffset: 1.0,
+      });
+    });
+    renderTopNBuilder();
+    switchTab('topn');
+    toast(`🏆 ${sel.length} momen dimasukkan ke Top-N Builder! Silakan edit label & judul.`, 'ok');
+  });
+
+  $('btnFillTop5FromProject').addEventListener('click', () => {
+    if (!state.activeProject || !state.activeProject.candidates?.length) {
+      toast('Scan link YouTube di tab Studio dulu!', 'err');
+      return;
+    }
+    state.topNSlots = [];
+    const top5 = state.activeProject.candidates.slice(0, 5).reverse();
+    top5.forEach((c) => {
+      const s = Math.max(0, Math.round(c.peakSec - 7));
+      const e = Math.min(Math.round(state.activeProject.durationSec || c.endSec), s + 18);
+      state.topNSlots.push({
+        projectId: state.activeProject.id,
+        startSec: s,
+        endSec: e,
+        label: (c.hookText || c.title).slice(0, 22).toLowerCase(),
+        endSfxId: 'sfx-metal-pipe',
+        endSfxOffset: 1.0,
+      });
+    });
+    renderTopNBuilder();
+    toast('⚡ Top 5 otomatis terisi (#5 → #1 klimaks)!', 'ok');
+  });
+
+  $('btnClearTopN').addEventListener('click', () => {
+    state.topNSlots = [];
+    renderTopNBuilder();
+  });
+
+  ['topNMode', 'topNBumperDur', 'topNOutro'].forEach((id) => {
+    $(id).addEventListener('change', renderTopNBuilder);
+  });
+
+  $('btnRenderTopN').addEventListener('click', async () => {
+    if (state.topNSlots.length === 0) return;
+    const camp = getActiveCampaign();
+    const payload = {
+      campaignId: camp ? camp.id : '',
+      title: $('topNTitle').value.trim() || `Top ${state.topNSlots.length} Viral Moments`,
+      mode: $('topNMode').value,
+      segments: state.topNSlots,
+      layout: {
+        ...state.layout,
+        aspectRatio: '9:16',
+        resolution: $('selRes').value || '1080p',
+        cropMode: $('topNLayout').value,
+      },
+      subtitles: { enabled: false },
+      videoFx: {
+        colorPreset: $('topNVivid').checked ? 'vivid_gaming' : 'none',
+        motionPreset: 'none',
+        speed: 1.0,
+        sharpen: true,
+      },
+      bumperDuration: parseFloat($('topNBumperDur').value) || 0.85,
+      bumperSfxId: $('topNBumperSFX').value || '',
+      audioNorm: $('topNAudioNorm').checked,
+      useWatermark: $('topNWatermark').checked,
+      useOutro: $('topNOutro').checked,
+    };
+    try {
+      await api('/api/jobs/compile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      toast(`🏆 Kompilasi "${payload.title}" masuk antrean render!`, 'ok');
+      switchTab('queue');
+    } catch (e) {
+      toast('Gagal render kompilasi: ' + e.message, 'err');
+    }
   });
 
   window.addEventListener('resize', () => {

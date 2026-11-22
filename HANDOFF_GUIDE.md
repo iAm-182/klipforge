@@ -121,7 +121,10 @@ Base URL: `http://127.0.0.1:8787` (lokal) atau `https://klip.breakthematrix.id` 
 | `POST /api/projects/analyze` | Mulai scan YouTube `{url, campaignId, downloadFull, includeChat, includeAudio}` |
 | `GET /api/projects/{id}` | Ambil metadata, timeline & kandidat momen hits |
 | `POST /api/projects/{id}/reanalyze` | Hitung ulang kandidat instan dengan bobot deteksi baru |
+| `GET /api/projects/{id}/search?q=...` | Cari kata kunci spesifik di transkrip VOD (`wasted`, `nyetir`, `pipa`, dll.) dalam <5ms |
+| `POST /api/projects/{id}/scan-audio` | Download audio ringan (≤64kbps) untuk deteksi teriakan & ketawa keras |
 | `POST /api/jobs/render` / `POST /api/jobs/batch` | Antre render 1 klip atau batch banyak klip |
+| `POST /api/jobs/compile` | Render video **Top-N Countdown (5→1)** atau **Rapid Compilation Montage** + bumper Vine Boom + Outro |
 | `GET /api/jobs` | Daftar semua job (cek `status`, `reviewStatus`, `postCaption`, `compliance`) |
 | `POST /api/jobs/{id}/review` | Human Approval `{reviewStatus: "approved"\|"rejected", reviewNote, postCaption, deleteFileOnReject}` |
 | `GET /api/jobs/{id}/video?download=1` | Stream / download hasil MP4 |

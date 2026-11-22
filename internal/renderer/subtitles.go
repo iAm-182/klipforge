@@ -11,8 +11,9 @@ import (
 
 // GenerateASS creates a pro TikTok/CapCut-style ASS subtitle + animated Hook Title overlay file.
 // Uses YouTube's word-level timestamps when available for TRUE word-by-word karaoke highlighting
-// with pop-in bounce animation, plus a sleek 4.5s animated Hook Title banner (zero emoji tofu boxes!).
-func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, outW, outH int, style model.SubtitleStyle, hookText string, destPath string) (int, error) {
+// with pop-in bounce animation, plus a sleek Hook Title banner (white-ribbon black text when cropMode=="facecam_top_ribbon",
+// or 4.8s animated viral headline otherwise — zero emoji tofu boxes!).
+func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, outW, outH int, style model.SubtitleStyle, hookText, cropMode, destPath string) (int, error) {
 	if speed <= 0.5 || speed > 2.0 {
 		speed = 1.0
 	}
@@ -104,11 +105,25 @@ func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, 
 		"Style: Viral,%s,%d,%s,%s,%s,%s,-1,0,0,0,100,100,1,0,%d,%d,%d,%d,56,56,%d,1\n",
 		fontName, scaledSize, baseColor, highlightColor, outlineColor, backColor, borderStyle, outline, shadow, alignment, marginV,
 	))
-	// Hook Banner Style: Vibrant yellow/white headline pops in cleanly for first 4.5s, then fades out!
-	sb.WriteString(fmt.Sprintf(
-		"Style: HookBanner,%s,%d,&H0000EAFF,&H00FFFFFF,&H00000000,&HAA000000,-1,0,0,0,100,100,1.5,0,1,8,4,8,64,64,%d,1\n\n",
-		fontName, hookFontSize, hookMarginV,
-	))
+	// Hook Banner Style:
+	// - In "facecam_top_ribbon" (@bngrmz_ 243K views style!): Pure bold BLACK text centered inside the white middle ribbon for full duration!
+	// - In all other layouts: Vibrant yellow headline pops in cleanly for first 4.8s, then fades out!
+	isRibbon := cropMode == "facecam_top_ribbon"
+	if isRibbon {
+		ribFont := int(float64(outW) * 0.062)
+		if ribFont < 32 {
+			ribFont = 32
+		}
+		sb.WriteString(fmt.Sprintf(
+			"Style: HookBanner,Arial,%d,&H00111111,&H00111111,&H00FFFFFF,&H00000000,-1,0,0,0,100,100,1.2,0,1,0,0,5,36,36,0,1\n\n",
+			ribFont,
+		))
+	} else {
+		sb.WriteString(fmt.Sprintf(
+			"Style: HookBanner,%s,%d,&H0000EAFF,&H00FFFFFF,&H00000000,&HAA000000,-1,0,0,0,100,100,1.5,0,1,8,4,8,64,64,%d,1\n\n",
+			fontName, hookFontSize, hookMarginV,
+		))
+	}
 
 	sb.WriteString("[Events]\n")
 	sb.WriteString("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
@@ -116,17 +131,26 @@ func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, 
 	clipDur := (clipEnd - clipStart) / speed
 	written := 0
 
-	// 1. Sleek Animated Hook Headline (first 4.8 seconds with punch pop-in & smooth fade-out!)
+	// 1. Sleek Hook Headline (full duration inside white ribbon, OR 4.8s animated viral top headline!)
 	if cleanHook != "" {
-		hookEnd := 4.8
-		if clipDur < hookEnd {
-			hookEnd = clipDur
+		if isRibbon {
+			ribCenterY := int(float64(outH)*0.33) + int(float64(outH)*0.085)/2
+			wrapped := strings.ReplaceAll(wrapText(strings.ToUpper(cleanHook), 26), "\n", `\N`)
+			sb.WriteString(fmt.Sprintf(
+				"Dialogue: 2,0:00:00.00,%s,HookBanner,,0,0,0,,{\\an5\\pos(%d,%d)}%s\n",
+				formatASSTime(clipDur), outW/2, ribCenterY, sanitizeASSText(wrapped),
+			))
+		} else {
+			hookEnd := 4.8
+			if clipDur < hookEnd {
+				hookEnd = clipDur
+			}
+			wrapped := strings.ReplaceAll(wrapText(strings.ToUpper(cleanHook), 22), "\n", `\N`)
+			sb.WriteString(fmt.Sprintf(
+				"Dialogue: 2,0:00:00.00,%s,HookBanner,,0,0,0,,{\\fad(140,420)\\fscx115\\fscy115\\t(0,160,\\fscx100\\fscy100)}%s\n",
+				formatASSTime(hookEnd), sanitizeASSText(wrapped),
+			))
 		}
-		wrapped := strings.ReplaceAll(wrapText(strings.ToUpper(cleanHook), 22), "\n", `\N`)
-		sb.WriteString(fmt.Sprintf(
-			"Dialogue: 2,0:00:00.00,%s,HookBanner,,0,0,0,,{\\fad(140,420)\\fscx115\\fscy115\\t(0,160,\\fscx100\\fscy100)}%s\n",
-			formatASSTime(hookEnd), sanitizeASSText(wrapped),
-		))
 		written++
 	}
 

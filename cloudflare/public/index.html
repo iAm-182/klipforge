@@ -20,11 +20,12 @@
 
       <nav class="nav-tabs" id="navTabs">
         <button class="nav-btn active" data-tab="studio">🎬 Studio Clipper</button>
+        <button class="nav-btn" data-tab="topn">🏆 Top-N &amp; Kompilasi <span class="pill-count pill-green" id="navTopNCount">0</span></button>
         <button class="nav-btn" data-tab="autopilot">🤖 Autopilot &amp; Review <span class="pill-count pill-amber" id="navReviewCount">0</span></button>
         <button class="nav-btn" data-tab="audio">🎵 BGM &amp; SFX Pack</button>
-        <button class="nav-btn" data-tab="campaigns">🏆 Campaign Rules</button>
+        <button class="nav-btn" data-tab="campaigns">📋 Campaign Rules</button>
         <button class="nav-btn" data-tab="queue">📦 Queue &amp; Clips <span class="pill-count" id="navJobCount">0</span></button>
-        <button class="nav-btn" data-tab="settings">⚙️ Settings &amp; Logs</button>
+        <button class="nav-btn" data-tab="settings">⚙️ Settings</button>
       </nav>
 
       <div class="topbar-right">
@@ -178,14 +179,39 @@
           <!-- Interactive Hype Canvas -->
           <div class="chart-wrap">
             <div class="chart-legend">
-              <span><i class="dot dot-comb"></i> Combined Viral Score</span>
-              <span><i class="dot dot-heat"></i> Most Replayed Heatmap</span>
-              <span><i class="dot dot-chat"></i> Live Chat Explosion</span>
-              <span><i class="dot dot-audio"></i> Audio Loudness Peak</span>
-              <span class="muted ml-auto">Klik puncak di grafik untuk langsung preview detik tersebut</span>
+              <span><i class="dot dot-comb"></i> Combined Score</span>
+              <span><i class="dot dot-heat"></i> Heatmap</span>
+              <span><i class="dot dot-chat"></i> Live Chat</span>
+              <span><i class="dot dot-audio"></i> Audio Keras (Teriak/Ledakan)</span>
+              <span><i class="dot dot-trans"></i> Reaksi Indo (Transkrip)</span>
+              <span class="muted ml-auto">Tip: Merah + Cyan naik bareng = Golden Moment!</span>
             </div>
             <canvas id="hypeChart" height="175"></canvas>
             <div id="chartTooltip" class="chart-tooltip hidden"></div>
+          </div>
+
+          <!-- Instant VOD Transcript Search Bar (Find exact topics like "wasted", "nyetir", "pipa", "polisi" in 5ms!) -->
+          <div class="search-trans-box">
+            <div class="search-trans-head">
+              <div class="search-input-wrap">
+                <input type="text" id="inpTransSearch" class="input input-sm" placeholder="🔍 Cari momen spesifik di transkrip VOD (ketik: wasted, nyetir, nabrak, polisi, pipa, kocak, jago...)" />
+                <button class="btn btn-xs btn-primary" id="btnTransSearch">Cari</button>
+                <button class="btn btn-xs btn-ghost hidden" id="btnTransClear">✕</button>
+              </div>
+              <div class="topic-pills" id="topicPills">
+                <button class="topic-pill" data-q="nyetir">nyetir</button>
+                <button class="topic-pill" data-q="nabrak">nabrak</button>
+                <button class="topic-pill" data-q="polisi">polisi</button>
+                <button class="topic-pill" data-q="wasted">wasted</button>
+                <button class="topic-pill" data-q="review mati">review mati</button>
+                <button class="topic-pill" data-q="pipa">pipa</button>
+                <button class="topic-pill" data-q="kocak">kocak</button>
+                <button class="topic-pill" data-q="panik">panik</button>
+                <button class="topic-pill" data-q="jago">jago</button>
+                <button class="topic-pill" data-q="kaget">kaget</button>
+              </div>
+            </div>
+            <div id="transSearchResults" class="trans-results hidden"></div>
           </div>
         </section>
 
@@ -213,7 +239,8 @@
                   <label>End (dtk) <input type="number" id="manualEnd" class="input input-sm" value="75" min="1" /></label>
                   <label class="grow">Hook Text (Opsional) <input type="text" id="manualHook" class="input input-sm" placeholder="Contoh: WINDAH KAGET LIAT GTA VI! 😭🔥" /></label>
                 </div>
-                <button class="btn btn-sm btn-secondary" id="btnRenderManual">✂️ Render Custom Range</button>
+                <button class="btn btn-sm btn-secondary" id="btnAddManualToTopN">➕ Top-N</button>
+                <button class="btn btn-sm btn-primary" id="btnRenderManual">✂️ Render Range</button>
               </div>
             </section>
 
@@ -229,13 +256,13 @@
               <div class="layout-controls-grid">
                 <label>Mode Layout
                   <select id="selCropMode" class="input input-sm">
-                    <option value="gaming_cinema">🎬 Gaming Cinema (Full 16:9 Gameplay + Frame Facecam — Pro!)</option>
-                    <option value="split_custom">Split Custom (Gameplay + Facecam Bebas)</option>
-                    <option value="split_right">Split Kanan-Bawah (Facecam Kanan Bawah)</option>
-                    <option value="split_left">Split Kiri-Bawah (Facecam Kiri Bawah)</option>
-                    <option value="split_top_right">Split Kanan-Atas (Facecam Kanan Atas)</option>
-                    <option value="split_top_left">Split Kiri-Atas (Facecam Kiri Atas)</option>
-                    <option value="blur_bg">Full Gameplay + Blur Background (9:16)</option>
+                    <option value="facecam_top_ribbon">👑 Facecam Atas + Pita Putih Judul (Gaya @bngrmz_ 243K!)</option>
+                    <option value="facecam_top_clean">🏆 Facecam Atas Bersih (Gaya @bng.ghan Top 5!)</option>
+                    <option value="gaming_cinema">🎬 Gaming Cinema (Full 16:9 Gameplay + Frame Facecam)</option>
+                    <option value="split_custom">Split Custom (Gameplay Atas + Facecam Bawah)</option>
+                    <option value="split_right">Split Kanan-Bawah</option>
+                    <option value="split_left">Split Kiri-Bawah</option>
+                    <option value="blur_bg">Full 16:9 + Blur Background (Gaya @flashklip)</option>
                     <option value="center">Center Crop (9:16)</option>
                     <option value="original">Original (16:9 Landscape)</option>
                   </select>
@@ -421,9 +448,12 @@
                 </div>
               </div>
 
-              <div class="batch-bar">
-                <button class="btn btn-accent btn-block" id="btnAutoClipBatch">
-                  ⚡ AUTO-CLIP TERPILIH (<span id="selectedCount">0</span> KLIP)
+              <div class="batch-bar batch-dual">
+                <button class="btn btn-accent" id="btnAutoClipBatch">
+                  ⚡ AUTO-CLIP (<span id="selectedCount">0</span>)
+                </button>
+                <button class="btn btn-primary" id="btnSendSelectedToTopN" title="Gabungkan semua momen tercentang ke Top-N / Kompilasi Builder!">
+                  🏆 Gabung Jadi Top-N
                 </button>
               </div>
 
@@ -431,6 +461,84 @@
             </section>
           </div>
         </div>
+      </div>
+    </main>
+
+    <!-- ==================== TAB: TOP-N & KOMPILASI BUILDER ==================== -->
+    <main id="tab-topn" class="tab-panel">
+      <div class="studio-grid">
+        <!-- Left: Top-N Settings & Live Preview -->
+        <section class="card">
+          <div class="card-head">
+            <div>
+              <h2>🏆 Auto Top-N &amp; Kompilasi Builder</h2>
+              <div class="muted text-xs">Gabungkan 3–8 momen pendek jadi 1 video Countdown Top 5 (gaya @bng.ghan 23K) atau Rapid Montage (gaya @rapzz05 170K)!</div>
+            </div>
+          </div>
+
+          <label>Judul Utama Video Kompilasi
+            <input type="text" id="topNTitle" class="input input-lg" value="Top 5 Windah Basudara Nyetir" placeholder="Contoh: Top 5 Windah Basudara Nyetir di GTA VI" />
+          </label>
+
+          <div class="form-grid-2 mt-12">
+            <label>Gaya Kompilasi
+              <select id="topNMode" class="input">
+                <option value="top_countdown">🏆 Countdown Top-N (5 → 4 → 3 → 2 → 1 + Bumper Hitam)</option>
+                <option value="rapid_montage">⚡ Kompilasi Cepat / Rapid Montage (Gaya @rapzz05)</option>
+              </select>
+            </label>
+            <label>Layout Kompilasi
+              <select id="topNLayout" class="input">
+                <option value="facecam_top_clean">🏆 Facecam Atas + Gameplay Bawah (Gaya @bng.ghan — Best!)</option>
+                <option value="facecam_top_ribbon">👑 Facecam Atas + Pita Putih Judul (Gaya @bngrmz_)</option>
+                <option value="blur_bg">🎬 Full 16:9 + Blur Background (Gaya @rapzz05)</option>
+                <option value="gaming_cinema">🎮 Gaming Cinema (Full 16:9 + Frame Facecam)</option>
+              </select>
+            </label>
+            <label>Durasi Layar Hitam Transisi (dtk)
+              <input type="number" step="0.1" min="0" max="2" id="topNBumperDur" class="input" value="0.85" />
+            </label>
+            <label>SFX Transisi Antar Klip
+              <select id="topNBumperSFX" class="input">
+                <option value="sfx-boom">💥 Deep Bass Boom (Vine Impact)</option>
+                <option value="sfx-bassdrop">🔊 Jedag-Jedug Sub Kick</option>
+                <option value="sfx-metal-pipe">🔧 Metal Pipe Crash Clang</option>
+                <option value="sfx-glitch">⚡ Glitch Zap Cut</option>
+                <option value="">Tanpa SFX Transisi</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="edit-options-grid mt-12">
+            <label class="check-box"><input type="checkbox" id="topNWatermark" checked /><span>Pasang Watermark MotionKlip</span></label>
+            <label class="check-box"><input type="checkbox" id="topNOutro" checked /><span>Pasang Outro 4s Bersih di Akhir</span></label>
+            <label class="check-box"><input type="checkbox" id="topNAudioNorm" checked /><span>Audio Loudnorm (-14 LUFS)</span></label>
+            <label class="check-box"><input type="checkbox" id="topNVivid" checked /><span>Vivid Gaming Color</span></label>
+          </div>
+
+          <div class="topn-summary-bar mt-16">
+            <div>
+              <strong id="topNSummaryText">0 klip dalam antrean Top-N</strong>
+              <div class="muted text-xs" id="topNDurEstimate">Tambahkan 3–5 klip pendek (10–20 dtk) dari Studio atau Search Transkrip untuk watch time FYP optimal (60–95 dtk)!</div>
+            </div>
+            <button class="btn btn-accent btn-lg" id="btnRenderTopN" disabled>🏆 RENDER KOMPILASI TOP-N</button>
+          </div>
+        </section>
+
+        <!-- Right: Ordered Top-N Slot Queue (5 -> 4 -> 3 -> 2 -> 1) -->
+        <section class="card">
+          <div class="card-head">
+            <div>
+              <h3>📋 Urutan Tayang (Dari Peringkat Bawah → #1 Paling Pecah!)</h3>
+              <div class="muted text-xs">Urutan paling atas tayang duluan (misal #5), urutan paling bawah adalah klimaks #1!</div>
+            </div>
+            <div class="head-actions">
+              <button class="btn btn-xs btn-secondary" id="btnFillTop5FromProject">⚡ Isi Otomatis Top 5</button>
+              <button class="btn btn-xs btn-danger-ghost" id="btnClearTopN">Kosongkan</button>
+            </div>
+          </div>
+          <div id="topNSlotsList" class="topn-slots-list"></div>
+        </section>
       </div>
     </main>
 

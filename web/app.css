@@ -91,7 +91,90 @@ html, body {
   border-radius: 99px;
 }
 .pill-amber { background: var(--amber); color: #0b0f17; font-weight: 800; }
+.pill-green { background: var(--accent); color: #052e16; font-weight: 800; }
 .review-filter.active { background: rgba(99, 102, 241, 0.28); border-color: var(--primary-hi); color: #fff; }
+.dot-trans { background: #06b6d4; }
+.batch-dual { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+/* Transcript Search Box */
+.search-trans-box {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.search-trans-head { display: flex; flex-direction: column; gap: 8px; }
+.search-input-wrap { display: flex; gap: 6px; align-items: center; }
+.topic-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+.topic-pill {
+  background: rgba(6, 182, 212, 0.12);
+  border: 1px solid rgba(6, 182, 212, 0.35);
+  color: #67e8f9;
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 99px;
+  cursor: pointer;
+}
+.topic-pill:hover { background: rgba(6, 182, 212, 0.28); color: #fff; }
+.trans-results {
+  margin-top: 10px;
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.trans-hit {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 12px;
+}
+.trans-hit-time {
+  font-weight: 800;
+  color: #67e8f9;
+  min-width: 52px;
+}
+.trans-hit-ctx { flex: 1; color: #cbd5e1; }
+.trans-hit-acts { display: flex; gap: 5px; flex-shrink: 0; }
+
+/* Top-N Compilation Builder */
+.topn-summary-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: linear-gradient(90deg, rgba(16,185,129,0.14), rgba(99,102,241,0.14));
+  border: 1px solid rgba(16,185,129,0.4);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.topn-slots-list { display: flex; flex-direction: column; gap: 10px; }
+.topn-slot {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.topn-slot.climax { border-color: var(--amber); background: rgba(245,158,11,0.06); }
+.topn-slot-head { display: flex; align-items: center; gap: 8px; }
+.rank-badge {
+  font-weight: 900;
+  font-size: 13px;
+  padding: 3px 9px;
+  border-radius: 7px;
+  background: rgba(245,158,11,0.22);
+  color: #fcd34d;
+}
+.topn-slot-grid { display: grid; grid-template-columns: 1fr 78px 78px 145px; gap: 6px; align-items: end; }
 
 .topbar-right { display: flex; align-items: center; gap: 10px; }
 .status-dot {

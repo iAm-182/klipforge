@@ -142,6 +142,32 @@ var builtInPack = []synthSpec{
 			"-af", "afade=t=out:st=0.55:d=0.2",
 		},
 	},
+	{
+		ID:       "sfx-metal-pipe",
+		Name:     "Metal Pipe Crash Clang (Meme Nabrak!)",
+		Kind:     "sfx",
+		Category: "Meme / Crash",
+		FileName: "builtin_sfx_metal_pipe.wav",
+		Duration: 1.5,
+		Args: []string{
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='(0.45*sin(2*PI*682*t)+0.40*sin(2*PI*1194*t)+0.35*sin(2*PI*1873*t)+0.30*sin(2*PI*2741*t)+0.22*sin(2*PI*3910*t))*exp(-2.8*t)':s=48000:d=1.5",
+			"-af", "aecho=0.8:0.75:35:0.4,alimiter=limit=0.95,afade=t=out:st=1.1:d=0.4",
+		},
+	},
+	{
+		ID:       "sfx-record-scratch",
+		Name:     "Record Scratch / Fail Stop (Meme)",
+		Kind:     "sfx",
+		Category: "Meme / Fail",
+		FileName: "builtin_sfx_record_scratch.wav",
+		Duration: 0.65,
+		Args: []string{
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='0.75*sin(2*PI*(1100*exp(-5.5*t)+120*sin(2*PI*18*t))*t)*exp(-2.2*t)':s=48000:d=0.65",
+			"-af", "bandpass=f=900:w=700,afade=t=out:st=0.48:d=0.17",
+		},
+	},
 
 	// --- DMCA-Free Backsound (BGM) Loops ---
 	{

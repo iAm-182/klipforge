@@ -76,7 +76,7 @@ func TestRenderClipFullPipelineWithFXBGMSFXWatermarkAndCleanOutro(t *testing.T) 
 		MaxWordsPerRow: 4,
 		Uppercase:      true,
 	}
-	n, err := GenerateASS(cues, 1.0, 5.0, 1.05, 720, 1280, subStyle, "WINDAH KAGET LIAT GTA VI! 🔥", assPath)
+	n, err := GenerateASS(cues, 1.0, 5.0, 1.05, 720, 1280, subStyle, "WINDAH KAGET LIAT GTA VI! 🔥", "facecam_top_ribbon", assPath)
 	if err != nil || n == 0 {
 		t.Fatalf("GenerateASS failed: n=%d err=%v", n, err)
 	}
@@ -94,10 +94,10 @@ func TestRenderClipFullPipelineWithFXBGMSFXWatermarkAndCleanOutro(t *testing.T) 
 		Layout: model.LayoutConfig{
 			AspectRatio: "9:16",
 			Resolution:  "720p",
-			CropMode:    "split_custom",
+			CropMode:    "facecam_top_ribbon",
 			SplitRatio:  0.62,
 			GameplayBox: model.CropBox{X: 0.14, Y: 0.0, W: 0.72, H: 1.0},
-			FacecamBox:  model.CropBox{X: 0.70, Y: 0.60, W: 0.30, H: 0.40},
+			FacecamBox:  model.CropBox{X: 0.77, Y: 0.67, W: 0.23, H: 0.33},
 		},
 		Subtitles:    subStyle,
 		SubtitleFile: assPath,
@@ -154,6 +154,60 @@ func TestRenderClipFullPipelineWithFXBGMSFXWatermarkAndCleanOutro(t *testing.T) 
 	// Expected duration: ~(4.0/1.05 = 3.81s) main + 3.0s outro = ~6.81s
 	if info.Duration < 6.0 || info.Duration > 7.6 {
 		t.Fatalf("expected final duration ~6.8s (main + clean 3s outro), got %.2fs", info.Duration)
+	}
+
+	// 6. Test Auto Top-2 Compilation Builder (facecam_top_clean + Black Vine-Boom Bumper + Metal Pipe Crash SFX + Clean 3s Outro!)
+	sfxPipe, okPipe := audioLib.Get("sfx-metal-pipe")
+	if !okPipe {
+		t.Fatalf("expected built-in sfx-metal-pipe generated")
+	}
+	compMP4 := filepath.Join(tmpDir, "top2_compilation.mp4")
+	compInfo, err := RenderCompilation(ctx, CompileInput{
+		FFmpegPath:  st.FFmpegPath,
+		FFprobePath: st.FFprobePath,
+		OutputPath:  compMP4,
+		WorkDir:     filepath.Join(tmpDir, "comp_work"),
+		Title:       "Top 2 Windah Basudara Nyetir",
+		Mode:        "top_countdown",
+		Segments: []ResolvedCompileSegment{
+			{SourcePath: srcVideo, SeekStart: 0.5, ClipDuration: 2.2, RankNumber: 2, Label: "ngetrail", EndSFXPath: sfxPipe.FilePath, EndSFXOffset: 0.8},
+			{SourcePath: srcVideo, SeekStart: 2.5, ClipDuration: 2.2, RankNumber: 1, Label: "paling jago", EndSFXPath: sfxBoom.FilePath, EndSFXOffset: 0.8},
+		},
+		AllRankLabels: map[int]string{2: "ngetrail", 1: "paling jago"},
+		Layout: model.LayoutConfig{
+			AspectRatio: "9:16",
+			Resolution:  "720p",
+			CropMode:    "facecam_top_clean",
+			GameplayBox: model.CropBox{X: 0.14, Y: 0.0, W: 0.72, H: 1.0},
+			FacecamBox:  model.CropBox{X: 0.77, Y: 0.67, W: 0.23, H: 0.33},
+		},
+		AudioNorm:      true,
+		BumperDuration: 0.8,
+		BumperSFXPath:  sfxBoom.FilePath,
+		Watermark: &model.WatermarkConfig{
+			Enabled:  true,
+			FilePath: wmPNG,
+			Position: "top-right",
+			Scale:    0.20,
+			Opacity:  0.90,
+			MarginPx: 20,
+		},
+		Outro: &model.ClipAssetVideo{
+			Enabled:  true,
+			FilePath: outroVideo,
+			Duration: 3.0,
+			KeepRaw:  true,
+		},
+		Encoder: "libx264",
+		Preset:  "ultrafast",
+		CRF:     23,
+	})
+	if err != nil {
+		t.Fatalf("RenderCompilation failed: %v", err)
+	}
+	// Expected duration: 2.2s + 0.8s bumper + 2.2s + 3.0s outro = ~8.2s
+	if compInfo.Duration < 7.2 || compInfo.Duration > 9.4 {
+		t.Fatalf("expected compilation duration ~8.2s, got %.2fs", compInfo.Duration)
 	}
 }
 

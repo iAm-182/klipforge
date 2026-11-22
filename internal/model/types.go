@@ -122,12 +122,22 @@ type Campaign struct {
 
 // TimelinePoint represents normalized engagement signals at a specific timestamp bucket.
 type TimelinePoint struct {
-	TimeSec    float64 `json:"timeSec"`
-	Heatmap    float64 `json:"heatmap"`    // 0.0 - 1.0
-	ChatHype   float64 `json:"chatHype"`   // 0.0 - 1.0
-	AudioPeak  float64 `json:"audioPeak"`  // 0.0 - 1.0
-	Combined   float64 `json:"combined"`   // 0.0 - 1.0
-	ChatCount  int     `json:"chatCount"`  // Raw messages in bucket
+	TimeSec        float64 `json:"timeSec"`
+	Heatmap        float64 `json:"heatmap"`        // 0.0 - 1.0
+	ChatHype       float64 `json:"chatHype"`       // 0.0 - 1.0
+	AudioPeak      float64 `json:"audioPeak"`      // 0.0 - 1.0
+	TranscriptHype float64 `json:"transcriptHype"` // 0.0 - 1.0 (Indonesian speech reaction density)
+	Combined       float64 `json:"combined"`       // 0.0 - 1.0
+	ChatCount      int     `json:"chatCount"`      // Raw messages in bucket
+}
+
+// TranscriptHit is a search result from the instant VOD transcript search bar.
+type TranscriptHit struct {
+	StartSec float64 `json:"startSec"`
+	EndSec   float64 `json:"endSec"`
+	TimeText string  `json:"timeText"`
+	Text     string  `json:"text"`
+	Context  string  `json:"context"`
 }
 
 // Chapter represents a YouTube video chapter.
@@ -259,15 +269,47 @@ type RenderOptions struct {
 	CRF          int             `json:"crf"`     // default 20
 }
 
+// CompileSegment is one clip slot inside a Top-N Countdown or Rapid Compilation video.
+type CompileSegment struct {
+	ProjectID   string  `json:"projectId"`
+	StartSec    float64 `json:"startSec"`
+	EndSec      float64 `json:"endSec"`
+	Label       string  `json:"label"`       // e.g. "ngetrail", "el alasan", "paling jago"
+	EndSFXID    string  `json:"endSfxId"`    // Optional punchline SFX near end (e.g. "sfx-metal-pipe", "sfx-boom")
+	EndSFXOffset float64 `json:"endSfxOffset"` // Seconds before segment end (default 1.0s)
+}
+
+// CompileOptions configures an Auto Top-N Countdown (5->1) or Rapid Compilation render.
+type CompileOptions struct {
+	CampaignID       string           `json:"campaignId"`
+	Title            string           `json:"title"`            // e.g. "Top 5 Windah Basudara Nyetir"
+	Mode             string           `json:"mode"`             // "top_countdown" (5->1 + black bumper) or "rapid_montage" (fast multi-cut)
+	Segments         []CompileSegment `json:"segments"`         // Ordered in playback order (e.g. #5, #4, #3, #2, #1)
+	Layout           LayoutConfig     `json:"layout"`
+	Subtitles        SubtitleStyle    `json:"subtitles"`
+	AudioFX          AudioFXConfig    `json:"audioFx"`
+	VideoFX          VideoFXConfig    `json:"videoFx"`
+	BumperDuration   float64          `json:"bumperDuration"`   // Default 0.85s black bumper between Top-N clips
+	BumperSFXID      string           `json:"bumperSfxId"`      // Default "sfx-boom"
+	AudioNorm        bool             `json:"audioNorm"`
+	UseWatermark     bool             `json:"useWatermark"`
+	UseOutro         bool             `json:"useOutro"`
+	Encoder          string           `json:"encoder"`
+	Preset           string           `json:"preset"`
+	CRF              int              `json:"crf"`
+}
+
 // RenderJob tracks a queued, running, completed, or failed clip render.
 type RenderJob struct {
 	ID            string          `json:"id"`
+	JobType       string          `json:"jobType,omitempty"` // "" / "single" or "compilation"
 	ProjectID     string          `json:"projectId"`
 	ProjectTitle  string          `json:"projectTitle"`
 	CampaignID    string          `json:"campaignId"`
 	CampaignName  string          `json:"campaignName"`
 	Title         string          `json:"title"`
 	Options       RenderOptions   `json:"options"`
+	CompileOpts   *CompileOptions `json:"compileOpts,omitempty"`
 	Status        string          `json:"status"`        // queued, downloading, rendering, done, error, canceled
 	Stage         string          `json:"stage"`         // human readable stage
 	Progress      float64         `json:"progress"`      // 0 - 100

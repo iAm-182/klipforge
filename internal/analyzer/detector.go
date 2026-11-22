@@ -46,6 +46,20 @@ var speechHypeKeywords = []string{
 	"ngakak", "lucu", "kocak", "gokil", "mantap", "keren", "serius", "kacau", "sialan",
 	"bangsat", "woy", "woi", "wkwk", "haha", "gg", "epic", "clutch", "omg", "wtf", "oh my god",
 	"no way", "crazy", "what the", "tertawa", "tepuk tangan", "wah", "eh eh", "jangan", "lari",
+	"nyetir", "nabrak", "jago", "wasted", "bocor", "pipa", "goblok", "anjing", "babi", "sumpah", "bocil",
+}
+
+// Indonesian streamer presence tokens vs English cutscene dialogue tokens (prevents quiet English cutscenes from topping the list!).
+var indoStreamerTokens = []string{
+	"gua ", "gue ", "guys", "cuy", "bang ", "bocil", "anjir", "kocak", "parah", "bener",
+	"kalau", "enggak", "gak ", "nih ", "sih ", "dong", "tuh ", "kok ", "anjay", "gila",
+	"aduh", "waduh", "tolong", "kabur", "nyetir", "nabrak", "polisi", "jago", "lihat", "liat",
+}
+
+var englishCutsceneTokens = []string{
+	"what's the", "going on", "you sure", "all right", "gonna ", "don't ", "nothing",
+	"because ", "should ", "would ", "could ", "something", "anything", "listen ",
+	"sorry", "we'll ", "that's ", "they're ", "i'm ", "you're ", "let's see", "how's it",
 }
 
 // DetectHype runs multi-signal fusion (Heatmap + Live Chat + Audio Energy + Instant Transcript Hype) and extracts ranked clip candidates.
@@ -288,7 +302,7 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 		if end > dur {
 			end = dur
 		}
-		var maxH, maxC, maxA, maxComb float64
+		var maxH, maxC, maxA, maxT, maxComb float64
 		var sumChat int
 		for j := i; j < end; j++ {
 			if heatGrid[j] > maxH {
@@ -300,18 +314,22 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 			if audioGrid[j] > maxA {
 				maxA = audioGrid[j]
 			}
+			if transcriptGrid[j] > maxT {
+				maxT = transcriptGrid[j]
+			}
 			if combined[j] > maxComb {
 				maxComb = combined[j]
 			}
 			sumChat += chatCounts[j]
 		}
 		timeline = append(timeline, model.TimelinePoint{
-			TimeSec:   float64(i),
-			Heatmap:   round3(maxH),
-			ChatHype:  round3(maxC),
-			AudioPeak: round3(maxA),
-			Combined:  round3(maxComb),
-			ChatCount: sumChat,
+			TimeSec:        float64(i),
+			Heatmap:        round3(maxH),
+			ChatHype:       round3(maxC),
+			AudioPeak:      round3(maxA),
+			TranscriptHype: round3(maxT),
+			Combined:       round3(maxComb),
+			ChatCount:      sumChat,
 		})
 	}
 
@@ -560,18 +578,97 @@ func scoreTranscriptCue(cue model.TranscriptCue) float64 {
 	// Base weight from rapid speech intensity
 	score := math.Min(2.5, wps*0.45)
 
-	lower := strings.ToLower(txt)
+	lower := " " + strings.ToLower(txt) + " "
 	kwHits := 0
 	for _, kw := range speechHypeKeywords {
 		if strings.Contains(lower, kw) {
 			kwHits++
 		}
 	}
-	score += float64(kwHits) * 1.6
+	score += float64(kwHits) * 1.8
+
+	// Boost genuine Indonesian streamer commentary vs English NPC/cutscene dialogue!
+	indoHits := 0
+	for _, tk := range indoStreamerTokens {
+		if strings.Contains(lower, tk) {
+			indoHits++
+		}
+	}
+	engHits := 0
+	for _, tk := range englishCutsceneTokens {
+		if strings.Contains(lower, tk) {
+			engHits++
+		}
+	}
+	if indoHits > 0 {
+		score += float64(indoHits) * 0.9
+	} else if engHits > 0 && kwHits == 0 {
+		// Dampen pure English NPC cutscenes so real Windah moments float to #1!
+		score *= 0.25
+	}
+
 	if strings.Contains(txt, "!") || strings.Contains(txt, "?") {
 		score += 0.8
 	}
 	return score
+}
+
+// SearchTranscript performs an instant (<5ms) keyword search across a VOD's transcript cues
+// and returns grouped context hits ready to preview or add to a Top-N compilation!
+func SearchTranscript(cues []model.TranscriptCue, query string, limit int) []model.TranscriptHit {
+	q := strings.TrimSpace(strings.ToLower(query))
+	if q == "" || len(cues) == 0 {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 40
+	}
+	terms := strings.Fields(q)
+	var hits []model.TranscriptHit
+	lastAddedSec := -999.0
+
+	for i, c := range cues {
+		low := strings.ToLower(c.Text)
+		matched := true
+		for _, t := range terms {
+			if !strings.Contains(low, t) {
+				matched = false
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		// Deduplicate hits within 6 seconds of each other
+		if c.Start-lastAddedSec < 6.0 {
+			continue
+		}
+		lastAddedSec = c.Start
+
+		// Build 1-cue before + 2-cues after context snippet so user instantly sees the whole joke/moment!
+		var ctxParts []string
+		from := clampInt(i-1, 0, len(cues)-1)
+		to := clampInt(i+2, i, len(cues)-1)
+		for k := from; k <= to; k++ {
+			ctxParts = append(ctxParts, cues[k].Text)
+		}
+		ctxStr := strings.Join(ctxParts, " ")
+		if len(ctxStr) > 190 {
+			ctxStr = ctxStr[:190] + "..."
+		}
+
+		hits = append(hits, model.TranscriptHit{
+			StartSec: c.Start,
+			EndSec:   c.End,
+			TimeText: FormatMMSS(c.Start),
+			Text:     c.Text,
+			Context:  ctxStr,
+		})
+		if len(hits) >= limit {
+			break
+		}
+	}
+	return hits
 }
 
 func buildReasons(maxH, maxC, maxA, maxT float64, hasH, hasC, hasA, hasT bool) []string {
