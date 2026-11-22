@@ -76,7 +76,7 @@ func TestRenderClipFullPipelineWithFXBGMSFXWatermarkAndCleanOutro(t *testing.T) 
 		MaxWordsPerRow: 4,
 		Uppercase:      true,
 	}
-	n, err := GenerateASS(cues, 1.0, 5.0, 1.05, 720, 1280, subStyle, assPath)
+	n, err := GenerateASS(cues, 1.0, 5.0, 1.05, 720, 1280, subStyle, "WINDAH KAGET LIAT GTA VI! 🔥", assPath)
 	if err != nil || n == 0 {
 		t.Fatalf("GenerateASS failed: n=%d err=%v", n, err)
 	}

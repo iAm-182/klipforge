@@ -247,11 +247,13 @@ func ParseLiveChatFile(path string) ([]ChatMessage, error) {
 }
 
 var (
-	vttTimeRe = regexp.MustCompile(`(\d{1,2}:)?(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{1,2}:)?(\d{2}):(\d{2})[.,](\d{3})`)
-	vttTagRe  = regexp.MustCompile(`<[^>]+>`)
+	vttTimeRe     = regexp.MustCompile(`(\d{1,2}:)?(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{1,2}:)?(\d{2}):(\d{2})[.,](\d{3})`)
+	vttTagRe      = regexp.MustCompile(`<[^>]+>`)
+	vttWordTimeRe = regexp.MustCompile(`<(\d{2}):(\d{2}):(\d{2})\.(\d{3})><c>([^<]*)</c>`)
 )
 
-// ParseSubtitleFile parses a WebVTT (.vtt) or SubRip (.srt) file into deduplicated transcript cues.
+// ParseSubtitleFile parses a WebVTT (.vtt) or SubRip (.srt) file into deduplicated transcript cues,
+// preserving YouTube's native per-word timestamps (<HH:MM:SS.mmm><c> word</c>) for viral karaoke subtitles!
 func ParseSubtitleFile(path string) ([]model.TranscriptCue, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -273,6 +275,7 @@ func ParseSubtitleFile(path string) ([]model.TranscriptCue, error) {
 			end = start + 1.5
 		}
 
+		var rawLines []string
 		var textLines []string
 		for i+1 < len(lines) {
 			next := strings.TrimSpace(lines[i+1])
@@ -283,6 +286,7 @@ func ParseSubtitleFile(path string) ([]model.TranscriptCue, error) {
 			if vttTimeRe.MatchString(next) {
 				break
 			}
+			rawLines = append(rawLines, next)
 			clean := vttTagRe.ReplaceAllString(next, "")
 			clean = html.UnescapeString(clean)
 			clean = strings.TrimSpace(clean)
@@ -295,17 +299,21 @@ func ParseSubtitleFile(path string) ([]model.TranscriptCue, error) {
 		if full == "" {
 			continue
 		}
+
+		// Extract word-level timestamps if this cue contains YouTube inline <c> timing tags
+		words := extractVTTWords(rawLines, start, end)
+
 		raw = append(raw, model.TranscriptCue{
 			Start: start,
 			End:   end,
 			Text:  full,
+			Words: words,
 		})
 	}
 
-	// YouTube auto-captions often repeat rolling lines; deduplicate cleanly
+	// YouTube auto-captions repeat rolling lines; deduplicate cleanly while keeping word timings!
 	var clean []model.TranscriptCue
 	for _, c := range raw {
-		// Skip tiny 10ms YouTube transition cues
 		if c.End-c.Start < 0.08 && len(clean) > 0 {
 			continue
 		}
@@ -315,9 +323,11 @@ func ParseSubtitleFile(path string) ([]model.TranscriptCue, error) {
 				if c.End > prev.End {
 					prev.End = c.End
 				}
+				if len(prev.Words) == 0 && len(c.Words) > 0 {
+					prev.Words = c.Words
+				}
 				continue
 			}
-			// If new cue starts with previous cue's text (rolling VTT), strip prefix
 			if strings.HasPrefix(c.Text, prev.Text) && len(c.Text) > len(prev.Text)+1 {
 				trimmed := strings.TrimSpace(strings.TrimPrefix(c.Text, prev.Text))
 				if trimmed != "" {
@@ -333,6 +343,53 @@ func ParseSubtitleFile(path string) ([]model.TranscriptCue, error) {
 		}
 	}
 	return clean, nil
+}
+
+// extractVTTWords parses YouTube's native inline word timestamps:
+// "Bagaimana<00:00:08.679><c> gua</c><00:00:08.920><c> harus</c>"
+func extractVTTWords(rawLines []string, cueStart, cueEnd float64) []model.WordTiming {
+	var timedLine string
+	for _, rl := range rawLines {
+		if strings.Contains(rl, "<c>") {
+			timedLine = rl
+			break
+		}
+	}
+	if timedLine == "" {
+		return nil
+	}
+
+	var words []model.WordTiming
+	// First word before the first <HH:MM:SS.mmm> tag
+	firstTagIdx := strings.Index(timedLine, "<")
+	if firstTagIdx > 0 {
+		lead := strings.TrimSpace(html.UnescapeString(timedLine[:firstTagIdx]))
+		if lead != "" {
+			words = append(words, model.WordTiming{Start: cueStart, Text: lead})
+		}
+	}
+
+	matches := vttWordTimeRe.FindAllStringSubmatch(timedLine, -1)
+	for _, m := range matches {
+		ts := parseSubTimestamp(m[1]+":", m[2], m[3], m[4])
+		w := strings.TrimSpace(html.UnescapeString(m[5]))
+		if w != "" {
+			words = append(words, model.WordTiming{Start: ts, Text: w})
+		}
+	}
+
+	// Fill End time of each word from the next word's Start time
+	for i := range words {
+		if i+1 < len(words) {
+			words[i].End = words[i+1].Start
+		} else {
+			words[i].End = cueEnd
+		}
+		if words[i].End <= words[i].Start {
+			words[i].End = words[i].Start + 0.18
+		}
+	}
+	return words
 }
 
 func parseSubTimestamp(hStr, mStr, sStr, msStr string) float64 {

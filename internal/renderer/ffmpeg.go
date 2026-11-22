@@ -284,40 +284,34 @@ func RenderClip(ctx context.Context, in RenderInput) (MediaInfo, error) {
 		curV = outLabel
 	}
 
-	// 4. Optional Hook Banner on top safe-zone (ONLY on main clip, NEVER on outro!)
-	hookText := strings.TrimSpace(in.HookText)
-	if hookText != "" {
-		hookFile := filepath.Join(in.WorkDir, "hook.txt")
-		wrappedHook := wrapText(hookText, 24)
-		if err := os.WriteFile(hookFile, []byte(wrappedHook), 0o644); err == nil {
-			fontPath := findBoldFont()
-			fontOpt := ""
-			if fontPath != "" {
-				fontOpt = fmt.Sprintf("fontfile='%s':", EscapeFFmpegFilterPath(fontPath))
-			}
-			fontSize := int(float64(outW) * 0.052)
-			if fontSize < 26 {
-				fontSize = 26
-			}
-			yPos := int(float64(outH) * 0.075)
-			if in.Layout.AspectRatio == "16:9" {
-				yPos = int(float64(outH) * 0.05)
-			}
-			filters = append(filters, fmt.Sprintf(
-				"%sdrawtext=%stextfile='%s':fontcolor=white:fontsize=%d:borderw=4:bordercolor=black:box=1:boxcolor=black@0.58:boxborderw=16:x=(w-text_w)/2:y=%d:line_spacing=8[main_vhook]",
-				curV, fontOpt, EscapeFFmpegFilterPath(hookFile), fontSize, yPos,
-			))
-			curV = "[main_vhook]"
-		}
-	}
-
-	// 5. Optional ASS Viral Subtitles (ONLY on main clip!)
+	// 4. Optional ASS Viral Subtitles + Animated Hook Banner (ONLY on main clip, zero emoji tofu boxes!)
 	if in.SubtitleFile != "" && fileExists(in.SubtitleFile) {
 		filters = append(filters, fmt.Sprintf(
 			"%sass='%s'[main_vsub]",
 			curV, EscapeFFmpegFilterPath(in.SubtitleFile),
 		))
 		curV = "[main_vsub]"
+	} else if hookText := StripUnsupportedEmojis(strings.TrimSpace(in.HookText)); hookText != "" {
+		// Fallback drawtext hook banner (first 4.8s only, emoji-free!)
+		hookFile := filepath.Join(in.WorkDir, "hook.txt")
+		wrappedHook := wrapText(strings.ToUpper(hookText), 22)
+		if err := os.WriteFile(hookFile, []byte(wrappedHook), 0o644); err == nil {
+			fontPath := findBoldFont()
+			fontOpt := ""
+			if fontPath != "" {
+				fontOpt = fmt.Sprintf("fontfile='%s':", EscapeFFmpegFilterPath(fontPath))
+			}
+			fontSize := int(float64(outW) * 0.054)
+			if fontSize < 28 {
+				fontSize = 28
+			}
+			yPos := int(float64(outH) * 0.085)
+			filters = append(filters, fmt.Sprintf(
+				"%sdrawtext=%stextfile='%s':fontcolor=#FFE600:fontsize=%d:borderw=6:bordercolor=black:x=(w-text_w)/2:y=%d:line_spacing=8:enable='between(t,0,4.8)'[main_vhook]",
+				curV, fontOpt, EscapeFFmpegFilterPath(hookFile), fontSize, yPos,
+			))
+			curV = "[main_vhook]"
+		}
 	}
 
 	// 6. Watermark overlay on main clip (default: NOT on outro so 3s MotionKlip template stays pure!)
@@ -633,6 +627,35 @@ func buildLayoutFilter(layout model.LayoutConfig, outW, outH int, inLabel, outLa
 	}
 
 	switch mode {
+	case "gaming_cinema":
+		// PRO GAMING CINEMA: Blurred full-bleed background + Full crisp uncropped 16:9 Gameplay
+		// + Cleanly framed Streamer Facecam below! Zero left/right HUD cutoff & super clean!
+		_, fcBox := resolveSplitBoxes(layout)
+		gpW := outW
+		gpH := makeEven(int(float64(outW) * 9.0 / 16.0))
+		gpY := int(float64(outH) * 0.16)
+		fcW := makeEven(int(float64(outW) * 0.56))
+		fcH := makeEven(int(float64(outH) * 0.27))
+		fcX := (outW - fcW) / 2
+		fcY := gpY + gpH + int(float64(outH)*0.03)
+		if fcY+fcH > outH-int(float64(outH)*0.16) {
+			// Leave safe room at bottom for MotionKlip official watermark!
+			fcY = outH - fcH - int(float64(outH)*0.16)
+		}
+		return fmt.Sprintf(
+			"%ssplit=3[bg_src][gp_src][fc_src];"+
+				"[bg_src]scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,boxblur=28:6,eq=brightness=-0.14:saturation=1.1[bg];"+
+				"[gp_src]scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:black[gp];"+
+				"[fc_src]crop=iw*%.4f:ih*%.4f:iw*%.4f:ih*%.4f,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,drawbox=x=0:y=0:w=iw:h=ih:color=white@0.65:t=5[fc];"+
+				"[bg][gp]overlay=0:%d[tmp1];"+
+				"[tmp1][fc]overlay=%d:%d%s",
+			inLabel,
+			outW, outH, outW, outH,
+			gpW, gpH, gpW, gpH,
+			fcBox.W, fcBox.H, fcBox.X, fcBox.Y, fcW, fcH, fcW, fcH,
+			gpY, fcX, fcY, outLabel,
+		)
+
 	case "blur_bg":
 		return fmt.Sprintf(
 			"%ssplit=2[bg_src][fg_src];"+
@@ -645,7 +668,7 @@ func buildLayoutFilter(layout model.LayoutConfig, outW, outH int, inLabel, outLa
 	case "split_custom", "split_right", "split_left", "split_top_right", "split_top_left":
 		ratio := layout.SplitRatio
 		if ratio < 0.35 || ratio > 0.80 {
-			ratio = 0.62
+			ratio = 0.64
 		}
 		topH := makeEven(int(float64(outH) * ratio))
 		botH := outH - topH
@@ -659,7 +682,7 @@ func buildLayoutFilter(layout model.LayoutConfig, outW, outH int, inLabel, outLa
 			"%ssplit=2[gp_in][fc_in];"+
 				"[gp_in]crop=iw*%.4f:ih*%.4f:iw*%.4f:ih*%.4f,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d[gp_out];"+
 				"[fc_in]crop=iw*%.4f:ih*%.4f:iw*%.4f:ih*%.4f,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d[fc_out];"+
-				"[gp_out][fc_out]vstack=inputs=2,drawbox=x=0:y=%d:w=%d:h=4:color=black@0.85:t=fill%s",
+				"[gp_out][fc_out]vstack=inputs=2,drawbox=x=0:y=%d:w=%d:h=5:color=#FFE600@0.80:t=fill%s",
 			inLabel,
 			gpBox.W, gpBox.H, gpBox.X, gpBox.Y, outW, topH, outW, topH,
 			fcBox.W, fcBox.H, fcBox.X, fcBox.Y, outW, botH, outW, botH,
@@ -715,17 +738,32 @@ func sanitizeBox(b, def model.CropBox) model.CropBox {
 }
 
 func buildWatermarkFilter(baseLabel string, wmIdx, outW, outH int, wm model.WatermarkConfig, outLabel string) (string, string) {
+	opacity := wm.Opacity
+	if opacity <= 0 || opacity > 1.0 {
+		opacity = 0.96
+	}
+	extra := ""
+	if strings.EqualFold(filepath.Ext(wm.FilePath), ".gif") || strings.EqualFold(filepath.Ext(wm.FilePath), ".mov") || strings.EqualFold(filepath.Ext(wm.FilePath), ".webm") {
+		extra = ":shortest=1"
+	}
+
+	// FULL-FRAME 9:16 TEMPLATE MODE (e.g. official MotionKlip 1080x1920 transparent overlay PNG!)
+	// Overlays 1:1 across the entire output frame at exact official position & size!
+	if wm.Position == "full-frame" {
+		filter := fmt.Sprintf(
+			"[%d:v]scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black@0,format=rgba,colorchannelmixer=aa=%.2f[wm_scaled];%s[wm_scaled]overlay=0:0%s%s",
+			wmIdx, outW, outH, outW, outH, opacity, baseLabel, extra, outLabel,
+		)
+		return filter, outLabel
+	}
+
 	scaleRatio := wm.Scale
-	if scaleRatio < 0.05 || scaleRatio > 0.85 {
+	if scaleRatio < 0.05 || scaleRatio > 1.0 {
 		scaleRatio = 0.20
 	}
 	wmW := makeEven(int(float64(outW) * scaleRatio))
 	if wmW < 32 {
 		wmW = 32
-	}
-	opacity := wm.Opacity
-	if opacity <= 0 || opacity > 1.0 {
-		opacity = 0.92
 	}
 	margin := wm.MarginPx
 	if margin < 0 {
@@ -768,11 +806,6 @@ func buildWatermarkFilter(baseLabel string, wmIdx, outW, outH int, wm model.Wate
 		}
 		xExpr = fmt.Sprintf("W*%.4f", cx)
 		yExpr = fmt.Sprintf("H*%.4f", cy)
-	}
-
-	extra := ""
-	if strings.EqualFold(filepath.Ext(wm.FilePath), ".gif") || strings.EqualFold(filepath.Ext(wm.FilePath), ".mov") || strings.EqualFold(filepath.Ext(wm.FilePath), ".webm") {
-		extra = ":shortest=1"
 	}
 
 	filter := fmt.Sprintf(

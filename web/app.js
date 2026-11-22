@@ -1008,13 +1008,14 @@
 
     const mode = $('selCropMode').value;
     const isSplit = mode.startsWith('split_');
+    const isCinema = mode === 'gaming_cinema';
     const { gp, fc } = getEffectiveBoxes();
 
     if (isSplit) {
-      // Draw Gameplay box (blue)
       drawBoxOverlay(sCtx, gp, sw, sh, '#3b82f6', 'GAMEPLAY (ATAS)', state.editingBox === 'gameplay');
-      // Draw Facecam box (green)
       drawBoxOverlay(sCtx, fc, sw, sh, '#10b981', 'FACECAM (BAWAH)', state.editingBox === 'facecam');
+    } else if (isCinema) {
+      drawBoxOverlay(sCtx, fc, sw, sh, '#10b981', 'FACECAM (FRAME)', true);
     }
 
     // Draw Live 9:16 Simulated Output
@@ -1026,13 +1027,29 @@
     if (state.previewImg) {
       const iw = state.previewImg.naturalWidth || state.previewImg.width;
       const ih = state.previewImg.naturalHeight || state.previewImg.height;
-      if (isSplit) {
-        const splitR = (parseInt($('rngSplitRatio').value, 10) || 62) / 100;
+      if (isCinema) {
+        oCtx.save();
+        oCtx.filter = 'blur(8px) brightness(0.75)';
+        drawCoverSlice(oCtx, state.previewImg, 0, 0, iw, ih, 0, 0, ow, oh);
+        oCtx.restore();
+        const gpH = Math.round(ow * (9 / 16));
+        const gpY = Math.round(oh * 0.16);
+        oCtx.drawImage(state.previewImg, 0, gpY, ow, gpH);
+        const fcW = Math.round(ow * 0.56);
+        const fcH = Math.round(oh * 0.27);
+        const fcX = Math.round((ow - fcW) / 2);
+        const fcY = Math.min(gpY + gpH + Math.round(oh * 0.03), oh - fcH - Math.round(oh * 0.16));
+        drawCoverSlice(oCtx, state.previewImg, fc.x * iw, fc.y * ih, fc.w * iw, fc.h * ih, fcX, fcY, fcW, fcH);
+        oCtx.strokeStyle = 'rgba(255,255,255,0.7)';
+        oCtx.lineWidth = 1.5;
+        oCtx.strokeRect(fcX, fcY, fcW, fcH);
+      } else if (isSplit) {
+        const splitR = (parseInt($('rngSplitRatio').value, 10) || 64) / 100;
         const topH = Math.round(oh * splitR);
         const botH = oh - topH;
         drawCoverSlice(oCtx, state.previewImg, gp.x * iw, gp.y * ih, gp.w * iw, gp.h * ih, 0, 0, ow, topH);
         drawCoverSlice(oCtx, state.previewImg, fc.x * iw, fc.y * ih, fc.w * iw, fc.h * ih, 0, topH, ow, botH);
-        oCtx.fillStyle = '#000';
+        oCtx.fillStyle = '#ffe600';
         oCtx.fillRect(0, topH - 1, ow, 2);
       } else if (mode === 'blur_bg') {
         oCtx.save();
@@ -1053,26 +1070,30 @@
     const camp = getActiveCampaign();
     if ($('chkUseWatermark').checked && camp?.watermark?.enabled) {
       const wm = camp.watermark;
-      const wmW = ow * (wm.scale || 0.2);
-      const wmH = state.wmImg ? wmW * (state.wmImg.height / Math.max(1, state.wmImg.width)) : wmW * 0.45;
-      const m = (wm.marginPx || 32) * (ow / 1080);
-      let wx = ow - wmW - m, wy = m;
-      if (wm.position === 'top-left') { wx = m; wy = m; }
-      else if (wm.position === 'bottom-left') { wx = m; wy = oh - wmH - m; }
-      else if (wm.position === 'bottom-right') { wx = ow - wmW - m; wy = oh - wmH - m; }
-      else if (wm.position === 'center-top') { wx = (ow - wmW) / 2; wy = m; }
-      else if (wm.position === 'custom') { wx = ow * (wm.customX || 0.72); wy = oh * (wm.customY || 0.06); }
-
       oCtx.save();
-      oCtx.globalAlpha = wm.opacity || 0.92;
-      if (state.wmImg) {
-        oCtx.drawImage(state.wmImg, wx, wy, wmW, wmH);
+      oCtx.globalAlpha = wm.opacity || 0.96;
+      if (wm.position === 'full-frame' && state.wmImg) {
+        oCtx.drawImage(state.wmImg, 0, 0, ow, oh);
       } else {
-        oCtx.fillStyle = 'rgba(245,158,11,0.85)';
-        oCtx.fillRect(wx, wy, wmW, wmH);
-        oCtx.fillStyle = '#000';
-        oCtx.font = 'bold 8px Segoe UI';
-        oCtx.fillText('WM', wx + 4, wy + 11);
+        const wmW = ow * (wm.scale || 0.2);
+        const wmH = state.wmImg ? wmW * (state.wmImg.height / Math.max(1, state.wmImg.width)) : wmW * 0.45;
+        const m = (wm.marginPx || 32) * (ow / 1080);
+        let wx = ow - wmW - m, wy = m;
+        if (wm.position === 'top-left') { wx = m; wy = m; }
+        else if (wm.position === 'bottom-left') { wx = m; wy = oh - wmH - m; }
+        else if (wm.position === 'bottom-right') { wx = ow - wmW - m; wy = oh - wmH - m; }
+        else if (wm.position === 'center-top') { wx = (ow - wmW) / 2; wy = m; }
+        else if (wm.position === 'custom') { wx = ow * (wm.customX || 0.72); wy = oh * (wm.customY || 0.06); }
+
+        if (state.wmImg) {
+          oCtx.drawImage(state.wmImg, wx, wy, wmW, wmH);
+        } else {
+          oCtx.fillStyle = 'rgba(245,158,11,0.85)';
+          oCtx.fillRect(wx, wy, wmW, wmH);
+          oCtx.fillStyle = '#000';
+          oCtx.font = 'bold 8px Segoe UI';
+          oCtx.fillText('WM', wx + 4, wy + 11);
+        }
       }
       oCtx.restore();
     }
@@ -1136,8 +1157,8 @@
     };
 
     canvas.addEventListener('mousedown', (e) => {
-      // Automatically switch to split_custom when user drags a custom crop box!
-      if ($('selCropMode').value !== 'split_custom') {
+      const curMode = $('selCropMode').value;
+      if (curMode !== 'split_custom' && curMode !== 'gaming_cinema') {
         const eff = getEffectiveBoxes();
         state.layout.gameplayBox = { ...eff.gp };
         state.layout.facecamBox = { ...eff.fc };
@@ -1158,8 +1179,11 @@
       };
       if (box.x + box.w > 1) box.w = 1 - box.x;
       if (box.y + box.h > 1) box.h = 1 - box.y;
-      if (state.editingBox === 'gameplay') state.layout.gameplayBox = box;
-      else state.layout.facecamBox = box;
+      if ($('selCropMode').value === 'gaming_cinema' || state.editingBox === 'facecam') {
+        state.layout.facecamBox = box;
+      } else {
+        state.layout.gameplayBox = box;
+      }
       drawCropCanvases();
     });
 
@@ -1409,6 +1433,16 @@
       });
       renderActiveProject();
       toast(`Dihitung ulang: ${state.activeProject.candidates?.length || 0} momen!`, 'ok');
+    } catch (e) {
+      toast(e.message, 'err');
+    }
+  });
+
+  $('btnScanAudioFast').addEventListener('click', async () => {
+    if (!state.activeProject) return;
+    try {
+      await api(`/api/projects/${encodeURIComponent(state.activeProject.id)}/scan-audio`, { method: 'POST' });
+      toast('🔊 Memulai Fast Audio Scream Scan (mencari teriakan/ketawa paling pecah)...', 'info');
     } catch (e) {
       toast(e.message, 'err');
     }

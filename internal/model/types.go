@@ -137,11 +137,19 @@ type Chapter struct {
 	EndTime   float64 `json:"endTime"`
 }
 
-// TranscriptCue represents a single subtitle/caption line.
-type TranscriptCue struct {
+// WordTiming stores exact per-word start/end timestamps extracted from YouTube VTT <c> tags.
+type WordTiming struct {
 	Start float64 `json:"start"`
 	End   float64 `json:"end"`
 	Text  string  `json:"text"`
+}
+
+// TranscriptCue represents a single subtitle/caption line with optional word-level timings.
+type TranscriptCue struct {
+	Start float64      `json:"start"`
+	End   float64      `json:"end"`
+	Text  string       `json:"text"`
+	Words []WordTiming `json:"words,omitempty"`
 }
 
 // ClipCandidate is a detected viral/hype moment candidate ready to be clipped.

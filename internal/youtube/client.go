@@ -432,11 +432,11 @@ func (c *Client) DownloadFullVideo(ctx context.Context, videoURL, destMP4 string
 	return c.runDownloadCmd(ctx, args, onProgress)
 }
 
-// DownloadAudioOnly downloads just the lightweight audio track (m4a/opus) for fast audio-hype peak detection!
+// DownloadAudioOnly downloads the lightest fast audio track (<=64kbps opus/m4a) for ultra-fast audio scream peak analysis!
 func (c *Client) DownloadAudioOnly(ctx context.Context, videoURL, destPath string, settings model.AppSettings) (string, error) {
 	outTmpl := strings.TrimSuffix(destPath, filepath.Ext(destPath)) + ".%(ext)s"
 	args := append(c.baseArgs(settings),
-		"-f", "ba[ext=m4a]/ba/bestaudio",
+		"-f", "ba[abr<=64]/worstaudio/ba[ext=m4a]/bestaudio",
 		"-o", outTmpl,
 		videoURL,
 	)

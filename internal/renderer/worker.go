@@ -230,16 +230,20 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 		seekStart = 0
 	}
 
-	// Step 2: Generate ASS subtitles if enabled and project has subtitles
+	// Step 2: Generate ASS Viral Word-by-Word Karaoke Subtitles + Animated Hook Banner (zero tofu boxes!)
 	subASS := ""
+	var cues []model.TranscriptCue
 	if opts.Subtitles.Enabled && proj.SubtitlePath != "" && fileExists(proj.SubtitlePath) {
-		wp.updateJob(job, "rendering", "Menyiapkan viral auto-subtitles (.ASS)...", 36, "")
-		if cues, err := youtube.ParseSubtitleFile(proj.SubtitlePath); err == nil && len(cues) > 0 {
-			outW, outH := ResolveOutputDimensions(opts.Layout, 1920, 1080)
-			assPath := filepath.Join(workDir, "captions.ass")
-			if count, err := GenerateASS(cues, opts.StartSec, opts.EndSec, speed, outW, outH, opts.Subtitles, assPath); err == nil && count > 0 {
-				subASS = assPath
-			}
+		if parsed, err := youtube.ParseSubtitleFile(proj.SubtitlePath); err == nil && len(parsed) > 0 {
+			cues = parsed
+		}
+	}
+	if len(cues) > 0 || strings.TrimSpace(opts.HookText) != "" {
+		wp.updateJob(job, "rendering", "Menyiapkan Karaoke Subtitles & Animated Hook (.ASS)...", 36, "")
+		outW, outH := ResolveOutputDimensions(opts.Layout, 1920, 1080)
+		assPath := filepath.Join(workDir, "captions.ass")
+		if count, err := GenerateASS(cues, opts.StartSec, opts.EndSec, speed, outW, outH, opts.Subtitles, opts.HookText, assPath); err == nil && count > 0 {
+			subASS = assPath
 		}
 	}
 

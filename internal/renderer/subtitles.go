@@ -4,18 +4,21 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode"
 
 	"klipforge/internal/model"
 )
 
-// GenerateASS creates a styled ASS subtitle file for the clip segment [clipStart, clipEnd].
-// Cue timestamps are shifted relative to 0.0 and adjusted by speed so they stay synced.
-func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, outW, outH int, style model.SubtitleStyle, destPath string) (int, error) {
-	if !style.Enabled || len(cues) == 0 {
-		return 0, nil
-	}
+// GenerateASS creates a pro TikTok/CapCut-style ASS subtitle + animated Hook Title overlay file.
+// Uses YouTube's word-level timestamps when available for TRUE word-by-word karaoke highlighting
+// with pop-in bounce animation, plus a sleek 4.5s animated Hook Title banner (zero emoji tofu boxes!).
+func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, outW, outH int, style model.SubtitleStyle, hookText string, destPath string) (int, error) {
 	if speed <= 0.5 || speed > 2.0 {
 		speed = 1.0
+	}
+	cleanHook := StripUnsupportedEmojis(strings.TrimSpace(hookText))
+	if (!style.Enabled || len(cues) == 0) && cleanHook == "" {
+		return 0, nil
 	}
 
 	fontName := style.FontName
@@ -24,57 +27,68 @@ func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, 
 	}
 	fontSize := style.FontSize
 	if fontSize <= 0 {
-		fontSize = 58
+		fontSize = 68
 	}
-	// Scale font size proportionally if output width differs from 1080
+	// Make viral captions punchy & bold on mobile screens
+	if fontSize < 62 {
+		fontSize = 66
+	}
 	scaledSize := int(float64(fontSize) * (float64(outW) / 1080.0))
-	if scaledSize < 24 {
-		scaledSize = 24
+	if scaledSize < 30 {
+		scaledSize = 30
 	}
 	maxWords := style.MaxWordsPerRow
-	if maxWords <= 0 {
-		maxWords = 4
+	if maxWords <= 0 || maxWords > 4 {
+		maxWords = 3 // 3-word snappy CapCut/Hormozi bursts look WAY cleaner on 9:16!
 	}
 
 	// ASS colors are &HAABBGGRR
-	primaryColor := "&H0000EAFF" // Viral Yellow
-	outlineColor := "&H00000000" // Pure Black
-	backColor := "&H96000000"    // Semi-transparent shadow
+	baseColor := "&H00FFFFFF"      // Crisp white for non-active words
+	highlightColor := "&H0000EAFF" // Electric Viral Yellow for active spoken word
+	outlineColor := "&H00000000"   // Thick pure black stroke
+	backColor := "&H90000000"
 	borderStyle := 1
-	outline := 5
-	shadow := 2
+	outline := 7
+	shadow := 3
 
 	switch style.Preset {
 	case "clean-white":
-		primaryColor = "&H00FFFFFF"
-		outline = 4
-		shadow = 2
+		baseColor = "&H00E8E8E8"
+		highlightColor = "&H00FFFFFF"
+		outline = 6
 	case "gaming-neon":
-		primaryColor = "&H0066FF88"
-		outline = 5
-		shadow = 2
+		baseColor = "&H00FFFFFF"
+		highlightColor = "&H0055FF33" // Neon gaming green!
+		outline = 7
 	case "minimal":
-		primaryColor = "&H00FFFFFF"
+		baseColor = "&H00FFFFFF"
+		highlightColor = "&H0000EAFF"
 		backColor = "&HAA000000"
 		borderStyle = 3
-		outline = 8
+		outline = 10
 		shadow = 0
 	}
 
-	alignment := 2 // Bottom-center
-	marginV := int(float64(outH) * 0.16)
+	alignment := 2
+	marginV := int(float64(outH) * 0.20)
 	switch style.Position {
 	case "center":
 		alignment = 5
 		marginV = 0
 	case "split-seam":
 		alignment = 2
-		// Placed near the split boundary (~38% from bottom)
-		marginV = int(float64(outH) * 0.34)
+		// Sits right on the clean split boundary / above facecam (never hides eyes!)
+		marginV = int(float64(outH) * 0.35)
 	case "top":
 		alignment = 8
-		marginV = int(float64(outH) * 0.14)
+		marginV = int(float64(outH) * 0.16)
 	}
+
+	hookFontSize := int(float64(outW) * 0.056)
+	if hookFontSize < 30 {
+		hookFontSize = 30
+	}
+	hookMarginV := int(float64(outH) * 0.085)
 
 	var sb strings.Builder
 	sb.WriteString("[Script Info]\n")
@@ -87,63 +101,140 @@ func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, 
 	sb.WriteString("[V4+ Styles]\n")
 	sb.WriteString("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
 	sb.WriteString(fmt.Sprintf(
-		"Style: Viral,%s,%d,%s,&H000000FF,%s,%s,-1,0,0,0,100,100,1,0,%d,%d,%d,%d,48,48,%d,1\n\n",
-		fontName, scaledSize, primaryColor, outlineColor, backColor, borderStyle, outline, shadow, alignment, marginV,
+		"Style: Viral,%s,%d,%s,%s,%s,%s,-1,0,0,0,100,100,1,0,%d,%d,%d,%d,56,56,%d,1\n",
+		fontName, scaledSize, baseColor, highlightColor, outlineColor, backColor, borderStyle, outline, shadow, alignment, marginV,
+	))
+	// Hook Banner Style: Vibrant yellow/white headline pops in cleanly for first 4.5s, then fades out!
+	sb.WriteString(fmt.Sprintf(
+		"Style: HookBanner,%s,%d,&H0000EAFF,&H00FFFFFF,&H00000000,&HAA000000,-1,0,0,0,100,100,1.5,0,1,8,4,8,64,64,%d,1\n\n",
+		fontName, hookFontSize, hookMarginV,
 	))
 
 	sb.WriteString("[Events]\n")
 	sb.WriteString("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
 
-	clipDur := clipEnd - clipStart
+	clipDur := (clipEnd - clipStart) / speed
 	written := 0
 
-	for _, cue := range cues {
-		if cue.End <= clipStart || cue.Start >= clipEnd {
-			continue
+	// 1. Sleek Animated Hook Headline (first 4.8 seconds with punch pop-in & smooth fade-out!)
+	if cleanHook != "" {
+		hookEnd := 4.8
+		if clipDur < hookEnd {
+			hookEnd = clipDur
 		}
-		s := cue.Start - clipStart
-		e := cue.End - clipStart
-		if s < 0 {
-			s = 0
-		}
-		if e > clipDur {
-			e = clipDur
-		}
-		s /= speed
-		e /= speed
-		if e-s < 0.10 {
-			continue
-		}
+		wrapped := strings.ReplaceAll(wrapText(strings.ToUpper(cleanHook), 22), "\n", `\N`)
+		sb.WriteString(fmt.Sprintf(
+			"Dialogue: 2,0:00:00.00,%s,HookBanner,,0,0,0,,{\\fad(140,420)\\fscx115\\fscy115\\t(0,160,\\fscx100\\fscy100)}%s\n",
+			formatASSTime(hookEnd), sanitizeASSText(wrapped),
+		))
+		written++
+	}
 
-		txt := strings.TrimSpace(cue.Text)
-		if txt == "" {
-			continue
-		}
-		if style.Uppercase {
-			txt = strings.ToUpper(txt)
-		}
-
-		// Chunk long captions into fast 3-5 word viral bursts
-		words := strings.Fields(txt)
-		if len(words) == 0 {
-			continue
-		}
-		if len(words) <= maxWords {
-			writeDialogue(&sb, s, e, strings.Join(words, " "))
-			written++
-			continue
-		}
-
-		chunks := chunkWords(words, maxWords)
-		chunkDur := (e - s) / float64(len(chunks))
-		for idx, ch := range chunks {
-			cs := s + float64(idx)*chunkDur
-			ce := cs + chunkDur
-			if idx == len(chunks)-1 {
-				ce = e
+	// 2. Word-by-Word Viral Karaoke Subtitles
+	if style.Enabled && len(cues) > 0 {
+		// Flatten all words inside [clipStart, clipEnd] with exact or interpolated timings
+		var allWords []model.WordTiming
+		for _, cue := range cues {
+			if cue.End <= clipStart || cue.Start >= clipEnd {
+				continue
 			}
-			writeDialogue(&sb, cs, ce, ch)
-			written++
+			if len(cue.Words) > 0 {
+				for _, w := range cue.Words {
+					if w.End <= clipStart || w.Start >= clipEnd {
+						continue
+					}
+					ws := (w.Start - clipStart) / speed
+					we := (w.End - clipStart) / speed
+					if ws < 0 {
+						ws = 0
+					}
+					if we > clipDur {
+						we = clipDur
+					}
+					txt := StripUnsupportedEmojis(strings.TrimSpace(w.Text))
+					if txt != "" && we > ws+0.03 {
+						if style.Uppercase {
+							txt = strings.ToUpper(txt)
+						}
+						allWords = append(allWords, model.WordTiming{Start: ws, End: we, Text: txt})
+					}
+				}
+			} else {
+				// Interpolate word timings evenly across the cue
+				cs := (cue.Start - clipStart) / speed
+				ce := (cue.End - clipStart) / speed
+				if cs < 0 {
+					cs = 0
+				}
+				if ce > clipDur {
+					ce = clipDur
+				}
+				txt := StripUnsupportedEmojis(strings.TrimSpace(cue.Text))
+				if style.Uppercase {
+					txt = strings.ToUpper(txt)
+				}
+				toks := strings.Fields(txt)
+				if len(toks) == 0 || ce <= cs+0.05 {
+					continue
+				}
+				step := (ce - cs) / float64(len(toks))
+				for idx, tok := range toks {
+					allWords = append(allWords, model.WordTiming{
+						Start: cs + float64(idx)*step,
+						End:   cs + float64(idx+1)*step,
+						Text:  tok,
+					})
+				}
+			}
+		}
+
+		// Group into punchy 2-3 word bursts and emit word-by-word active-color karaoke dialogues!
+		for i := 0; i < len(allWords); {
+			endIdx := i + maxWords
+			if endIdx > len(allWords) {
+				endIdx = len(allWords)
+			}
+			// Break early if there is a natural pause > 0.65s between words
+			for j := i + 1; j < endIdx; j++ {
+				if allWords[j].Start-allWords[j-1].End > 0.65 {
+					endIdx = j
+					break
+				}
+			}
+			group := allWords[i:endIdx]
+			i = endIdx
+
+			for activeIdx, aw := range group {
+				s := aw.Start
+				e := aw.End
+				if activeIdx+1 < len(group) && group[activeIdx+1].Start > s {
+					e = group[activeIdx+1].Start
+				}
+				if e-s < 0.04 {
+					continue
+				}
+
+				var lineParts []string
+				for k, gw := range group {
+					wordSafe := sanitizeASSText(gw.Text)
+					if k == activeIdx {
+						// Active spoken word pops in bright highlight color + slight scale pulse!
+						lineParts = append(lineParts, fmt.Sprintf("{\\c%s\\fscx114\\fscy114\\t(0,95,\\fscx104\\fscy104)}%s{\\r}", highlightColor, wordSafe))
+					} else {
+						lineParts = append(lineParts, fmt.Sprintf("{\\c%s}%s", baseColor, wordSafe))
+					}
+				}
+				popAnim := ""
+				if activeIdx == 0 {
+					// Snappy pop entrance for each new 3-word burst
+					popAnim = `{\fscx92\fscy92\t(0,70,\fscx100\fscy100)}`
+				}
+				sb.WriteString(fmt.Sprintf(
+					"Dialogue: 1,%s,%s,Viral,,0,0,0,,%s%s\n",
+					formatASSTime(s), formatASSTime(e), popAnim, strings.Join(lineParts, " "),
+				))
+				written++
+			}
 		}
 	}
 
@@ -156,24 +247,25 @@ func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, 
 	return written, nil
 }
 
-func chunkWords(words []string, maxWords int) []string {
-	var out []string
-	for i := 0; i < len(words); i += maxWords {
-		end := i + maxWords
-		if end > len(words) {
-			end = len(words)
+// StripUnsupportedEmojis removes non-BMP emoji glyphs (> 0xFFFF) that render as empty tofu boxes (□) in Windows Impact/Arial fonts.
+func StripUnsupportedEmojis(s string) string {
+	var sb strings.Builder
+	for _, r := range s {
+		if r > 0xFFFF || (r >= 0x2600 && r <= 0x27BF) || r == 0xFE0F || r == 0x200D {
+			continue
 		}
-		out = append(out, strings.Join(words[i:end], " "))
+		if unicode.IsControl(r) && r != '\n' {
+			continue
+		}
+		sb.WriteRune(r)
 	}
-	return out
+	return strings.TrimSpace(strings.Join(strings.Fields(sb.String()), " "))
 }
 
-func writeDialogue(sb *strings.Builder, start, end float64, text string) {
-	// Sanitize ASS control characters
-	safe := strings.ReplaceAll(text, "\n", " ")
-	safe = strings.ReplaceAll(safe, "{", "(")
+func sanitizeASSText(text string) string {
+	safe := strings.ReplaceAll(text, "{", "(")
 	safe = strings.ReplaceAll(safe, "}", ")")
-	sb.WriteString(fmt.Sprintf("Dialogue: 0,%s,%s,Viral,,0,0,0,,%s\n", formatASSTime(start), formatASSTime(end), safe))
+	return safe
 }
 
 func formatASSTime(sec float64) string {

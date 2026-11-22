@@ -134,6 +134,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/projects/{id}", s.handleDeleteProject)
 	mux.HandleFunc("POST /api/projects/analyze", s.handleAnalyzeProject)
 	mux.HandleFunc("POST /api/projects/{id}/reanalyze", s.handleReanalyzeProject)
+	mux.HandleFunc("POST /api/projects/{id}/scan-audio", s.handleScanAudioOnly)
 	mux.HandleFunc("POST /api/projects/{id}/download-full", s.handleDownloadFull)
 	mux.HandleFunc("POST /api/projects/{id}/grab-frame", s.handleGrabFrame)
 	mux.HandleFunc("GET /api/projects/{id}/preview-frame", s.handleServePreviewFrame)
@@ -365,6 +366,16 @@ func (s *Server) handleUploadCampaignAsset(w http.ResponseWriter, r *http.Reques
 		camp.Watermark.Enabled = true
 		camp.Watermark.FilePath = destPath
 		camp.Watermark.FileName = savedName
+		// Auto-detect full-frame 9:16 transparent template overlay (e.g. official MotionKlip 1080x1920 PNG!)
+		if info, err := renderer.ProbeMedia(r.Context(), s.Deps.GetStatus().FFprobePath, destPath); err == nil {
+			if info.Height > 0 && info.Width > 0 && float64(info.Height)/float64(info.Width) >= 1.4 {
+				camp.Watermark.Position = "full-frame"
+				camp.Watermark.Scale = 1.0
+				camp.Watermark.Opacity = 1.0
+				camp.Watermark.MarginPx = 0
+				s.Broker.Log("campaign", "info", fmt.Sprintf("Watermark Full-Frame 9:16 (%dx%d) terdeteksi — otomatis pakai mode Full-Frame 1:1 presisi!", info.Width, info.Height))
+			}
+		}
 	case "outro":
 		camp.Outro.Enabled = true
 		camp.Outro.FilePath = destPath
@@ -792,6 +803,81 @@ func (s *Server) handleReanalyzeProject(w http.ResponseWriter, r *http.Request) 
 	_ = s.Store.SaveProject(proj)
 	s.Broker.Publish("project_update", proj)
 	writeJSON(w, http.StatusOK, proj)
+}
+
+func (s *Server) handleScanAudioOnly(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	proj, ok := s.Store.GetProject(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "Project tidak ditemukan")
+		return
+	}
+	proj.Status = "scanning"
+	proj.StatusMessage = "Mengunduh audio ringan (<=64kbps) untuk deteksi teriakan & tawa keras..."
+	_ = s.Store.SaveProject(proj)
+	s.Broker.Publish("project_update", proj)
+
+	go func() {
+		ctx := context.Background()
+		projDir := s.Store.ProjectDir(proj.ID)
+		settings := s.Store.GetSettings()
+
+		var mediaPath string
+		var cleanup bool
+		if proj.LocalVideoPath != "" {
+			mediaPath = proj.LocalVideoPath
+		} else {
+			audioPath, err := s.YT.DownloadAudioOnly(ctx, proj.SourceURL, filepath.Join(projDir, "fast_audio.m4a"), settings)
+			if err != nil {
+				proj.Status = "ready"
+				proj.StatusMessage = "Scan audio gagal: " + err.Error()
+				_ = s.Store.SaveProject(proj)
+				s.Broker.Publish("project_update", proj)
+				return
+			}
+			mediaPath = audioPath
+			cleanup = true
+		}
+
+		proj.StatusMessage = "Menganalisis puncak teriakan, tawa & ledakan suara (FFmpeg RMS)..."
+		s.Broker.Publish("project_update", proj)
+
+		energy, err := analyzer.AnalyzeAudioEnergy(ctx, s.Deps.GetStatus().FFmpegPath, mediaPath, proj.DurationSec)
+		if cleanup {
+			_ = os.Remove(mediaPath)
+		}
+		if err != nil || len(energy) == 0 {
+			proj.Status = "ready"
+			proj.StatusMessage = "Gagal analisis energi audio."
+			_ = s.Store.SaveProject(proj)
+			s.Broker.Publish("project_update", proj)
+			return
+		}
+
+		saveAudioCache(projDir, energy)
+		cs := s.loadCachedSignals(proj)
+		cs.AudioEnergy = energy
+
+		res := analyzer.DetectHype(analyzer.AnalysisInput{
+			DurationSec: proj.DurationSec,
+			Heatmap:     cs.Heatmap,
+			Chats:       cs.Chats,
+			AudioEnergy: energy,
+			Transcript:  cs.Transcript,
+			Chapters:    proj.Chapters,
+			Settings:    proj.DetectConfig,
+		})
+		proj.Timeline = res.Timeline
+		proj.Candidates = res.Candidates
+		proj.Signals = res.Signals
+		proj.Status = "ready"
+		proj.StatusMessage = fmt.Sprintf("🔊 Audio Scream + Transcript siap! %d momen paling pecah ditemukan.", len(res.Candidates))
+		_ = s.Store.SaveProject(proj)
+		s.Broker.Publish("project_update", proj)
+		s.Broker.Log("analyzer", "success", proj.StatusMessage)
+	}()
+
+	writeJSON(w, http.StatusAccepted, proj)
 }
 
 func (s *Server) handleDownloadFull(w http.ResponseWriter, r *http.Request) {

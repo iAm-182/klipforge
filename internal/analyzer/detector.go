@@ -224,9 +224,13 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 		wA = cfg.AudioWeight
 	}
 	if hasTranscript {
-		// Give transcript strong weight when heatmap/chat absent, and supportive boost otherwise
+		// Give transcript full weight only if alone; when paired with Audio Scream peaks, let Audio lead (0.62 Audio + 0.38 Transcript)
+		// so calm cutscenes are outranked by actual loud laughing/screaming/explosive gameplay!
 		if !hasHeatmap && !hasChat && !hasAudio {
 			wT = 1.0
+		} else if !hasHeatmap && !hasChat && hasAudio {
+			wA = 0.62
+			wT = 0.38
 		} else {
 			wT = 0.25
 		}
@@ -599,31 +603,31 @@ func buildReasons(maxH, maxC, maxA, maxT float64, hasH, hasC, hasA, hasT bool) [
 }
 
 func suggestHookText(reasons, sampleChats []string, speech, chapterTitle string) string {
-	if chapterTitle != "" && len(chapterTitle) <= 40 {
+	if chapterTitle != "" && len(chapterTitle) <= 36 {
 		return strings.ToUpper(chapterTitle)
 	}
 	combined := strings.ToLower(strings.Join(sampleChats, " ") + " " + speech)
 	if strings.Contains(combined, "polisi") || strings.Contains(combined, "kabur") {
-		return "PANIK DIKEJAR POLISI GTA VI! 🚨😱"
+		return "PANIK DIKEJAR POLISI GTA VI!"
 	}
 	if strings.Contains(combined, "kaget") || strings.Contains(combined, "panik") || strings.Contains(combined, "tolong") {
-		return "DETIK-DETIK PANIK KAGET! 😱🔥"
+		return "DETIK-DETIK PANIK PARAH!"
 	}
 	if strings.Contains(combined, "wkwk") || strings.Contains(combined, "ngakak") || strings.Contains(combined, "kocak") || strings.Contains(combined, "tertawa") {
-		return "MOMEN NGAKAK PARAH! 😭🔥"
+		return "MOMEN NGAKAK GAK KETAHAN!"
 	}
-	if strings.Contains(combined, "meledak") || strings.Contains(combined, "mati") {
-		return "AUTO KACAU MELEDAK! 💥🤯"
+	if strings.Contains(combined, "meledak") || strings.Contains(combined, "mati") || strings.Contains(combined, "hancur") {
+		return "AUTO KACAU MELEDAK!"
 	}
 	for _, r := range reasons {
 		if r == "Chat Meledak" {
-			return "CHAT LANGSUNG MELEDAK! 🔥"
+			return "CHAT LANGSUNG MELEDAK!"
 		}
 		if r == "Reaksi Keras" {
-			return "REAKSI EPIC MOMENT! 🤯"
+			return "REAKSI TERIAK PALING PECAH!"
 		}
 	}
-	return "MOMEN PALING RAMAI DI STREAM! 🔥"
+	return "MOMEN PALING RAMAI DI STREAM!"
 }
 
 func collectChatSamples(buckets [][]string, start, end, limit int) []string {
