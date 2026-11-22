@@ -14,7 +14,7 @@ id = "8d5fe7d43d0e472e847e0a523f77431a"
 [assets]
 directory = "./public"
 binding = "ASSETS"
-run_worker_first = ["/api/*", "/edge-register", "/edge-health"]
+run_worker_first = true
 
 [vars]
 APP_NAME = "KlipForge"
