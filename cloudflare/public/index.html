@@ -947,6 +947,19 @@
           <div id="diskHealthPanel" class="disk-bar-wrap"></div>
 
           <hr class="divider" />
+          <h3>🔑 Engine Token (Akses Lokal / Direct Tunnel)</h3>
+          <p class="muted text-xs" style="margin:4px 0 8px;">
+            Via <code>klip.breakthematrix.id</code> token sudah otomatis disuntik Cloudflare Worker. Jika kamu membuka lewat <code>127.0.0.1:8787</code> atau URL tunnel langsung, masukkan isi file <code>.engine-token</code> sekali di sini (tersimpan aman di browser).
+          </p>
+          <div class="input-with-btn">
+            <input type="password" id="sEngineToken" class="input input-sm" placeholder="Tempel isi file .engine-token (48 karakter)..." autocomplete="off" />
+            <button class="btn btn-xs btn-primary" id="btnSaveEngineToken">💾 Simpan</button>
+            <button class="btn btn-xs btn-accent" id="btnTestEngineToken">🔌 Test Koneksi</button>
+            <button class="btn btn-xs btn-ghost" id="btnClearEngineToken" title="Hapus token tersimpan di browser">✕</button>
+          </div>
+          <div class="text-xs muted mt-4" id="engineTokenStatus">Status: menggunakan koneksi aktif</div>
+
+          <hr class="divider" />
           <h3>⚙️ Render, Storage Guard &amp; Webhook Notifikasi</h3>
           <div class="form-grid-2 mt-12">
             <label>Parallel Workers (Goroutines)

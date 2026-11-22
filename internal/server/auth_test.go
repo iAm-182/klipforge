@@ -87,4 +87,53 @@ func TestServerSecurity_AuthAndCORS(t *testing.T) {
 	if rec6.Code != http.StatusOK {
 		t.Fatalf("expected 200 using kf_token cookie, got %d", rec6.Code)
 	}
+
+	// 7. Scoped X-Agent-Key (Muse assistant): allowed read/search/render, DENIED 403 on delete/settings/cleanup!
+	if len(srv.AgentKey) < 16 || srv.AgentKey == srv.EngineToken {
+		t.Fatalf("expected distinct auto-generated AgentKey >= 16 chars")
+	}
+
+	// Wrong agent key -> 401
+	aWrong := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	aWrong.Header.Set("X-Agent-Key", "bad-agent-key")
+	recAW := httptest.NewRecorder()
+	h.ServeHTTP(recAW, aWrong)
+	if recAW.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for wrong X-Agent-Key, got %d", recAW.Code)
+	}
+
+	// Valid agent key on GET /api/status & GET /api/campaigns -> 200 OK
+	for _, p := range []string{"/api/status", "/api/campaigns", "/api/projects", "/api/jobs"} {
+		aGet := httptest.NewRequest(http.MethodGet, p, nil)
+		aGet.Header.Set("X-Agent-Key", srv.AgentKey)
+		recAG := httptest.NewRecorder()
+		h.ServeHTTP(recAG, aGet)
+		if recAG.Code != http.StatusOK {
+			t.Fatalf("expected 200 for X-Agent-Key GET %s, got %d", p, recAG.Code)
+		}
+	}
+
+	// Valid agent key on destructive / admin endpoints -> STRICT 403 Forbidden!
+	forbiddenCases := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodDelete, "/api/campaigns/windah-gtavi-motionklip"},
+		{http.MethodDelete, "/api/projects/proj-123"},
+		{http.MethodDelete, "/api/jobs/job-123"},
+		{http.MethodPut, "/api/settings"},
+		{http.MethodPost, "/api/storage/cleanup"},
+		{http.MethodPost, "/api/jobs/job-123/review"},
+		{http.MethodPost, "/api/open-output-folder"},
+		{http.MethodPost, "/api/deps/update-ytdlp"},
+	}
+	for _, tc := range forbiddenCases {
+		reqF := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(`{}`))
+		reqF.Header.Set("X-Agent-Key", srv.AgentKey)
+		recF := httptest.NewRecorder()
+		h.ServeHTTP(recF, reqF)
+		if recF.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 Forbidden for X-Agent-Key %s %s, got %d", tc.method, tc.path, recF.Code)
+		}
+	}
 }

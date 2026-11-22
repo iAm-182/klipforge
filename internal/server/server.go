@@ -42,6 +42,7 @@ type Server struct {
 	Worker      *renderer.WorkerPool
 	Autopilot   *autopilot.Scheduler
 	EngineToken string
+	AgentKey    string
 
 	// Cache raw signals in memory for instant re-analysis without re-fetching YouTube
 	cacheMu    sync.RWMutex
@@ -56,12 +57,12 @@ type cachedSignals struct {
 	StreamURL   string
 }
 
-func loadOrCreateEngineToken(baseDir string) string {
-	if envTok := strings.TrimSpace(os.Getenv("KLIPFORGE_ENGINE_TOKEN")); envTok != "" {
-		return envTok
+func loadOrCreateSecretFile(baseDir, envName, fileName, label string) string {
+	if envVal := strings.TrimSpace(os.Getenv(envName)); envVal != "" {
+		return envVal
 	}
-	tokPath := filepath.Join(baseDir, ".engine-token")
-	if b, err := os.ReadFile(tokPath); err == nil {
+	p := filepath.Join(baseDir, fileName)
+	if b, err := os.ReadFile(p); err == nil {
 		if tok := strings.TrimSpace(string(b)); len(tok) >= 16 {
 			return tok
 		}
@@ -71,8 +72,8 @@ func loadOrCreateEngineToken(baseDir string) string {
 		return ""
 	}
 	tok := hex.EncodeToString(buf)
-	_ = os.WriteFile(tokPath, []byte(tok), 0o600)
-	log.Printf("[Security] Generated new Engine Token in %s", tokPath)
+	_ = os.WriteFile(p, []byte(tok), 0o600)
+	log.Printf("[Security] Generated new %s in %s", label, p)
 	return tok
 }
 
@@ -80,7 +81,8 @@ func New(st *store.Store, d *deps.Manager, broker *events.Broker) *Server {
 	yt := youtube.NewClient(d)
 	audioLib := audiofx.NewLibrary(st.DataDir, d)
 	wp := renderer.NewWorkerPool(st, d, yt, audioLib, broker)
-	engTok := loadOrCreateEngineToken(st.BaseDir)
+	engTok := loadOrCreateSecretFile(st.BaseDir, "KLIPFORGE_ENGINE_TOKEN", ".engine-token", "Engine Token")
+	agentKey := loadOrCreateSecretFile(st.BaseDir, "KLIPFORGE_AGENT_KEY", ".agent-key", "Agent Key")
 	s := &Server{
 		Store:       st,
 		Deps:        d,
@@ -89,6 +91,7 @@ func New(st *store.Store, d *deps.Manager, broker *events.Broker) *Server {
 		Broker:      broker,
 		Worker:      wp,
 		EngineToken: engTok,
+		AgentKey:    agentKey,
 		rawSignals:  make(map[string]*cachedSignals),
 	}
 	s.Autopilot = autopilot.NewScheduler(st, yt, wp, broker, s.analyzeSyncFast)
@@ -231,29 +234,79 @@ func (s *Server) Handler() http.Handler {
 	return s.corsMiddleware(s.authMiddleware(mux))
 }
 
+func constantTimeMatch(expected, provided string) bool {
+	if expected == "" {
+		return false
+	}
+	p := strings.TrimSpace(provided)
+	if len(p) != len(expected) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(p), []byte(expected)) == 1
+}
+
 func (s *Server) isValidToken(provided string) bool {
 	if s.EngineToken == "" {
 		return true
 	}
-	p := strings.TrimSpace(provided)
-	if len(p) != len(s.EngineToken) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(p), []byte(s.EngineToken)) == 1
+	return constantTimeMatch(s.EngineToken, provided)
 }
 
-func (s *Server) requestHasValidAuth(r *http.Request) bool {
+func (s *Server) isValidAgentKey(provided string) bool {
+	return constantTimeMatch(s.AgentKey, provided)
+}
+
+// authRole resolves request privilege: "admin" (EngineToken), "agent" (scoped X-Agent-Key), or "" (unauthorized).
+func (s *Server) authRole(r *http.Request) string {
 	if s.EngineToken == "" {
-		return true
+		return "admin"
 	}
 	if s.isValidToken(r.Header.Get("X-Engine-Token")) {
-		return true
+		return "admin"
 	}
 	if ck, err := r.Cookie("kf_token"); err == nil && s.isValidToken(ck.Value) {
-		return true
+		return "admin"
 	}
 	if q := r.URL.Query().Get("token"); q != "" && s.isValidToken(q) {
+		return "admin"
+	}
+	if ak := r.Header.Get("X-Agent-Key"); ak != "" && s.isValidAgentKey(ak) {
+		return "agent"
+	}
+	return ""
+}
+
+// isAgentAllowed enforces least-privilege scope for assistant agents (X-Agent-Key):
+// ALLOWED: Read (GET), Transcript Search, Analyze/Reanalyze/Scan-Audio/Grab-Frame, Render/Compile/Post-Edit/Retry.
+// DENIED (403): ALL DELETE, ALL PUT (settings/campaigns/autopilot), storage cleanup, uploads, review/reject deletes.
+func isAgentAllowed(method, path string) bool {
+	if method == http.MethodGet || method == http.MethodHead {
 		return true
+	}
+	if method != http.MethodPost {
+		return false
+	}
+	allowedExact := map[string]bool{
+		"/api/projects/analyze": true,
+		"/api/jobs/render":      true,
+		"/api/jobs/batch":       true,
+		"/api/jobs/compile":     true,
+	}
+	if allowedExact[path] {
+		return true
+	}
+	if strings.HasPrefix(path, "/api/projects/") {
+		if strings.HasSuffix(path, "/reanalyze") ||
+			strings.HasSuffix(path, "/scan-audio") ||
+			strings.HasSuffix(path, "/grab-frame") {
+			return true
+		}
+	}
+	if strings.HasPrefix(path, "/api/jobs/") {
+		if strings.HasSuffix(path, "/post-edit") ||
+			strings.HasSuffix(path, "/retry") {
+			return true
+		}
 	}
 	return false
 }
@@ -264,12 +317,17 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Protect EVERY /api/* route with EngineToken (blocks direct trycloudflare.com bypass!)
+		// Protect EVERY /api/* route with EngineToken (admin) or X-Agent-Key (least-privilege agent)
 		if strings.HasPrefix(r.URL.Path, "/api/") &&
 			r.URL.Path != "/api/auth/unlock" &&
 			r.URL.Path != "/api/auth/check" {
-			if !s.requestHasValidAuth(r) {
-				writeErr(w, http.StatusUnauthorized, "Unauthorized: X-Engine-Token diperlukan")
+			role := s.authRole(r)
+			if role == "" {
+				writeErr(w, http.StatusUnauthorized, "Unauthorized: X-Engine-Token atau X-Agent-Key diperlukan")
+				return
+			}
+			if role == "agent" && !isAgentAllowed(r.Method, r.URL.Path) {
+				writeErr(w, http.StatusForbidden, "Forbidden: X-Agent-Key hanya diizinkan untuk baca, cari transkrip, analisis, dan render (tidak boleh hapus/ubah config)")
 				return
 			}
 		}
@@ -290,7 +348,7 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Engine-Token")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Engine-Token, X-Agent-Key")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -313,9 +371,11 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 // --- Auth, Status, Storage & Settings ---
 
 func (s *Server) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]bool{
+	role := s.authRole(r)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"tokenRequired": s.EngineToken != "",
-		"authenticated": s.requestHasValidAuth(r),
+		"authenticated": role != "",
+		"role":          role,
 	})
 }
 
@@ -339,15 +399,20 @@ func (s *Server) handleAuthUnlock(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   86400 * 30,
 	})
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "role": "admin"})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	role := s.authRole(r)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"deps":      s.Deps.GetStatus(),
-		"settings":  s.Store.GetSettings(),
-		"disk":      s.Store.DiskStats(),
-		"security":  map[string]bool{"engineTokenEnabled": s.EngineToken != ""},
+		"deps":     s.Deps.GetStatus(),
+		"settings": s.Store.GetSettings(),
+		"disk":     s.Store.DiskStats(),
+		"security": map[string]interface{}{
+			"engineTokenEnabled": s.EngineToken != "",
+			"agentKeyEnabled":    s.AgentKey != "",
+			"role":               role,
+		},
 		"campaigns": len(s.Store.ListCampaigns()),
 		"projects":  len(s.Store.ListProjects()),
 		"jobs":      len(s.Store.ListJobs()),

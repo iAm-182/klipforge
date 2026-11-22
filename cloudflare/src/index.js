@@ -153,9 +153,27 @@ export default {
       }
     }
 
-    // Mandatory Access Key Gate for ALL UI, Health, and API routes
-    const authErr = await checkAuth(request, env);
-    if (authErr) return authErr;
+    // Optional scoped Agent Key shortcut for /api/* (lets assistant agents like Muse hit klip.breakthematrix.id/api/*
+    // directly with X-Agent-Key — strictly least-privilege, Worker NEVER injects admin X-Engine-Token for agent calls!)
+    let isScopedAgent = false;
+    const providedAgentKey = (request.headers.get('X-Agent-Key') || '').trim();
+    if (url.pathname.startsWith('/api/') && providedAgentKey) {
+      if (await isRateLimited(env, 'agent', ip)) {
+        return Response.json({ error: 'Rate limit exceeded' }, { status: 429, headers: { 'Retry-After': String(AUTH_WINDOW_SEC) } });
+      }
+      const expectedAgent = (env.AGENT_KEY || '').trim();
+      if (!expectedAgent || !timingSafeEqual(providedAgentKey, expectedAgent)) {
+        await recordAuthFailure(env, 'agent', ip);
+        return Response.json({ error: 'Unauthorized X-Agent-Key' }, { status: 401 });
+      }
+      isScopedAgent = true;
+    }
+
+    // Mandatory Access Key Gate for ALL UI, Health, and non-agent API routes
+    if (!isScopedAgent) {
+      const authErr = await checkAuth(request, env);
+      if (authErr) return authErr;
+    }
 
     // Health probe for edge worker itself (authenticated)
     if (url.pathname === '/edge-health') {
@@ -167,6 +185,7 @@ export default {
         host: url.host,
         engineConfigured: Boolean(origin),
         engineTokenConfigured: Boolean(env.ENGINE_TOKEN),
+        agentKeyConfigured: Boolean(env.AGENT_KEY),
         engineUpdatedAt: updatedAt,
       });
     }
@@ -186,17 +205,24 @@ export default {
 
       const targetUrl = `${engineOrigin}${url.pathname}${url.search}`;
       const headers = new Headers(request.headers);
-      // Security: NEVER leak Basic Auth credentials or allow client origin overrides upstream!
+      // Security: NEVER leak Basic Auth credentials, forged tokens, or allow client origin overrides upstream!
       headers.delete('authorization');
       headers.delete('x-klipforge-engine');
+      headers.delete('x-engine-token');
       headers.delete('host');
       headers.delete('cf-connecting-ip');
       headers.delete('cf-ray');
       headers.set('X-Forwarded-Host', url.host);
       headers.set('X-Forwarded-Proto', 'https');
-      // Inject trusted Worker -> Engine shared token so direct trycloudflare.com bypass is blocked!
-      if (env.ENGINE_TOKEN) {
-        headers.set('X-Engine-Token', env.ENGINE_TOKEN);
+      if (isScopedAgent) {
+        // Scoped agent path: forward ONLY verified X-Agent-Key (Go Engine enforces read/search/render-only 403 guard!)
+        headers.set('X-Agent-Key', providedAgentKey);
+      } else {
+        // Full admin path (Basic Auth verified): strip any agent key and inject trusted Worker -> Engine admin token
+        headers.delete('x-agent-key');
+        if (env.ENGINE_TOKEN) {
+          headers.set('X-Engine-Token', env.ENGINE_TOKEN);
+        }
       }
 
       const isBodyMethod = request.method !== 'GET' && request.method !== 'HEAD';

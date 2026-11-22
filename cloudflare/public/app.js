@@ -41,26 +41,45 @@
 
   const $ = (id) => document.getElementById(id);
 
-  // ==================== API Helper (with Localhost Token Unlock) ====================
+  // ==================== API Helper (with Engine Token & Local/Tunnel Unlock) ====================
+  function getStoredEngineToken() {
+    return (localStorage.getItem('kf_engine_token') || '').trim();
+  }
+
+  async function saveAndUnlockEngineToken(rawTok) {
+    const tok = String(rawTok || '').trim();
+    if (!tok) {
+      localStorage.removeItem('kf_engine_token');
+      return { ok: false, error: 'Token kosong' };
+    }
+    const res = await fetch('/api/auth/unlock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: tok }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { ok: false, error: data.error || `HTTP ${res.status}` };
+    }
+    localStorage.setItem('kf_engine_token', tok);
+    return { ok: true, role: data.role || 'admin' };
+  }
+
   let unlockPromptOpen = false;
   async function promptLocalUnlock() {
     if (unlockPromptOpen) return false;
     unlockPromptOpen = true;
     try {
       const tok = window.prompt(
-        '🔒 KlipForge Engine Dilindungi Token!\nMasukkan isi file E:\\klipforge\\.engine-token (cukup sekali di browser lokal ini):'
+        '🔒 KlipForge Engine Dilindungi Token!\nMasukkan isi file E:\\klipforge\\.engine-token (tersimpan di browser, bisa diubah kapan saja di Settings):'
       );
       if (!tok || !tok.trim()) return false;
-      const res = await fetch('/api/auth/unlock', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: tok.trim() }),
-      });
-      if (!res.ok) {
+      const r = await saveAndUnlockEngineToken(tok);
+      if (!r.ok) {
         alert('Token tidak cocok! Cek isi file .engine-token di folder KlipForge.');
         return false;
       }
-      localStorage.setItem('kf_unlocked', '1');
+      if ($('sEngineToken')) $('sEngineToken').value = tok.trim();
       return true;
     } finally {
       unlockPromptOpen = false;
@@ -68,11 +87,22 @@
   }
 
   async function api(path, opts = {}) {
-    let res = await fetch(path, opts);
-    if (res.status === 401 && (location.hostname === '127.0.0.1' || location.hostname === 'localhost')) {
+    const buildOpts = () => {
+      const merged = { ...opts };
+      const hdrs = new Headers(opts.headers || {});
+      const tok = getStoredEngineToken();
+      if (tok && !hdrs.has('X-Engine-Token')) {
+        hdrs.set('X-Engine-Token', tok);
+      }
+      merged.headers = hdrs;
+      return merged;
+    };
+
+    let res = await fetch(path, buildOpts());
+    if (res.status === 401 && location.hostname !== 'klip.breakthematrix.id') {
       const ok = await promptLocalUnlock();
       if (ok) {
-        res = await fetch(path, opts);
+        res = await fetch(path, buildOpts());
       }
     }
     const data = await res.json().catch(() => ({}));
@@ -1921,6 +1951,66 @@
       renderJobs();
     });
   });
+
+  // Engine Token Settings UI (Save + Test Connection + Clear)
+  if ($('sEngineToken')) {
+    $('sEngineToken').value = getStoredEngineToken();
+    const stEl = $('engineTokenStatus');
+    if (stEl) {
+      stEl.textContent = getStoredEngineToken()
+        ? '✅ Engine Token tersimpan di browser ini.'
+        : (location.hostname === 'klip.breakthematrix.id' ? '✅ Terhubung otomatis lewat Cloudflare Worker.' : '⚠️ Belum ada Engine Token tersimpan di browser.');
+    }
+  }
+  if ($('btnSaveEngineToken')) {
+    $('btnSaveEngineToken').addEventListener('click', async () => {
+      const val = ($('sEngineToken')?.value || '').trim();
+      if (!val) {
+        toast('Masukkan Engine Token dulu!', 'err');
+        return;
+      }
+      const res = await saveAndUnlockEngineToken(val);
+      if (!res.ok) {
+        if ($('engineTokenStatus')) $('engineTokenStatus').textContent = '❌ Token ditolak: ' + res.error;
+        toast('Token salah: ' + res.error, 'err');
+        return;
+      }
+      if ($('engineTokenStatus')) $('engineTokenStatus').textContent = `✅ Tersimpan & aktif (Role: ${res.role})!`;
+      toast('✅ Engine Token tersimpan & terhubung! Memuat ulang data...', 'ok');
+      init();
+    });
+  }
+  if ($('btnTestEngineToken')) {
+    $('btnTestEngineToken').addEventListener('click', async () => {
+      const val = ($('sEngineToken')?.value || '').trim();
+      const hdrs = {};
+      if (val) hdrs['X-Engine-Token'] = val;
+      try {
+        const res = await fetch('/api/status', { headers: hdrs });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          if ($('engineTokenStatus')) $('engineTokenStatus').textContent = `❌ Koneksi ditolak (HTTP ${res.status}): ${data.error || 'Token salah'}`;
+          toast(`Koneksi gagal (HTTP ${res.status})`, 'err');
+          return;
+        }
+        const role = data.security?.role || 'admin';
+        const ytVer = data.deps?.ytDlpVersion || '-';
+        if ($('engineTokenStatus')) $('engineTokenStatus').textContent = `✅ Koneksi SUKSES! Role: ${role} · yt-dlp ${ytVer} · ${data.jobs || 0} job`;
+        toast(`✅ Koneksi berhasil (Role: ${role})!`, 'ok');
+      } catch (e) {
+        if ($('engineTokenStatus')) $('engineTokenStatus').textContent = '❌ Gagal menghubungi engine: ' + e.message;
+        toast('Gagal tes koneksi: ' + e.message, 'err');
+      }
+    });
+  }
+  if ($('btnClearEngineToken')) {
+    $('btnClearEngineToken').addEventListener('click', () => {
+      localStorage.removeItem('kf_engine_token');
+      if ($('sEngineToken')) $('sEngineToken').value = '';
+      if ($('engineTokenStatus')) $('engineTokenStatus').textContent = 'Token lokal dihapus dari browser.';
+      toast('Token lokal dihapus.', 'info');
+    });
+  }
 
   $('btnSaveSettings').addEventListener('click', async () => {
     const cfg = {
