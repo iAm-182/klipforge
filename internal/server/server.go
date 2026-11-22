@@ -147,6 +147,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/jobs/render", s.handleRenderSingle)
 	mux.HandleFunc("POST /api/jobs/batch", s.handleRenderBatch)
 	mux.HandleFunc("POST /api/jobs/compile", s.handleRenderCompile)
+	mux.HandleFunc("POST /api/jobs/{id}/post-edit", s.handlePostEditJob)
 	mux.HandleFunc("POST /api/jobs/{id}/review", s.handleReviewJob)
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.handleCancelJob)
 	mux.HandleFunc("POST /api/jobs/{id}/retry", s.handleRetryJob)
@@ -1081,6 +1082,22 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"canceled": true})
 }
 
+func (s *Server) handlePostEditJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var opts model.PostEditOptions
+	if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
+		writeErr(w, http.StatusBadRequest, "Format JSON edit manual tidak valid")
+		return
+	}
+	opts.SourceJobID = id
+	job, err := s.Worker.EnqueuePostEdit(opts)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, job)
+}
+
 func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 	oldJob, ok := s.Store.GetJob(r.PathValue("id"))
 	if !ok {
@@ -1093,6 +1110,8 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 	)
 	if oldJob.JobType == "compilation" && oldJob.CompileOpts != nil {
 		newJob, err = s.Worker.EnqueueCompilation(*oldJob.CompileOpts)
+	} else if oldJob.JobType == "post_edit" && oldJob.PostEditOpts != nil {
+		newJob, err = s.Worker.EnqueuePostEdit(*oldJob.PostEditOpts)
 	} else {
 		newJob, err = s.Worker.Enqueue(oldJob.Options)
 	}

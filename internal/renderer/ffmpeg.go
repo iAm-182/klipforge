@@ -570,6 +570,16 @@ func runFFmpegEncode(
 		outputPath,
 	)
 
+	return runRawFFmpegWithProgress(ctx, ffmpegPath, args, expectedDur, onProgress)
+}
+
+func runRawFFmpegWithProgress(
+	ctx context.Context,
+	ffmpegPath string,
+	args []string,
+	expectedDur float64,
+	onProgress func(pct float64, speed string),
+) error {
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

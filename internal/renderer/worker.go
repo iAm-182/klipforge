@@ -256,6 +256,64 @@ func (wp *WorkerPool) EnqueueCompilation(opts model.CompileOptions) (*model.Rend
 	return job, nil
 }
 
+// EnqueuePostEdit creates a fast local post-edit job (Trim start/end + stamp additional SFX/BGM)
+// from an already-rendered clip WITHOUT re-downloading anything from YouTube!
+func (wp *WorkerPool) EnqueuePostEdit(opts model.PostEditOptions) (*model.RenderJob, error) {
+	srcJob, ok := wp.Store.GetJob(opts.SourceJobID)
+	if !ok {
+		return nil, fmt.Errorf("klip sumber tidak ditemukan")
+	}
+	if srcJob.Status != "done" || srcJob.OutputPath == "" || !fileExists(srcJob.OutputPath) {
+		return nil, fmt.Errorf("file video hasil klip sumber belum tersedia")
+	}
+	if opts.TrimStartSec < 0 {
+		opts.TrimStartSec = 0
+	}
+	if opts.TrimEndSec > 0 && opts.TrimEndSec <= opts.TrimStartSec+0.5 {
+		return nil, fmt.Errorf("durasi potong tidak valid: End (%.1fs) harus lebih besar dari Start (%.1fs)", opts.TrimEndSec, opts.TrimStartSec)
+	}
+	if opts.Speed < 0.75 || opts.Speed > 1.5 {
+		opts.Speed = 1.0
+	}
+
+	title := strings.TrimSpace(opts.Title)
+	if title == "" {
+		title = srcJob.Title + " (Edit)"
+	}
+
+	jobID := fmt.Sprintf("edit-%d", time.Now().UnixNano())
+	optsCopy := opts
+	comp := srcJob.Compliance
+	comp.HasValueAdd = true
+
+	job := &model.RenderJob{
+		ID:           jobID,
+		JobType:      "post_edit",
+		ProjectID:    srcJob.ProjectID,
+		ProjectTitle: srcJob.ProjectTitle,
+		CampaignID:   srcJob.CampaignID,
+		CampaignName: srcJob.CampaignName,
+		Title:        title,
+		Options:      srcJob.Options,
+		CompileOpts:  srcJob.CompileOpts,
+		PostEditOpts: &optsCopy,
+		Status:       "queued",
+		Stage:        "Antrean Edit Manual (Trim / +SFX)...",
+		Progress:     0,
+		PostCaption:  srcJob.PostCaption,
+		HashtagLine:  srcJob.HashtagLine,
+		Compliance:   comp,
+		CreatedAt:    time.Now(),
+	}
+
+	if err := wp.Store.SaveJob(job); err != nil {
+		return nil, err
+	}
+	wp.Broker.Publish("job_update", job)
+	wp.queue <- job.ID
+	return job, nil
+}
+
 func (wp *WorkerPool) workerLoop(workerID int) {
 	for jobID := range wp.queue {
 		wp.processJob(workerID, jobID)
@@ -269,6 +327,10 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 	}
 	if job.JobType == "compilation" && job.CompileOpts != nil {
 		wp.processCompilationJob(workerID, job)
+		return
+	}
+	if job.JobType == "post_edit" && job.PostEditOpts != nil {
+		wp.processPostEditJob(workerID, job)
 		return
 	}
 
@@ -677,6 +739,133 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 	_ = wp.Store.SaveJob(job)
 	wp.Broker.Publish("job_update", job)
 	wp.Broker.Log("worker", "success", fmt.Sprintf("Kompilasi selesai: %s (%.1fs, %.2f MB)", fileName, info.Duration, float64(size)/(1024*1024)))
+}
+
+func (wp *WorkerPool) processPostEditJob(workerID int, job *model.RenderJob) {
+	ctx, cancel := context.WithCancel(context.Background())
+	wp.mu.Lock()
+	wp.cancels[job.ID] = cancel
+	wp.mu.Unlock()
+	defer func() {
+		cancel()
+		wp.mu.Lock()
+		delete(wp.cancels, job.ID)
+		wp.mu.Unlock()
+	}()
+
+	opts := *job.PostEditOpts
+	srcJob, ok := wp.Store.GetJob(opts.SourceJobID)
+	if !ok || srcJob.OutputPath == "" || !fileExists(srcJob.OutputPath) {
+		wp.failJob(job, "File video klip sumber tidak ditemukan")
+		return
+	}
+
+	var camp *model.Campaign
+	if job.CampaignID != "" {
+		camp, _ = wp.Store.GetCampaign(job.CampaignID)
+	}
+	settings := wp.Store.GetSettings()
+	workDir := filepath.Join(wp.Store.DataDir, "tmp", job.ID)
+	_ = os.MkdirAll(workDir, 0o755)
+	defer os.RemoveAll(workDir)
+
+	// Resolve additional SFX cues & optional BGM from Audio Library
+	var resolvedSFX []ResolvedSFX
+	if wp.Audio != nil {
+		for _, c := range opts.SFXCues {
+			a, ok := wp.Audio.Get(c.AssetID)
+			if !ok || !fileExists(a.FilePath) {
+				continue
+			}
+			vol := c.Volume
+			if vol <= 0 {
+				vol = 0.95
+			}
+			resolvedSFX = append(resolvedSFX, ResolvedSFX{
+				FilePath: a.FilePath,
+				AtSec:    c.AtSec,
+				Volume:   vol,
+			})
+		}
+	}
+	bgmPath := ""
+	if wp.Audio != nil && opts.BGMAssetID != "" {
+		if a, ok := wp.Audio.Get(opts.BGMAssetID); ok && fileExists(a.FilePath) {
+			bgmPath = a.FilePath
+		}
+	}
+
+	var outroCfg *model.ClipAssetVideo
+	if opts.PreserveOutro && camp != nil && camp.Outro.Enabled && camp.Outro.FilePath != "" && fileExists(camp.Outro.FilePath) {
+		cp := camp.Outro
+		outroCfg = &cp
+	}
+
+	campSlug := sanitizeFilename(job.CampaignName)
+	if campSlug == "" {
+		campSlug = "clips"
+	}
+	outDir := filepath.Join(settings.OutputDir, campSlug)
+	_ = os.MkdirAll(outDir, 0o755)
+	fileName := fmt.Sprintf("%s_edit_%s.mp4", sanitizeFilename(job.Title), job.ID[len(job.ID)-5:])
+	outPath := filepath.Join(outDir, fileName)
+
+	wp.updateJob(job, "rendering", "Memproses Edit Manual (Trim / +SFX)...", 12, "")
+	wp.Broker.Log("worker", "info", fmt.Sprintf("[W%d] Post-Edit %s (trim=%.1f-%.1fs, +%d SFX)",
+		workerID, fileName, opts.TrimStartSec, opts.TrimEndSec, len(resolvedSFX)))
+
+	depSt := wp.Deps.GetStatus()
+	info, err := RenderPostEdit(ctx, PostEditInput{
+		FFmpegPath:     depSt.FFmpegPath,
+		FFprobePath:    depSt.FFprobePath,
+		SourceMP4:      srcJob.OutputPath,
+		OutputPath:     outPath,
+		WorkDir:        workDir,
+		TrimStartSec:   opts.TrimStartSec,
+		TrimEndSec:     opts.TrimEndSec,
+		PreserveOutro:  opts.PreserveOutro,
+		SourceHadOutro: srcJob.Compliance.OutroApplied,
+		Outro:          outroCfg,
+		SFXCues:        resolvedSFX,
+		BGMPath:        bgmPath,
+		BGMVolume:      opts.BGMVolume,
+		BGMAutoDuck:    opts.BGMAutoDuck,
+		Speed:          opts.Speed,
+		Encoder:        settings.DefaultEncoder,
+		Preset:         settings.DefaultPreset,
+		CRF:            settings.DefaultCRF,
+		OnProgress: func(pct float64, speed string) {
+			overall := 12.0 + pct*0.87
+			if overall > 99 {
+				overall = 99
+			}
+			wp.updateJob(job, "rendering", fmt.Sprintf("Rendering Edit Manual (%.0f%%) %s", pct, speed), overall, speed)
+		},
+	})
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		wp.failJob(job, err.Error())
+		return
+	}
+
+	var size int64
+	if fi, err := os.Stat(outPath); err == nil {
+		size = fi.Size()
+	}
+	now := time.Now()
+	job.Status = "done"
+	job.Stage = fmt.Sprintf("Edit manual selesai (+%d SFX) & siap upload!", len(resolvedSFX))
+	job.Progress = 100
+	job.OutputPath = outPath
+	job.OutputFile = fileName
+	job.FileSizeBytes = size
+	job.FinalDuration = info.Duration
+	job.CompletedAt = &now
+	_ = wp.Store.SaveJob(job)
+	wp.Broker.Publish("job_update", job)
+	wp.Broker.Log("worker", "success", fmt.Sprintf("Post-Edit selesai: %s (%.1fs, %.2f MB)", fileName, info.Duration, float64(size)/(1024*1024)))
 }
 
 func (wp *WorkerPool) resolveSFXCues(cfg model.AudioFXConfig, peakOffset, clipDur float64) []ResolvedSFX {

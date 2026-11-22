@@ -1320,6 +1320,8 @@
         ${j.postCaption ? `<div class="post-kit-box">${escapeHtml(j.postCaption)}</div>` : ''}
         <div class="job-actions">
           ${j.status === 'done' ? `<a class="btn btn-xs btn-accent" href="/api/jobs/${encodeURIComponent(j.id)}/video?download=1">⬇️ Download MP4</a>` : ''}
+          ${j.status === 'done' ? `<button class="btn btn-xs btn-primary btn-edit-clip">✂️ Edit Manual (Trim &amp; +SFX)</button>` : ''}
+          ${(j.compileOpts || (j.options && j.options.endSec > 0)) ? `<button class="btn btn-xs btn-secondary btn-reopen-vod" title="Buka lagi di Studio/Top-N untuk geser menit VOD asli">🔄 Edit Menit VOD</button>` : ''}
           ${j.postCaption ? `<button class="btn btn-xs btn-secondary btn-copy-cap">📋 Copy Caption + Hashtags</button>` : ''}
           ${j.hashtagLine ? `<button class="btn btn-xs btn-ghost btn-copy-hash">#️⃣ Copy Hashtags</button>` : ''}
           ${(j.status === 'queued' || j.status === 'downloading' || j.status === 'rendering') ? `<button class="btn btn-xs btn-danger-ghost btn-cancel-job">⏹ Cancel</button>` : ''}
@@ -1328,6 +1330,10 @@
         </div>
       `;
 
+      const editClipBtn = card.querySelector('.btn-edit-clip');
+      if (editClipBtn) editClipBtn.addEventListener('click', () => openPostEditModal(j));
+      const reopenBtn = card.querySelector('.btn-reopen-vod');
+      if (reopenBtn) reopenBtn.addEventListener('click', () => reopenJobInWorkspace(j));
       const copyCapBtn = card.querySelector('.btn-copy-cap');
       if (copyCapBtn) copyCapBtn.addEventListener('click', () => copyText(j.postCaption, 'Caption + Hashtags disalin!'));
       const copyHashBtn = card.querySelector('.btn-copy-hash');
@@ -2014,11 +2020,14 @@
         <div class="job-actions">
           <button class="btn btn-xs btn-accent btn-rev-approve">✅ Approve (Siap Upload)</button>
           <button class="btn btn-xs btn-danger-ghost btn-rev-reject">❌ Reject &amp; Hapus</button>
+          ${j.status === 'done' && j.outputPath ? `<button class="btn btn-xs btn-primary btn-rev-edit">✂️ Edit &amp; +SFX</button>` : ''}
           ${j.status === 'done' && j.outputPath ? `<a class="btn btn-xs btn-secondary" href="/api/jobs/${encodeURIComponent(j.id)}/video?download=1">⬇️ MP4</a>` : ''}
           <button class="btn btn-xs btn-ghost btn-rev-copy">📋 Copy Caption</button>
         </div>
       `;
 
+      const revEditBtn = card.querySelector('.btn-rev-edit');
+      if (revEditBtn) revEditBtn.addEventListener('click', () => openPostEditModal(j));
       card.querySelector('.btn-rev-approve').addEventListener('click', async () => {
         const cap = card.querySelector('.rev-caption').value;
         const note = card.querySelector('.rev-note').value;
@@ -2434,6 +2443,324 @@
       switchTab('queue');
     } catch (e) {
       toast('Gagal render kompilasi: ' + e.message, 'err');
+    }
+  });
+
+  // ==================== Post-Clip Manual Editor (Trim Menit/Detik + Tambah SFX) ====================
+  const peState = {
+    job: null,
+    duration: 0,
+    outroDur: 0,
+    sfxCues: [],
+  };
+
+  function parseTimeInput(str) {
+    if (typeof str === 'number') return Number.isFinite(str) ? Math.max(0, str) : 0;
+    const raw = String(str || '').trim().replace(',', '.');
+    if (!raw) return 0;
+    if (raw.includes(':')) {
+      const parts = raw.split(':').map((p) => parseFloat(p.trim()));
+      if (parts.some((n) => Number.isNaN(n))) return 0;
+      if (parts.length === 2) return Math.max(0, parts[0] * 60 + parts[1]);
+      if (parts.length === 3) return Math.max(0, parts[0] * 3600 + parts[1] * 60 + parts[2]);
+    }
+    const n = parseFloat(raw);
+    return Number.isFinite(n) ? Math.max(0, n) : 0;
+  }
+
+  function fmtTimePrecise(sec) {
+    const s = Math.max(0, Number(sec) || 0);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const rem = s % 60;
+    const remStr = rem < 10 ? '0' + rem.toFixed(1) : rem.toFixed(1);
+    if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${remStr}`;
+    return `${m}:${remStr}`;
+  }
+
+  function closePostEditModal() {
+    const vid = $('peVideo');
+    if (vid) {
+      vid.pause();
+      vid.removeAttribute('src');
+      vid.load();
+    }
+    $('postEditModal').classList.add('hidden');
+    peState.job = null;
+  }
+
+  function openPostEditModal(job) {
+    if (!job || job.status !== 'done') return;
+    peState.job = job;
+    peState.sfxCues = [];
+
+    const camp = state.campaigns.find((c) => c.id === job.campaignId);
+    const hasOutro = Boolean(job.compliance?.outroApplied && camp?.outro?.enabled);
+    peState.outroDur = hasOutro ? (camp.outro.duration || 4.0) : 0;
+    peState.duration = job.finalDuration || 0;
+
+    $('peSourceSubtitle').textContent = `Sumber: ${job.title} (${fmtTimePrecise(peState.duration)}) — edit lokal tanpa download ulang YouTube!`;
+    $('peTitle').value = `${job.title} (Edit)`;
+    $('peSpeed').value = '1.0';
+    $('pePreserveOutro').checked = hasOutro;
+    $('peBgmVol').value = '15';
+    $('peBgmDuck').checked = true;
+
+    // Populate BGM selector
+    const selBgm = $('peBgm');
+    const bgms = state.audioAssets.filter((a) => a.kind === 'bgm');
+    selBgm.innerHTML = '<option value="">— Tanpa BGM Tambahan —</option>';
+    bgms.forEach((b) => {
+      const o = document.createElement('option');
+      o.value = b.id;
+      o.textContent = `${b.builtIn ? '🎵' : '⭐'} ${b.name}`;
+      selBgm.appendChild(o);
+    });
+
+    const canReopenVod = Boolean(job.compileOpts || (job.options && job.options.endSec > 0));
+    $('btnPeOpenVodSource').classList.toggle('hidden', !canReopenVod);
+
+    const initBodyEnd = peState.outroDur > 0 && peState.duration > peState.outroDur + 1.5
+      ? peState.duration - peState.outroDur
+      : peState.duration;
+    $('peStart').value = '0:00.0';
+    $('peEnd').value = fmtTimePrecise(initBodyEnd);
+
+    const vid = $('peVideo');
+    vid.src = `/api/jobs/${encodeURIComponent(job.id)}/video`;
+    vid.onloadedmetadata = () => {
+      if (vid.duration && Number.isFinite(vid.duration)) {
+        peState.duration = vid.duration;
+        const bodyEnd = $('pePreserveOutro').checked && peState.outroDur > 0 && vid.duration > peState.outroDur + 1.5
+          ? vid.duration - peState.outroDur
+          : vid.duration;
+        $('peEnd').value = fmtTimePrecise(bodyEnd);
+        $('peClock').textContent = `${fmtTimePrecise(0)} / ${fmtTimePrecise(vid.duration)}`;
+        updatePeSummary();
+      }
+    };
+    vid.ontimeupdate = () => {
+      $('peClock').textContent = `${fmtTimePrecise(vid.currentTime)} / ${fmtTimePrecise(vid.duration || peState.duration)}`;
+    };
+
+    renderPeSfxList();
+    updatePeSummary();
+    $('postEditModal').classList.remove('hidden');
+  }
+
+  function addPeSfxAt(assetId, atSec) {
+    const sfxs = state.audioAssets.filter((a) => a.kind === 'sfx');
+    const chosen = assetId && sfxs.some((s) => s.id === assetId)
+      ? assetId
+      : (sfxs[0] ? sfxs[0].id : 'sfx-boom');
+    const sec = Math.max(0, Math.round((atSec ?? ($('peVideo').currentTime || 0)) * 10) / 10);
+    peState.sfxCues.push({ assetId: chosen, atSec: sec, volume: 1.0 });
+    peState.sfxCues.sort((a, b) => a.atSec - b.atSec);
+    renderPeSfxList();
+    updatePeSummary();
+  }
+
+  function renderPeSfxList() {
+    const box = $('peSfxList');
+    if (!box) return;
+    if (peState.sfxCues.length === 0) {
+      box.innerHTML = '<div class="muted text-xs" style="padding:8px;">Belum ada SFX tambahan. Putar video di kiri, pause di momen pas, lalu klik <strong>💥 +SFX di Detik Ini</strong> atau tombol cepat di atas!</div>';
+      return;
+    }
+    const sfxs = state.audioAssets.filter((a) => a.kind === 'sfx');
+    box.innerHTML = '';
+    peState.sfxCues.forEach((cue, idx) => {
+      const row = document.createElement('div');
+      row.className = 'pe-sfx-row';
+      const optsHtml = sfxs.map((s) => `<option value="${escapeAttr(s.id)}" ${s.id === cue.assetId ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join('');
+      row.innerHTML = `
+        <select class="input input-sm pe-cue-asset">${optsHtml}</select>
+        <input type="text" class="input input-sm pe-cue-time" value="${fmtTimePrecise(cue.atSec)}" title="Waktu SFX (mm:ss.s atau detik)" />
+        <button class="btn btn-2xs btn-secondary pe-cue-snap" title="Ambil waktu video sekarang">📍</button>
+        <input type="number" step="0.1" min="0.2" max="1.5" class="input input-sm pe-cue-vol" value="${cue.volume}" title="Volume (0.2 - 1.5)" />
+        <button class="btn btn-2xs btn-ghost pe-cue-play" title="Tes suara SFX">▶</button>
+        <button class="btn btn-2xs btn-danger-ghost pe-cue-del" title="Hapus SFX">✕</button>
+      `;
+      row.querySelector('.pe-cue-asset').addEventListener('change', (e) => (cue.assetId = e.target.value));
+      row.querySelector('.pe-cue-time').addEventListener('change', (e) => {
+        cue.atSec = parseTimeInput(e.target.value);
+        e.target.value = fmtTimePrecise(cue.atSec);
+      });
+      row.querySelector('.pe-cue-snap').addEventListener('click', () => {
+        const t = Math.round(($('peVideo').currentTime || 0) * 10) / 10;
+        cue.atSec = t;
+        row.querySelector('.pe-cue-time').value = fmtTimePrecise(t);
+        toast(`📍 SFX diset ke ${fmtTimePrecise(t)}`, 'info');
+      });
+      row.querySelector('.pe-cue-vol').addEventListener('change', (e) => {
+        cue.volume = Math.max(0.2, Math.min(1.5, parseFloat(e.target.value) || 1.0));
+      });
+      row.querySelector('.pe-cue-play').addEventListener('click', () => {
+        const asset = state.audioAssets.find((a) => a.id === cue.assetId);
+        if (asset) togglePlayAudio(asset);
+      });
+      row.querySelector('.pe-cue-del').addEventListener('click', () => {
+        peState.sfxCues.splice(idx, 1);
+        renderPeSfxList();
+        updatePeSummary();
+      });
+      box.appendChild(row);
+    });
+  }
+
+  function updatePeSummary() {
+    const start = parseTimeInput($('peStart').value);
+    const end = parseTimeInput($('peEnd').value);
+    const speed = parseFloat($('peSpeed').value) || 1.0;
+    const keepOutro = $('pePreserveOutro').checked && peState.outroDur > 0;
+    const bodyLimit = keepOutro && peState.duration > peState.outroDur + 1.5
+      ? peState.duration - peState.outroDur
+      : peState.duration;
+
+    const effEnd = end > 0 ? Math.min(end, bodyLimit || end) : bodyLimit;
+    const trimmedBody = Math.max(0, (effEnd - start) / speed);
+    const totalOut = trimmedBody + (keepOutro ? peState.outroDur : 0);
+
+    $('peDurInfo').textContent = keepOutro
+      ? `Durasi hasil: ~${trimmedBody.toFixed(1)}s + Outro ${peState.outroDur.toFixed(1)}s = ~${totalOut.toFixed(1)} dtk`
+      : `Durasi hasil: ~${totalOut.toFixed(1)} detik`;
+
+    const isNoTrim = start <= 0.05 && Math.abs(effEnd - bodyLimit) <= 0.25 && Math.abs(speed - 1.0) <= 0.005;
+    $('peSpeedHint').textContent = isNoTrim
+      ? `⚡ Mode Instant (-c:v copy ~2 dtk) · +${peState.sfxCues.length} SFX`
+      : `🎬 Mode Trim Lokal + Mix (~8–15 dtk, tanpa download YT) · +${peState.sfxCues.length} SFX`;
+  }
+
+  function reopenJobInWorkspace(job) {
+    if (!job) return;
+    closePostEditModal();
+
+    if (job.compileOpts && job.compileOpts.segments && job.compileOpts.segments.length > 0) {
+      const co = job.compileOpts;
+      state.topNSlots = co.segments.map((s) => ({ ...s }));
+      $('topNTitle').value = co.title || job.title || '';
+      if (co.mode) $('topNMode').value = co.mode;
+      if (co.layout && co.layout.cropMode) $('topNLayout').value = co.layout.cropMode;
+      if (co.bumperDuration) $('topNBumperDur').value = co.bumperDuration;
+      $('topNBumperSFX').value = co.bumperSfxId || '';
+      $('topNWatermark').checked = !!co.useWatermark;
+      $('topNOutro').checked = !!co.useOutro;
+      $('topNAudioNorm').checked = !!co.audioNorm;
+      $('topNVivid').checked = co.videoFx?.colorPreset === 'vivid_gaming';
+      renderTopNBuilder();
+      switchTab('topn');
+      toast(`🔄 ${state.topNSlots.length} slot Top-N dimuat ulang! Silakan ubah menit/SFX lalu render lagi.`, 'ok');
+      return;
+    }
+
+    if (job.options && job.options.endSec > 0) {
+      const o = job.options;
+      const proj = state.projects.find((p) => p.id === (o.projectId || job.projectId));
+      if (proj) {
+        state.activeProject = proj;
+        renderProjectWorkspace(proj);
+      }
+      $('manualStart').value = Math.round(o.startSec || 0);
+      $('manualEnd').value = Math.round(o.endSec || 0);
+      $('manualHook').value = o.hookText || job.title || '';
+      if (o.layout) {
+        state.layout = { ...state.layout, ...o.layout };
+        if (o.layout.aspectRatio) $('selAspect').value = o.layout.aspectRatio;
+        if (o.layout.cropMode) $('selCropMode').value = o.layout.cropMode;
+        if (o.layout.splitRatio) {
+          $('rngSplit').value = Math.round(o.layout.splitRatio * 100);
+          $('lblSplit').textContent = Math.round(o.layout.splitRatio * 100) + '%';
+        }
+        drawCropCanvases();
+      }
+      if (o.audioFx) {
+        $('selBGM').value = o.audioFx.bgmAssetId || '';
+        if (o.audioFx.sfxCues && o.audioFx.sfxCues.length > 0) {
+          state.customSFXCues = o.audioFx.sfxCues.map((c) => ({ ...c }));
+          $('selSFXPreset').value = 'custom';
+          toggleCustomSFXUI();
+        } else if (o.audioFx.sfxAutoPreset) {
+          $('selSFXPreset').value = o.audioFx.sfxAutoPreset;
+          toggleCustomSFXUI();
+        }
+      }
+      switchTab('studio');
+      if (proj) setupPlayer(proj, o.startSec || 0, true);
+      toast('🔄 Klip dimuat ke Studio Clipper! Geser menit/detik atau SFX lalu klik Render Klip Manual.', 'ok');
+    }
+  }
+
+  $('btnClosePostEdit').addEventListener('click', closePostEditModal);
+  $('postEditModal').addEventListener('click', (e) => {
+    if (e.target === $('postEditModal')) closePostEditModal();
+  });
+  document.querySelectorAll('.pe-nudge').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const vid = $('peVideo');
+      const d = parseFloat(btn.dataset.d) || 0;
+      vid.currentTime = Math.max(0, Math.min(vid.duration || 9999, (vid.currentTime || 0) + d));
+    });
+  });
+  $('btnPeSetStart').addEventListener('click', () => {
+    const t = $('peVideo').currentTime || 0;
+    $('peStart').value = fmtTimePrecise(t);
+    updatePeSummary();
+    toast(`⬅ Start diset ke ${fmtTimePrecise(t)}`, 'info');
+  });
+  $('btnPeSetEnd').addEventListener('click', () => {
+    const t = $('peVideo').currentTime || 0;
+    $('peEnd').value = fmtTimePrecise(t);
+    updatePeSummary();
+    toast(`➡ End diset ke ${fmtTimePrecise(t)}`, 'info');
+  });
+  $('btnPeAddSfxNow').addEventListener('click', () => {
+    addPeSfxAt('sfx-boom', $('peVideo').currentTime || 0);
+  });
+  $('btnPeAddSfxRow').addEventListener('click', () => {
+    addPeSfxAt('sfx-boom', $('peVideo').currentTime || 0);
+  });
+  document.querySelectorAll('.pe-stamp').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const t = $('peVideo').currentTime || 0;
+      addPeSfxAt(btn.dataset.sfx, t);
+      toast(`💥 ${btn.textContent.trim()} ditempel di ${fmtTimePrecise(t)}!`, 'ok');
+    });
+  });
+  ['peStart', 'peEnd', 'peSpeed', 'pePreserveOutro'].forEach((id) => {
+    $(id).addEventListener('change', updatePeSummary);
+    $(id).addEventListener('input', updatePeSummary);
+  });
+  $('btnPeOpenVodSource').addEventListener('click', () => reopenJobInWorkspace(peState.job));
+  $('btnPeRender').addEventListener('click', async () => {
+    if (!peState.job) return;
+    const startSec = parseTimeInput($('peStart').value);
+    const endSec = parseTimeInput($('peEnd').value);
+    if (endSec > 0 && endSec <= startSec + 0.5) {
+      toast(`Durasi tidak valid: End (${fmtTimePrecise(endSec)}) harus lebih besar dari Start (${fmtTimePrecise(startSec)})!`, 'err');
+      return;
+    }
+    const payload = {
+      title: $('peTitle').value.trim() || `${peState.job.title} (Edit)`,
+      trimStartSec: startSec,
+      trimEndSec: endSec,
+      preserveOutro: $('pePreserveOutro').checked,
+      sfxCues: peState.sfxCues.map((c) => ({ assetId: c.assetId, atSec: c.atSec, volume: c.volume })),
+      bgmAssetId: $('peBgm').value || '',
+      bgmVolume: (parseFloat($('peBgmVol').value) || 15) / 100.0,
+      bgmAutoDuck: $('peBgmDuck').checked,
+      speed: parseFloat($('peSpeed').value) || 1.0,
+    };
+    try {
+      await api(`/api/jobs/${encodeURIComponent(peState.job.id)}/post-edit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      toast('✂️ Edit manual masuk antrean render (super cepat lokal)!', 'ok');
+      closePostEditModal();
+      switchTab('queue');
+    } catch (e) {
+      toast('Gagal render edit manual: ' + e.message, 'err');
     }
   });
 

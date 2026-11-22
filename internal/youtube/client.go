@@ -481,7 +481,8 @@ func (c *Client) CutSectionFromStreams(ctx context.Context, pair *StreamPair, st
 	}
 
 	_ = os.Remove(destMP4)
-	reconnect := []string{"-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"}
+	// Always attach -rw_timeout (15s) + context timeout so a stalled HLS TCP socket can NEVER hang forever!
+	reconnect := []string{"-rw_timeout", "15000000", "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "4"}
 	args := []string{"-y", "-hide_banner", "-loglevel", "error"}
 	args = append(args, reconnect...)
 	args = append(args, "-ss", fmt.Sprintf("%.3f", startSec), "-t", fmt.Sprintf("%.3f", dur), "-i", pair.VideoURL)
@@ -499,16 +500,40 @@ func (c *Client) CutSectionFromStreams(ctx context.Context, pair *StreamPair, st
 		destMP4,
 	)
 
-	cmd := exec.CommandContext(ctx, ffBin, args...)
+	// Per-segment guard: max(90s, dur*6) so even slow CPUs have headroom while hung sockets always trip
+	segTimeout := time.Duration(dur*6)*time.Second + 75*time.Second
+	if segTimeout < 90*time.Second {
+		segTimeout = 90 * time.Second
+	}
+	sliceCtx, cancel := context.WithTimeout(ctx, segTimeout)
+	defer cancel()
+
+	cmd := exec.Command(ffBin, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		_ = os.Remove(destMP4)
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			_ = os.Remove(destMP4)
+			msg := strings.TrimSpace(stderr.String())
+			if msg == "" {
+				msg = err.Error()
+			}
+			return fmt.Errorf("ffmpeg direct slice gagal: %s", msg)
 		}
-		return fmt.Errorf("ffmpeg direct slice gagal: %s", msg)
+	case <-sliceCtx.Done():
+		if cmd.Process != nil {
+			_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run()
+		}
+		<-done
+		_ = os.Remove(destMP4)
+		return fmt.Errorf("ffmpeg direct slice timeout (koneksi stream YouTube melambat)")
 	}
 	if fi, err := os.Stat(destMP4); err != nil || fi.Size() < 4096 {
 		_ = os.Remove(destMP4)

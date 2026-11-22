@@ -299,17 +299,33 @@ type CompileOptions struct {
 	CRF              int              `json:"crf"`
 }
 
+// PostEditOptions lets the user trim an already-rendered clip's start/end timestamps
+// and stamp unlimited additional SFX cues (or BGM) directly onto the local MP4 without re-downloading!
+type PostEditOptions struct {
+	SourceJobID   string   `json:"sourceJobId"`
+	Title         string   `json:"title"`
+	TrimStartSec  float64  `json:"trimStartSec"`  // Seconds in rendered clip (0 = from beginning)
+	TrimEndSec    float64  `json:"trimEndSec"`    // Seconds in rendered clip (<=0 = until end of main body)
+	PreserveOutro bool     `json:"preserveOutro"` // Keep campaign's clean Outro template untouched at the end
+	SFXCues       []SFXCue `json:"sfxCues"`       // Additional SFX cues stamped at timestamps on the source clip timeline
+	BGMAssetID    string   `json:"bgmAssetId"`    // Optional additional BGM overlay
+	BGMVolume     float64  `json:"bgmVolume"`     // 0.05 - 0.60
+	BGMAutoDuck   bool     `json:"bgmAutoDuck"`
+	Speed         float64  `json:"speed"` // Optional 1.0 - 1.20
+}
+
 // RenderJob tracks a queued, running, completed, or failed clip render.
 type RenderJob struct {
-	ID            string          `json:"id"`
-	JobType       string          `json:"jobType,omitempty"` // "" / "single" or "compilation"
-	ProjectID     string          `json:"projectId"`
-	ProjectTitle  string          `json:"projectTitle"`
-	CampaignID    string          `json:"campaignId"`
-	CampaignName  string          `json:"campaignName"`
-	Title         string          `json:"title"`
-	Options       RenderOptions   `json:"options"`
-	CompileOpts   *CompileOptions `json:"compileOpts,omitempty"`
+	ID            string           `json:"id"`
+	JobType       string           `json:"jobType,omitempty"` // "" / "single", "compilation", or "post_edit"
+	ProjectID     string           `json:"projectId"`
+	ProjectTitle  string           `json:"projectTitle"`
+	CampaignID    string           `json:"campaignId"`
+	CampaignName  string           `json:"campaignName"`
+	Title         string           `json:"title"`
+	Options       RenderOptions    `json:"options"`
+	CompileOpts   *CompileOptions  `json:"compileOpts,omitempty"`
+	PostEditOpts  *PostEditOptions `json:"postEditOpts,omitempty"`
 	Status        string          `json:"status"`        // queued, downloading, rendering, done, error, canceled
 	Stage         string          `json:"stage"`         // human readable stage
 	Progress      float64         `json:"progress"`      // 0 - 100

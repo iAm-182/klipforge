@@ -907,6 +907,114 @@
     </main>
   </div>
 
+  <!-- ==================== POST-CLIP MANUAL EDITOR MODAL (Trim Menit/Detik + Tambah SFX) ==================== -->
+  <div id="postEditModal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <h2>✂️ Edit Manual Hasil Klip (Potong Menit &amp; +Sound Effect)</h2>
+          <div class="muted text-xs" id="peSourceSubtitle">Edit langsung dari file MP4 lokal — cepat tanpa download ulang YouTube!</div>
+        </div>
+        <button class="btn btn-xs btn-ghost" id="btnClosePostEdit">✕ Tutup</button>
+      </div>
+
+      <div class="modal-body-grid">
+        <!-- Left: Interactive Video Preview + Frame/Second Controls -->
+        <div class="pe-left">
+          <div class="pe-video-wrap">
+            <video id="peVideo" controls playsinline></video>
+          </div>
+          <div class="pe-time-bar">
+            <span class="pe-clock" id="peClock">00:00.0 / 00:00.0</span>
+            <div class="pe-nudge-group">
+              <button class="btn btn-2xs btn-secondary pe-nudge" data-d="-5">-5s</button>
+              <button class="btn btn-2xs btn-secondary pe-nudge" data-d="-1">-1s</button>
+              <button class="btn btn-2xs btn-secondary pe-nudge" data-d="-0.2">-0.2s</button>
+              <button class="btn btn-2xs btn-secondary pe-nudge" data-d="0.2">+0.2s</button>
+              <button class="btn btn-2xs btn-secondary pe-nudge" data-d="1">+1s</button>
+              <button class="btn btn-2xs btn-secondary pe-nudge" data-d="5">+5s</button>
+            </div>
+          </div>
+          <div class="pe-capture-row">
+            <button class="btn btn-xs btn-secondary" id="btnPeSetStart">⬅ Set Start di Waktu Ini</button>
+            <button class="btn btn-xs btn-secondary" id="btnPeSetEnd">Set End di Waktu Ini ➡</button>
+            <button class="btn btn-xs btn-accent" id="btnPeAddSfxNow">💥 +SFX di Detik Ini</button>
+          </div>
+        </div>
+
+        <!-- Right: Trim Controls + SFX Timeline + Optional BGM -->
+        <div class="pe-right">
+          <label>Judul Hasil Edit (otomatis disimpan sebagai file baru — file asli tetap aman)
+            <input type="text" id="peTitle" class="input input-sm" />
+          </label>
+
+          <div class="pe-section mt-12">
+            <div class="fx-section-title">⏱️ Sesuaikan Menit / Detik Potongan (Format <code>mm:ss</code> atau detik)</div>
+            <div class="pe-trim-grid">
+              <label class="text-xs">Start (mm:ss.s / dtk)
+                <input type="text" id="peStart" class="input input-sm" value="0:00.0" placeholder="cth: 0:05 atau 5.5" />
+              </label>
+              <label class="text-xs">End (mm:ss.s / dtk)
+                <input type="text" id="peEnd" class="input input-sm" value="0:30.0" placeholder="cth: 0:45 atau 45" />
+              </label>
+              <label class="text-xs">Kecepatan
+                <select id="peSpeed" class="input input-sm">
+                  <option value="1.0">1.0x (Normal)</option>
+                  <option value="1.05">1.05x</option>
+                  <option value="1.10">1.10x</option>
+                  <option value="1.15">1.15x</option>
+                </select>
+              </label>
+            </div>
+            <div class="pe-trim-meta mt-8">
+              <label class="check-box">
+                <input type="checkbox" id="pePreserveOutro" checked />
+                <span>🛡️ Pertahankan Outro MotionKlip utuh &amp; bersih di akhir</span>
+              </label>
+              <div class="text-xs muted" id="peDurInfo">Durasi hasil: —</div>
+            </div>
+          </div>
+
+          <div class="pe-section mt-12">
+            <div class="card-head" style="margin-bottom:6px;">
+              <div class="fx-section-title" style="margin:0;">💥 Sound Effect Tambahan (Klik waktu video lalu tempel!)</div>
+              <button class="btn btn-2xs btn-secondary" id="btnPeAddSfxRow">+ Tambah SFX</button>
+            </div>
+            <div class="pe-quick-sfx">
+              <span class="text-xs muted">Tempel cepat di waktu player:</span>
+              <button class="topic-pill pe-stamp" data-sfx="sfx-boom">💥 Vine Boom</button>
+              <button class="topic-pill pe-stamp" data-sfx="sfx-metal-pipe">🔧 Metal Pipe</button>
+              <button class="topic-pill pe-stamp" data-sfx="sfx-alert">🚨 Alert</button>
+              <button class="topic-pill pe-stamp" data-sfx="sfx-record-scratch">📀 Scratch</button>
+              <button class="topic-pill pe-stamp" data-sfx="sfx-ding">✨ Ding</button>
+              <button class="topic-pill pe-stamp" data-sfx="sfx-glitch">⚡ Glitch</button>
+            </div>
+            <div id="peSfxList" class="pe-sfx-list mt-8"></div>
+          </div>
+
+          <div class="pe-section mt-12">
+            <div class="fx-section-title">🎵 Tambah Backsound / BGM (Opsional)</div>
+            <div class="pe-bgm-grid">
+              <select id="peBgm" class="input input-sm">
+                <option value="">— Tanpa BGM Tambahan —</option>
+              </select>
+              <input type="number" id="peBgmVol" class="input input-sm" min="5" max="60" value="15" title="Volume BGM (%)" />
+              <label class="check-inline text-xs"><input type="checkbox" id="peBgmDuck" checked /> Auto-Duck</label>
+            </div>
+          </div>
+
+          <div class="pe-footer mt-16">
+            <div class="text-xs" id="peSpeedHint">⚡ Mode Instant (-c:v copy ~2 dtk)</div>
+            <div class="head-actions">
+              <button class="btn btn-sm btn-secondary" id="btnPeOpenVodSource" title="Ubah menit lebih awal/panjang dari video YouTube asli">🔄 Edit Menit VOD Asli</button>
+              <button class="btn btn-sm btn-accent" id="btnPeRender">💾 RENDER HASIL EDIT</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="/app.js"></script>
 </body>
 </html>
