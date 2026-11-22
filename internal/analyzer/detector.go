@@ -13,13 +13,14 @@ import (
 
 // AnalysisInput bundles all raw signals available for a YouTube video/VOD.
 type AnalysisInput struct {
-	DurationSec float64
-	Heatmap     []youtube.HeatmapPoint
-	Chats       []youtube.ChatMessage
-	AudioEnergy []float64 // 1-second buckets (0.0 - 1.0)
-	Transcript  []model.TranscriptCue
-	Chapters    []model.Chapter
-	Settings    model.DetectionSettings
+	DurationSec    float64
+	Heatmap        []youtube.HeatmapPoint
+	Chats          []youtube.ChatMessage
+	AudioEnergy    []float64 // 1-second buckets (0.0 - 1.0)
+	Transcript     []model.TranscriptCue
+	Chapters       []model.Chapter
+	Settings       model.DetectionSettings
+	ForbiddenWords []string // Campaign-level words never allowed in auto-generated hooks
 }
 
 // AnalysisResult contains the downsampled chart timeline, ranked viral candidates, and signal availability.
@@ -289,7 +290,7 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 	}
 
 	// If no live chat exists yet, mirror transcript hype into chatGrid only when displaying or keep separate via Reasons
-	candidates := extractCandidates(dur, combined, heatGrid, chatGrid, audioGrid, transcriptGrid, chatBucketSamples, in.Transcript, in.Chapters, cfg, hasHeatmap, hasChat, hasAudio, hasTranscript)
+	candidates := extractCandidates(dur, combined, heatGrid, chatGrid, audioGrid, transcriptGrid, chatBucketSamples, in.Transcript, in.Chapters, cfg, hasHeatmap, hasChat, hasAudio, hasTranscript, in.ForbiddenWords)
 
 	// 6. Downsample timeline to max ~360 chart points for buttery-smooth Canvas rendering
 	step := 1
@@ -357,6 +358,7 @@ func extractCandidates(
 	chapters []model.Chapter,
 	cfg model.DetectionSettings,
 	hasHeatmap, hasChat, hasAudio, hasTranscript bool,
+	forbiddenWords []string,
 ) []model.ClipCandidate {
 	type peak struct {
 		sec   int
@@ -424,6 +426,7 @@ func extractCandidates(
 
 	// Non-Maximum Suppression & smart clip boundary expansion
 	var selected []model.ClipCandidate
+	usedHooks := make(map[string]bool)
 	for _, pk := range peaks {
 		if len(selected) >= cfg.MaxClips {
 			break
@@ -505,7 +508,8 @@ func extractCandidates(
 			title = fmt.Sprintf("#%d %s (%s)", rank, chapTitle, FormatMMSS(float64(pk.sec)))
 		}
 
-		hookText := suggestHookText(reasons, samples, speech, chapTitle)
+		hookText := suggestHookText(rank, reasons, samples, transcript, float64(pk.sec), speech, chapTitle, forbiddenWords, usedHooks)
+		usedHooks[strings.ToUpper(hookText)] = true
 
 		selected = append(selected, model.ClipCandidate{
 			ID:           fmt.Sprintf("clip-%d-%d", left, right),
@@ -699,32 +703,169 @@ func buildReasons(maxH, maxC, maxA, maxT float64, hasH, hasC, hasA, hasT bool) [
 	return reasons
 }
 
-func suggestHookText(reasons, sampleChats []string, speech, chapterTitle string) string {
+var defaultBannedHookWords = []string{
+	"anjing", "babi", "bangsat", "kontol", "memek", "ngentot", "jancok", "cok",
+	"goblok", "tolol", "bajingan", "brengsek", "fuck", "shit", "bitch", "nigger", "nigga",
+}
+
+func containsForbiddenWord(text string, forbidden []string) bool {
+	low := " " + strings.ToLower(text) + " "
+	for _, bw := range defaultBannedHookWords {
+		if strings.Contains(low, bw) {
+			return true
+		}
+	}
+	for _, fw := range forbidden {
+		w := strings.TrimSpace(strings.ToLower(fw))
+		if w != "" && strings.Contains(low, w) {
+			return true
+		}
+	}
+	return false
+}
+
+func cleanHookPhrase(raw string) string {
+	// Keep letters, digits, spaces, and punchy punctuation
+	var b strings.Builder
+	for _, r := range raw {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' || r == '!' || r == '?' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune(' ')
+		}
+	}
+	words := strings.Fields(b.String())
+	if len(words) == 0 {
+		return ""
+	}
+	// Strip leading filler words so the hook hits immediately
+	fillers := map[string]bool{
+		"dan": true, "yang": true, "di": true, "ke": true, "itu": true, "ini": true,
+		"nah": true, "ya": true, "eh": true, "uh": true, "um": true, "musik": true,
+		"tertawa": true, "tepuk": true, "tangan": true, "tapi": true, "jadi": true,
+	}
+	for len(words) > 3 && fillers[strings.ToLower(words[0])] {
+		words = words[1:]
+	}
+	if len(words) > 6 {
+		words = words[:6]
+	}
+	out := strings.ToUpper(strings.Join(words, " "))
+	if len(out) > 40 {
+		out = strings.TrimSpace(out[:40])
+	}
+	return out
+}
+
+func suggestHookText(
+	rank int,
+	reasons, sampleChats []string,
+	transcript []model.TranscriptCue,
+	peakSec float64,
+	speech, chapterTitle string,
+	forbiddenWords []string,
+	usedHooks map[string]bool,
+) string {
+	tryCandidate := func(s string) (string, bool) {
+		c := strings.TrimSpace(s)
+		if len(c) < 6 {
+			return "", false
+		}
+		if containsForbiddenWord(c, forbiddenWords) {
+			return "", false
+		}
+		key := strings.ToUpper(c)
+		if usedHooks[key] {
+			return "", false
+		}
+		return key, true
+	}
+
 	if chapterTitle != "" && len(chapterTitle) <= 36 {
-		return strings.ToUpper(chapterTitle)
+		if h, ok := tryCandidate(chapterTitle); ok {
+			return h
+		}
 	}
+
+	// 1. Extract the punchiest, highest-scoring Indonesian transcript phrase right near peakSec!
+	if len(transcript) > 0 {
+		type scoredCue struct {
+			text  string
+			score float64
+		}
+		var nearby []scoredCue
+		for _, cue := range transcript {
+			if cue.End < peakSec-8 || cue.Start > peakSec+10 {
+				continue
+			}
+			phrase := cleanHookPhrase(cue.Text)
+			if len(strings.Fields(phrase)) < 3 || containsForbiddenWord(phrase, forbiddenWords) {
+				continue
+			}
+			sc := scoreTranscriptCue(cue)
+			// Prefer cues closest to the actual peak second
+			dist := math.Abs((cue.Start+cue.End)/2.0 - peakSec)
+			sc += math.Max(0, 3.0-dist*0.25)
+			nearby = append(nearby, scoredCue{text: phrase, score: sc})
+		}
+		sort.Slice(nearby, func(i, j int) bool {
+			return nearby[i].score > nearby[j].score
+		})
+		for _, nc := range nearby {
+			hook := nc.text
+			if !strings.HasSuffix(hook, "!") && !strings.HasSuffix(hook, "?") {
+				hook += "!"
+			}
+			if h, ok := tryCandidate(hook); ok {
+				return h
+			}
+		}
+	}
+
+	// 2. Contextual keyword hooks (varied, never all identical)
 	combined := strings.ToLower(strings.Join(sampleChats, " ") + " " + speech)
-	if strings.Contains(combined, "polisi") || strings.Contains(combined, "kabur") {
-		return "PANIK DIKEJAR POLISI GTA VI!"
+	topicTemplates := []struct {
+		keys []string
+		hook string
+	}{
+		{[]string{"polisi", "kabur", "kejar"}, "PANIK DIKEJAR POLISI!"},
+		{[]string{"nabrak", "tabrak", "nyetir", "mobil", "motor"}, "DETIK-DETIK NYETIR AUTO NABRAK!"},
+		{[]string{"kaget", "panik", "tolong", "ampun"}, "DETIK-DETIK PANIK PARAH!"},
+		{[]string{"wkwk", "ngakak", "kocak", "lucu"}, "NGAKAK GAK KETAHAN DI STREAM!"},
+		{[]string{"meledak", "mati", "hancur", "wasted"}, "AUTO KACAU MELEDAK PARAH!"},
+		{[]string{"bos", "misi", "tembak", "senjata"}, "AKSI TEMBAK-TEMBAKAN PALING TEGANG!"},
+		{[]string{"npc", "orang", "cewek", "cowok"}, "INTERAKSI NPC PALING KOCAK!"},
+		{[]string{"bocil", "absen", "windah", "brando"}, "MOMEN EPIC BARENG BOCIL!"},
 	}
-	if strings.Contains(combined, "kaget") || strings.Contains(combined, "panik") || strings.Contains(combined, "tolong") {
-		return "DETIK-DETIK PANIK PARAH!"
-	}
-	if strings.Contains(combined, "wkwk") || strings.Contains(combined, "ngakak") || strings.Contains(combined, "kocak") || strings.Contains(combined, "tertawa") {
-		return "MOMEN NGAKAK GAK KETAHAN!"
-	}
-	if strings.Contains(combined, "meledak") || strings.Contains(combined, "mati") || strings.Contains(combined, "hancur") {
-		return "AUTO KACAU MELEDAK!"
-	}
-	for _, r := range reasons {
-		if r == "Chat Meledak" {
-			return "CHAT LANGSUNG MELEDAK!"
+	for _, tt := range topicTemplates {
+		for _, k := range tt.keys {
+			if strings.Contains(combined, k) {
+				if h, ok := tryCandidate(tt.hook); ok {
+					return h
+				}
+				break
+			}
 		}
-		if r == "Reaksi Keras" {
-			return "REAKSI TERIAK PALING PECAH!"
+	}
+
+	// 3. Diverse rank-indexed fallbacks so NO two cards ever look copy-pasted!
+	fallbacks := []string{
+		"MOMEN PALING PECAH DI STREAM!",
+		"REAKSI SPONTAN GAK KETEBAK!",
+		"PLOT TWIST TAK TERDUGA!",
+		"DETIK-DETIK PALING RAMAI!",
+		"CLIP WAJIB NONTON SAMPAI HABIS!",
+		"KEKACAUAN PALING KOCAK!",
+		"REAKSI TERIAK PALING EPIC!",
+		"HIGHLIGHT TERPANAS STREAM INI!",
+	}
+	for i := 0; i < len(fallbacks); i++ {
+		idx := (rank - 1 + i) % len(fallbacks)
+		if h, ok := tryCandidate(fallbacks[idx]); ok {
+			return h
 		}
 	}
-	return "MOMEN PALING RAMAI DI STREAM!"
+	return fmt.Sprintf("MOMEN VIRAL #%d (%s)!", rank, FormatMMSS(peakSec))
 }
 
 func collectChatSamples(buckets [][]string, start, end, limit int) []string {

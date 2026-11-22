@@ -29,6 +29,7 @@ type PostEditInput struct {
 	BGMVolume          float64
 	BGMAutoDuck        bool
 	Speed              float64
+	Watermark          *model.WatermarkConfig // Optional manual drag-and-drop watermark overlay (ONLY on main clip, NEVER Outro!)
 	Encoder            string
 	Preset             string
 	CRF                int
@@ -105,16 +106,17 @@ func RenderPostEdit(ctx context.Context, in PostEditInput) (MediaInfo, error) {
 		}
 	}
 	hasBGM := in.BGMPath != "" && fileExists(in.BGMPath)
+	hasWM := in.Watermark != nil && in.Watermark.Enabled && in.Watermark.FilePath != "" && fileExists(in.Watermark.FilePath)
 
-	// Check if we can take the ULTRA-FAST `-c:v copy` path (no trim & no speed change!)
+	// Check if we can take the ULTRA-FAST `-c:v copy` path (no trim, no speed change, AND no new watermark!)
 	noTrim := trimStart <= 0.05 && ((sourceHasProtectedTail && trimEnd >= bodyLimit-0.15) || (!sourceHasProtectedTail && trimEnd >= srcInfo.Duration-0.15))
 	noSpeed := math.Abs(speed-1.0) <= 0.005
 
-	if noTrim && noSpeed && !(!in.SourceHadOutro && hasOutroFile) {
+	if noTrim && noSpeed && !hasWM && !(!in.SourceHadOutro && hasOutroFile) {
 		return renderPostEditStreamCopy(ctx, in, srcInfo, bodyLimit, validSFX, hasBGM)
 	}
 
-	// Full local trim + audio SFX/BGM mix + optional clean Outro re-attach
+	// Full local trim + optional manual watermark + audio SFX/BGM mix + optional clean Outro re-attach
 	mainDurRaw := trimEnd - trimStart
 	effectiveMainDur := mainDurRaw / speed
 	reattachOutro := hasOutroFile
@@ -129,10 +131,19 @@ func RenderPostEdit(ctx context.Context, in PostEditInput) (MediaInfo, error) {
 	args = append(args, "-ss", fmt.Sprintf("%.3f", trimStart), "-t", fmt.Sprintf("%.3f", mainDurRaw), "-i", in.SourceMP4)
 
 	nextIdx := 1
+	wmIdx := -1
 	outroIdx := -1
 	bgmIdx := -1
 	sfxIndices := make([]int, len(validSFX))
 
+	if hasWM {
+		wmIdx = nextIdx
+		nextIdx++
+		if strings.EqualFold(filepath.Ext(in.Watermark.FilePath), ".gif") {
+			args = append(args, "-ignore_loop", "0")
+		}
+		args = append(args, "-i", in.Watermark.FilePath)
+	}
 	if reattachOutro {
 		outroIdx = nextIdx
 		nextIdx++
@@ -152,9 +163,15 @@ func RenderPostEdit(ctx context.Context, in PostEditInput) (MediaInfo, error) {
 	var filters []string
 	// Video stream of trimmed main clip
 	if !noSpeed {
-		filters = append(filters, fmt.Sprintf("[0:v]setpts=(PTS-STARTPTS)/%.4f,fps=30,setsar=1,format=yuv420p[main_v]", speed))
+		filters = append(filters, fmt.Sprintf("[0:v]setpts=(PTS-STARTPTS)/%.4f,fps=30,setsar=1,format=yuv420p[main_v0]", speed))
 	} else {
-		filters = append(filters, "[0:v]setpts=PTS-STARTPTS,fps=30,setsar=1,format=yuv420p[main_v]")
+		filters = append(filters, "[0:v]setpts=PTS-STARTPTS,fps=30,setsar=1,format=yuv420p[main_v0]")
+	}
+	if hasWM {
+		wmFilter, _ := buildWatermarkFilter("[main_v0]", wmIdx, outW, outH, *in.Watermark, "[main_v]")
+		filters = append(filters, wmFilter)
+	} else {
+		filters = append(filters, "[main_v0]copy[main_v]")
 	}
 
 	// Audio stream of trimmed main clip

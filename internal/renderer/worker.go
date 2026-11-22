@@ -842,6 +842,17 @@ func (wp *WorkerPool) processPostEditJob(workerID int, job *model.RenderJob) {
 		outroCfg = &cp
 	}
 
+	var wmCfg *model.WatermarkConfig
+	if opts.Watermark != nil && opts.Watermark.Enabled {
+		cp := *opts.Watermark
+		if cp.FilePath == "" && camp != nil && camp.Watermark.FilePath != "" {
+			cp.FilePath = camp.Watermark.FilePath
+		}
+		if cp.FilePath != "" && fileExists(cp.FilePath) {
+			wmCfg = &cp
+		}
+	}
+
 	campSlug := sanitizeFilename(job.CampaignName)
 	if campSlug == "" {
 		campSlug = "clips"
@@ -851,9 +862,9 @@ func (wp *WorkerPool) processPostEditJob(workerID int, job *model.RenderJob) {
 	fileName := fmt.Sprintf("%s_edit_%s.mp4", sanitizeFilename(job.Title), job.ID[len(job.ID)-5:])
 	outPath := filepath.Join(outDir, fileName)
 
-	wp.updateJob(job, "rendering", "Memproses Edit Manual (Trim / +SFX)...", 12, "")
-	wp.Broker.Log("worker", "info", fmt.Sprintf("[W%d] Post-Edit %s (trim=%.1f-%.1fs, +%d SFX)",
-		workerID, fileName, opts.TrimStartSec, opts.TrimEndSec, len(resolvedSFX)))
+	wp.updateJob(job, "rendering", "Memproses Edit Manual (Trim / +SFX / Watermark)...", 12, "")
+	wp.Broker.Log("worker", "info", fmt.Sprintf("[W%d] Post-Edit %s (trim=%.1f-%.1fs, +%d SFX, wm=%v)",
+		workerID, fileName, opts.TrimStartSec, opts.TrimEndSec, len(resolvedSFX), wmCfg != nil))
 
 	depSt := wp.Deps.GetStatus()
 	info, err := RenderPostEdit(ctx, PostEditInput{
@@ -867,6 +878,7 @@ func (wp *WorkerPool) processPostEditJob(workerID int, job *model.RenderJob) {
 		PreserveOutro:  opts.PreserveOutro,
 		SourceHadOutro: srcJob.Compliance.OutroApplied,
 		Outro:          outroCfg,
+		Watermark:      wmCfg,
 		SFXCues:        resolvedSFX,
 		BGMPath:        bgmPath,
 		BGMVolume:      opts.BGMVolume,

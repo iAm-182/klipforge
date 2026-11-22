@@ -99,10 +99,29 @@ func New(st *store.Store, d *deps.Manager, broker *events.Broker) *Server {
 	return s
 }
 
-// recoverIncompleteProjects finishes cached projects and upgrades older projects with TranscriptHype curve.
+func (s *Server) campaignForbiddenWords(campaignID string) []string {
+	if campaignID == "" {
+		return nil
+	}
+	if camp, ok := s.Store.GetCampaign(campaignID); ok {
+		return camp.ForbiddenWords
+	}
+	return nil
+}
+
+// recoverIncompleteProjects finishes cached projects and upgrades older projects with TranscriptHype curve & unique hooks.
 func (s *Server) recoverIncompleteProjects() {
 	for _, p := range s.Store.ListProjects() {
-		needsUpgrade := len(p.Candidates) == 0 || (p.Signals.HasSubtitles && !p.Signals.HasTranscriptHype)
+		dupHooks := 0
+		if len(p.Candidates) >= 3 {
+			firstHook := p.Candidates[0].HookText
+			for _, c := range p.Candidates {
+				if c.HookText == firstHook && firstHook != "" {
+					dupHooks++
+				}
+			}
+		}
+		needsUpgrade := len(p.Candidates) == 0 || (p.Signals.HasSubtitles && !p.Signals.HasTranscriptHype) || dupHooks >= 3
 		if !needsUpgrade {
 			continue
 		}
@@ -121,13 +140,14 @@ func (s *Server) recoverIncompleteProjects() {
 			cs := s.loadCachedSignals(p)
 			if len(cs.Transcript) > 0 || len(cs.Heatmap) > 0 || len(cs.Chats) > 0 {
 				res := analyzer.DetectHype(analyzer.AnalysisInput{
-					DurationSec: p.DurationSec,
-					Heatmap:     cs.Heatmap,
-					Chats:       cs.Chats,
-					AudioEnergy: cs.AudioEnergy,
-					Transcript:  cs.Transcript,
-					Chapters:    p.Chapters,
-					Settings:    p.DetectConfig,
+					DurationSec:    p.DurationSec,
+					Heatmap:        cs.Heatmap,
+					Chats:          cs.Chats,
+					AudioEnergy:    cs.AudioEnergy,
+					Transcript:     cs.Transcript,
+					Chapters:       p.Chapters,
+					Settings:       p.DetectConfig,
+					ForbiddenWords: s.campaignForbiddenWords(p.CampaignID),
 				})
 				p.Timeline = res.Timeline
 				p.Candidates = res.Candidates
@@ -824,12 +844,13 @@ func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat
 
 	// Publish Phase-1 results IMMEDIATELY so user can start previewing & clipping right away!
 	res := analyzer.DetectHype(analyzer.AnalysisInput{
-		DurationSec: proj.DurationSec,
-		Heatmap:     meta.Heatmap,
-		AudioEnergy: audioEnergy,
-		Transcript:  subCues,
-		Chapters:    proj.Chapters,
-		Settings:    proj.DetectConfig,
+		DurationSec:    proj.DurationSec,
+		Heatmap:        meta.Heatmap,
+		AudioEnergy:    audioEnergy,
+		Transcript:     subCues,
+		Chapters:       proj.Chapters,
+		Settings:       proj.DetectConfig,
+		ForbiddenWords: s.campaignForbiddenWords(proj.CampaignID),
 	})
 
 	cs := &cachedSignals{
@@ -952,13 +973,14 @@ func (s *Server) handleReanalyzeProject(w http.ResponseWriter, r *http.Request) 
 
 	cs := s.loadCachedSignals(proj)
 	res := analyzer.DetectHype(analyzer.AnalysisInput{
-		DurationSec: proj.DurationSec,
-		Heatmap:     cs.Heatmap,
-		Chats:       cs.Chats,
-		AudioEnergy: cs.AudioEnergy,
-		Transcript:  cs.Transcript,
-		Chapters:    proj.Chapters,
-		Settings:    cfg,
+		DurationSec:    proj.DurationSec,
+		Heatmap:        cs.Heatmap,
+		Chats:          cs.Chats,
+		AudioEnergy:    cs.AudioEnergy,
+		Transcript:     cs.Transcript,
+		Chapters:       proj.Chapters,
+		Settings:       cfg,
+		ForbiddenWords: s.campaignForbiddenWords(proj.CampaignID),
 	})
 
 	proj.DetectConfig = cfg
@@ -1056,13 +1078,14 @@ func (s *Server) handleScanAudioOnly(w http.ResponseWriter, r *http.Request) {
 		cs.AudioEnergy = energy
 
 		res := analyzer.DetectHype(analyzer.AnalysisInput{
-			DurationSec: proj.DurationSec,
-			Heatmap:     cs.Heatmap,
-			Chats:       cs.Chats,
-			AudioEnergy: energy,
-			Transcript:  cs.Transcript,
-			Chapters:    proj.Chapters,
-			Settings:    proj.DetectConfig,
+			DurationSec:    proj.DurationSec,
+			Heatmap:        cs.Heatmap,
+			Chats:          cs.Chats,
+			AudioEnergy:    energy,
+			Transcript:     cs.Transcript,
+			Chapters:       proj.Chapters,
+			Settings:       proj.DetectConfig,
+			ForbiddenWords: s.campaignForbiddenWords(proj.CampaignID),
 		})
 		proj.Timeline = res.Timeline
 		proj.Candidates = res.Candidates

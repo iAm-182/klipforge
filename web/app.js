@@ -5,10 +5,13 @@
   const state = {
     deps: null,
     settings: null,
+    disk: null,
+    security: null,
     campaigns: [],
     autopilots: [],
     editingAutopilotId: '',
     reviewFilter: 'pending_review',
+    libFilter: 'all',
     topNSlots: [], // Ordered compilation slots (first plays as #N, last plays as #1 climax!)
     audioAssets: [],
     customSFXCues: [
@@ -192,6 +195,7 @@
     updateJobBadge();
     renderJobs();
     renderReviewInbox();
+    renderHomeDashboard();
     if (job.status === 'done') {
       toast(`Clip selesai: ${job.title}`, 'ok');
     } else if (job.status === 'error') {
@@ -223,6 +227,8 @@
       ]);
       state.deps = status.deps;
       state.settings = status.settings;
+      state.disk = status.disk || null;
+      state.security = status.security || null;
       state.campaigns = campaigns || [];
       state.projects = projects || [];
       state.jobs = jobs || [];
@@ -256,6 +262,7 @@
       renderJobs();
       renderReviewInbox();
       renderTopNBuilder();
+      renderHomeDashboard();
     } catch (e) {
       const badge = $('depBadge');
       if (badge) {
@@ -278,15 +285,18 @@
   }
 
   function renderCampaignSelectors() {
-    const sel = $('activeCampaignSelect');
-    sel.innerHTML = '';
-    state.campaigns.forEach((c) => {
-      const opt = document.createElement('option');
-      opt.value = c.id;
-      opt.textContent = `${c.name} (${c.platform || 'Custom'})`;
-      sel.appendChild(opt);
+    ['activeCampaignSelect', 'homeCampaignSel'].forEach((selId) => {
+      const sel = $(selId);
+      if (!sel) return;
+      sel.innerHTML = '';
+      state.campaigns.forEach((c) => {
+        const opt = document.createElement('option');
+        opt.value = c.id;
+        opt.textContent = `${c.name} (${c.platform || 'Custom'})`;
+        sel.appendChild(opt);
+      });
+      if (state.activeCampaignId) sel.value = state.activeCampaignId;
     });
-    if (state.activeCampaignId) sel.value = state.activeCampaignId;
     renderCampaignStrip();
   }
 
@@ -408,6 +418,7 @@
     $('cMentions').value = (c.socialMentions || []).join(' ');
     $('cBrief').value = c.briefSummary || '';
     $('cRules').value = (c.rules || []).join('\n');
+    if ($('cForbiddenWords')) $('cForbiddenWords').value = (c.forbiddenWords || []).join(', ');
 
     // Watermark fields
     const wm = c.watermark || {};
@@ -461,6 +472,7 @@
     const hashtags = $('cHashtags').value.trim().split(/\s+/).filter(Boolean);
     const mentions = $('cMentions').value.trim().split(/\s+/).filter(Boolean);
     const rules = $('cRules').value.split('\n').map((s) => s.trim()).filter(Boolean);
+    const forbiddenWords = ($('cForbiddenWords')?.value || '').split(',').map((s) => s.trim()).filter(Boolean);
 
     return {
       ...orig,
@@ -475,6 +487,7 @@
       socialMentions: mentions,
       briefSummary: $('cBrief').value.trim(),
       rules,
+      forbiddenWords,
       watermark: {
         ...(orig.watermark || {}),
         enabled: $('cWmEnabled').checked,
@@ -776,14 +789,16 @@
       tip.classList.remove('hidden');
       tip.style.left = Math.min(rect.width - 170, Math.max(8, e.clientX - rect.left + 12)) + 'px';
       tip.style.top = '12px';
-      tip.innerHTML = `
-        <strong>⏱️ ${fmtTime(best.timeSec)}</strong><br/>
-        ⚡ Combined: <b>${Math.round((best.combined || 0) * 100)}%</b><br/>
-        🔊 Audio Keras: ${Math.round((best.audioPeak || 0) * 100)}%<br/>
-        🎙️ Reaksi Indo: ${Math.round((best.transcriptHype || 0) * 100)}%<br/>
-        🔥 Heatmap: ${Math.round((best.heatmap || 0) * 100)}%<br/>
-        💬 Live Chat: ${Math.round((best.chatHype || 0) * 100)}%
-      `;
+      const sig = proj.signals || {};
+      const lines = [
+        `<strong>⏱️ ${fmtTime(best.timeSec)}</strong>`,
+        `⚡ Skor Gabungan: <b>${Math.round((best.combined || 0) * 100)}%</b>`,
+      ];
+      if (sig.hasAudio) lines.push(`🔊 Audio Keras: ${Math.round((best.audioPeak || 0) * 100)}%`);
+      if (sig.hasTranscriptHype) lines.push(`🎙️ Reaksi Indo: ${Math.round((best.transcriptHype || 0) * 100)}%`);
+      if (sig.hasHeatmap) lines.push(`🔥 Heatmap: ${Math.round((best.heatmap || 0) * 100)}%`);
+      if (sig.hasLiveChat) lines.push(`💬 Live Chat: ${Math.round((best.chatHype || 0) * 100)}%`);
+      tip.innerHTML = lines.join('<br/>');
     });
 
     canvas.addEventListener('mouseleave', () => tip.classList.add('hidden'));
@@ -843,6 +858,14 @@
 
       const scoreCls = c.score >= 70 ? 'cand-score' : 'cand-score mid';
 
+      const sig = proj?.signals || {};
+      const sigParts = [];
+      if (sig.hasHeatmap) sigParts.push(`🔥 Heat ${Math.round(c.heatmapScore)}%`);
+      if (sig.hasLiveChat) sigParts.push(`💬 Chat ${Math.round(c.chatScore)}%`);
+      if (sig.hasAudio) sigParts.push(`🔊 Audio ${Math.round(c.audioScore)}%`);
+      if (sig.hasTranscriptHype) sigParts.push(`🎙️ Transkrip Indo`);
+      const sigLine = sigParts.length > 0 ? sigParts.join(' · ') : `⚡ Skor ${Math.round(c.score)}%`;
+
       el.innerHTML = `
         <div class="cand-top">
           <input type="checkbox" class="cand-chk" ${c.selected ? 'checked' : ''} />
@@ -852,9 +875,7 @@
           <span class="${scoreCls}">⚡ ${Math.round(c.score)}</span>
         </div>
         <div class="cand-reasons">${reasonsHtml}</div>
-        <div class="text-xs muted">
-          🔥 Heat ${Math.round(c.heatmapScore)}% · 💬 Chat ${Math.round(c.chatScore)}% · 🔊 Audio ${Math.round(c.audioScore)}%
-        </div>
+        <div class="text-xs muted">${sigLine}</div>
         ${chatsHtml}
         ${transHtml}
         <div class="cand-times">
@@ -1217,6 +1238,27 @@
       oCtx.fillText('CONTOH SUBTITLE', ow / 2, sy);
       oCtx.textAlign = 'left';
     }
+
+    // Optional TikTok / Reels / YT Shorts Safe-Zone Guide Overlay!
+    if ($('chkSafeZone') && $('chkSafeZone').checked) {
+      oCtx.save();
+      oCtx.fillStyle = 'rgba(244, 63, 94, 0.22)';
+      oCtx.strokeStyle = 'rgba(244, 63, 94, 0.85)';
+      oCtx.lineWidth = 1;
+      oCtx.setLineDash([4, 3]);
+      oCtx.fillRect(0, 0, ow, oh * 0.10);
+      oCtx.strokeRect(0, 0, ow, oh * 0.10);
+      oCtx.fillRect(ow * 0.82, oh * 0.42, ow * 0.18, oh * 0.40);
+      oCtx.strokeRect(ow * 0.82, oh * 0.42, ow * 0.18, oh * 0.40);
+      oCtx.fillRect(0, oh * 0.79, ow, oh * 0.21);
+      oCtx.strokeRect(0, oh * 0.79, ow, oh * 0.21);
+      oCtx.setLineDash([]);
+      oCtx.fillStyle = '#fda4af';
+      oCtx.font = 'bold 7.5px Segoe UI';
+      oCtx.fillText('SAFE ZONE', 4, oh * 0.10 - 3);
+      oCtx.fillText('CAPTION AREA', 4, oh * 0.86);
+      oCtx.restore();
+    }
   }
 
   function drawBoxOverlay(ctx, b, w, h, color, label, active) {
@@ -1298,9 +1340,54 @@
       dragging = false;
       startPt = null;
     });
+
+    // Visual Drag-and-Drop Watermark directly on 9:16 Output Preview Canvas!
+    const outCanvas = $('cropOutputCanvas');
+    if (outCanvas) {
+      let draggingWm = false;
+      const moveWmToEvent = (ev) => {
+        const camp = getActiveCampaign();
+        if (!camp || !camp.watermark) return;
+        const r = outCanvas.getBoundingClientRect();
+        const clientX = ev.touches ? ev.touches[0].clientX : ev.clientX;
+        const clientY = ev.touches ? ev.touches[0].clientY : ev.clientY;
+        const scale = camp.watermark.scale || 0.22;
+        const nx = Math.max(0, Math.min(0.92, (clientX - r.left) / r.width - scale / 2));
+        const ny = Math.max(0, Math.min(0.92, (clientY - r.top) / r.height - 0.04));
+        camp.watermark.position = 'custom';
+        camp.watermark.customX = Math.round(nx * 1000) / 1000;
+        camp.watermark.customY = Math.round(ny * 1000) / 1000;
+        if (state.editingCampaignId === camp.id) {
+          $('cWmPos').value = 'custom';
+          $('wmCustomXY').classList.remove('hidden');
+          $('cWmCustomX').value = camp.watermark.customX;
+          $('cWmCustomY').value = camp.watermark.customY;
+        }
+        drawCropCanvases();
+      };
+      outCanvas.addEventListener('mousedown', (ev) => {
+        if (!$('chkDragWm')?.checked) return;
+        draggingWm = true;
+        moveWmToEvent(ev);
+      });
+      outCanvas.addEventListener('touchstart', (ev) => {
+        if (!$('chkDragWm')?.checked) return;
+        draggingWm = true;
+        moveWmToEvent(ev);
+      }, { passive: true });
+      window.addEventListener('mousemove', (ev) => { if (draggingWm) moveWmToEvent(ev); });
+      window.addEventListener('touchmove', (ev) => { if (draggingWm) moveWmToEvent(ev); }, { passive: true });
+      window.addEventListener('mouseup', () => {
+        if (draggingWm) {
+          draggingWm = false;
+          toast('🎯 Posisi Watermark digeser! Klik "💾 Simpan ke Campaign" untuk simpan permanen.', 'info');
+        }
+      });
+      window.addEventListener('touchend', () => { draggingWm = false; });
+    }
   }
 
-  // ==================== Jobs & Clips Gallery ====================
+  // ==================== Jobs & Library Gallery ====================
   function updateJobBadge() {
     const active = state.jobs.filter((j) => j.status === 'queued' || j.status === 'downloading' || j.status === 'rendering').length;
     const total = state.jobs.length;
@@ -1309,13 +1396,24 @@
 
   function renderJobs() {
     const box = $('jobsList');
-    if (state.jobs.length === 0) {
-      box.innerHTML = '<div class="muted" style="padding:24px;">Belum ada clip yang dirender. Pilih momen hits di tab Studio Clipper lalu klik Auto-Clip!</div>';
+    let list = state.jobs;
+    if (state.libFilter === 'active') {
+      list = state.jobs.filter((j) => j.status === 'queued' || j.status === 'downloading' || j.status === 'rendering');
+    } else if (state.libFilter === 'done') {
+      list = state.jobs.filter((j) => j.status === 'done');
+    } else if (state.libFilter === 'approved') {
+      list = state.jobs.filter((j) => j.reviewStatus === 'approved');
+    } else if (state.libFilter === 'error') {
+      list = state.jobs.filter((j) => j.status === 'error' || j.status === 'canceled');
+    }
+
+    if (list.length === 0) {
+      box.innerHTML = '<div class="muted" style="padding:24px;">Tidak ada klip pada filter ini. Pilih momen hits di tab Studio lalu klik Auto-Clip!</div>';
       return;
     }
 
     box.innerHTML = '';
-    state.jobs.forEach((j) => {
+    list.forEach((j) => {
       const card = document.createElement('div');
       card.className = 'job-card';
 
@@ -1384,14 +1482,16 @@
     });
   }
 
-  // ==================== Settings & Dependencies ====================
+  // ==================== Settings, Disk & Dependencies ====================
   function renderDepsAndSettings() {
     const d = state.deps;
     const badge = $('depBadge');
     if (d) {
       badge.textContent = d.ready ? 'Engine Ready' : 'Missing Tools';
       badge.className = 'dep-pill ' + (d.ready ? 'ok' : 'err');
+      const secTxt = state.security?.engineTokenEnabled ? '🔒 Protected (ACCESS_KEY + Engine Token)' : '⚠️ Open';
       $('depsPanel').innerHTML = `
+        <div class="dep-row"><span>Security Status</span><strong>${secTxt}</strong></div>
         <div class="dep-row"><span>FFmpeg</span><strong>${escapeHtml(d.ffmpegPath || 'NOT FOUND')}</strong></div>
         <div class="dep-row"><span>FFprobe</span><strong>${escapeHtml(d.ffprobePath || 'NOT FOUND')}</strong></div>
         <div class="dep-row"><span>yt-dlp (${escapeHtml(d.ytDlpVersion || '-')})</span><strong>${escapeHtml(d.ytDlpPath || 'NOT FOUND')}</strong></div>
@@ -1407,6 +1507,20 @@
       });
     }
 
+    const diskBox = $('diskHealthPanel');
+    if (diskBox && state.disk) {
+      const ds = state.disk;
+      const usedPct = ds.totalGb > 0 ? Math.min(100, Math.round(((ds.totalGb - ds.freeGb) / ds.totalGb) * 100)) : 0;
+      diskBox.innerHTML = `
+        <div style="display:flex;justify-content:space-between;font-size:12px;">
+          <strong>💾 Sisa Disk: ${ds.freeGb.toFixed(1)} GB / ${ds.totalGb.toFixed(0)} GB ${ds.lowDisk ? '⚠️ RENDAH!' : '✅'}</strong>
+          <span class="muted">Outputs: ${fmtBytes(ds.outputsBytes)} · Cache: ${fmtBytes(ds.projectsBytes)}</span>
+        </div>
+        <div class="disk-bar-track"><div class="disk-bar-fill ${ds.lowDisk ? 'low' : ''}" style="width:${usedPct}%"></div></div>
+        <div class="text-xs muted">Backup otomatis 3 generasi (.bak.1/.2/.3) aktif · Disk Guard stop render jika sisa &lt; ${ds.minFreeGb || 2} GB</div>
+      `;
+    }
+
     const s = state.settings;
     if (s) {
       $('sWorkers').value = s.maxWorkers || 2;
@@ -1417,6 +1531,9 @@
       $('sCookiesBrowser').value = s.cookiesBrowser || '';
       $('sCookiesFile').value = s.cookiesFile || '';
       $('sOutputDir').value = s.outputDir || '';
+      if ($('sMinFreeGb')) $('sMinFreeGb').value = s.minFreeDiskGb || 2.0;
+      if ($('sRetentionDays')) $('sRetentionDays').value = s.outputRetentionDays || 0;
+      if ($('sNotifyWebhook')) $('sNotifyWebhook').value = s.notifyWebhookUrl || '';
     }
   }
 
@@ -1608,9 +1725,9 @@
     }
   });
 
-  // Layout controls live redraw
-  ['selCropMode', 'selAspect', 'selRes', 'chkSubtitles', 'chkUseWatermark', 'selSubPreset', 'selSubPos'].forEach((id) => {
-    $(id).addEventListener('change', drawCropCanvases);
+  // Layout controls live redraw (including TikTok Safe Zone toggle)
+  ['selCropMode', 'selAspect', 'selRes', 'chkSubtitles', 'chkUseWatermark', 'selSubPreset', 'selSubPos', 'chkSafeZone'].forEach((id) => {
+    if ($(id)) $(id).addEventListener('change', drawCropCanvases);
   });
   $('rngSplitRatio').addEventListener('input', () => {
     $('lblSplitRatio').textContent = $('rngSplitRatio').value + '%';
@@ -1764,6 +1881,47 @@
     toast('Dependency dicek ulang.', 'ok');
   });
 
+  async function runUpdateYtDlp() {
+    toast('⬆️ Memeriksa update yt-dlp terbaru...', 'info');
+    try {
+      const res = await api('/api/deps/update-ytdlp', { method: 'POST' });
+      if (res.deps) state.deps = res.deps;
+      renderDepsAndSettings();
+      renderHomeDashboard();
+      toast(res.ok ? `✅ yt-dlp versi ${res.newVersion || res.oldVersion} siap!` : `Info yt-dlp: ${res.output || res.error}`, res.ok ? 'ok' : 'info');
+    } catch (e) {
+      toast('Gagal update yt-dlp: ' + e.message, 'err');
+    }
+  }
+
+  async function runStorageCleanup() {
+    const days = parseInt($('sRetentionDays')?.value || '0', 10) || 0;
+    try {
+      const res = await api('/api/storage/cleanup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ olderThanDays: days }),
+      });
+      if (res.disk) state.disk = res.disk;
+      renderDepsAndSettings();
+      renderHomeDashboard();
+      toast(`🧹 Bersih! ${res.deleted} item dihapus (${fmtBytes(res.freedBytes)} bebas).`, 'ok');
+    } catch (e) {
+      toast('Gagal bersih-bersih: ' + e.message, 'err');
+    }
+  }
+
+  if ($('btnUpdateYtDlp')) $('btnUpdateYtDlp').addEventListener('click', runUpdateYtDlp);
+  if ($('btnCleanupStorage')) $('btnCleanupStorage').addEventListener('click', runStorageCleanup);
+  document.querySelectorAll('.lib-filter').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.lib-filter').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.libFilter = btn.dataset.lfilter || 'all';
+      renderJobs();
+    });
+  });
+
   $('btnSaveSettings').addEventListener('click', async () => {
     const cfg = {
       maxWorkers: parseInt($('sWorkers').value, 10) || 2,
@@ -1774,6 +1932,9 @@
       cookiesBrowser: $('sCookiesBrowser').value || '',
       cookiesFile: $('sCookiesFile').value.trim(),
       outputDir: $('sOutputDir').value.trim(),
+      minFreeDiskGb: parseFloat($('sMinFreeGb')?.value || '2') || 2.0,
+      outputRetentionDays: parseInt($('sRetentionDays')?.value || '0', 10) || 0,
+      notifyWebhookUrl: ($('sNotifyWebhook')?.value || '').trim(),
     };
     try {
       state.settings = await api('/api/settings', {
@@ -1793,6 +1954,9 @@
   function renderAudioLibrary() {
     const bgms = state.audioAssets.filter((a) => a.kind === 'bgm');
     const sfxs = state.audioAssets.filter((a) => a.kind === 'sfx');
+    if ($('sfxBuiltInCount')) {
+      $('sfxBuiltInCount').textContent = String(sfxs.filter((a) => a.builtIn).length || sfxs.length);
+    }
 
     // Update Studio BGM selector
     const selBgm = $('selBGM');
@@ -2048,10 +2212,12 @@
           <textarea class="input textarea rev-caption" rows="3">${escapeHtml(j.postCaption || '')}</textarea>
         </label>
         <input type="text" class="input input-sm rev-note" value="${escapeAttr(j.reviewNote || '')}" placeholder="Catatan analisis kamu (opsional)..." />
-        <div class="job-actions">
-          <button class="btn btn-xs btn-accent btn-rev-approve">✅ Approve (Siap Upload)</button>
-          <button class="btn btn-xs btn-danger-ghost btn-rev-reject">❌ Reject &amp; Hapus</button>
-          ${j.status === 'done' && j.outputPath ? `<button class="btn btn-xs btn-primary btn-rev-edit">✂️ Edit &amp; +SFX</button>` : ''}
+        <div class="review-big-actions">
+          <button class="btn btn-accent btn-rev-approve">✅ Approve (Siap Upload)</button>
+          <button class="btn btn-danger-ghost btn-rev-reject">❌ Reject &amp; Hapus</button>
+        </div>
+        <div class="job-actions mt-8">
+          ${j.status === 'done' && j.outputPath ? `<button class="btn btn-xs btn-primary btn-rev-edit">✂️ Edit &amp; +SFX / WM</button>` : ''}
           ${j.status === 'done' && j.outputPath ? `<a class="btn btn-xs btn-secondary" href="/api/jobs/${encodeURIComponent(j.id)}/video?download=1">⬇️ MP4</a>` : ''}
           <button class="btn btn-xs btn-ghost btn-rev-copy">📋 Copy Caption</button>
         </div>
@@ -2555,6 +2721,11 @@
     $('pePreserveOutro').checked = hasOutro;
     $('peBgmVol').value = '15';
     $('peBgmDuck').checked = true;
+    if ($('peWmEnabled')) $('peWmEnabled').checked = false;
+    if ($('peWmFullFrame')) $('peWmFullFrame').checked = false;
+    if ($('peSafeZoneToggle')) $('peSafeZoneToggle').checked = false;
+    if ($('peSafeZone')) $('peSafeZone').classList.add('hidden');
+    syncPeWmOverlay();
 
     // Populate BGM selector
     const selBgm = $('peBgm');
@@ -2718,8 +2889,8 @@
         if (o.layout.aspectRatio) $('selAspect').value = o.layout.aspectRatio;
         if (o.layout.cropMode) $('selCropMode').value = o.layout.cropMode;
         if (o.layout.splitRatio) {
-          $('rngSplit').value = Math.round(o.layout.splitRatio * 100);
-          $('lblSplit').textContent = Math.round(o.layout.splitRatio * 100) + '%';
+          $('rngSplitRatio').value = Math.round(o.layout.splitRatio * 100);
+          $('lblSplitRatio').textContent = Math.round(o.layout.splitRatio * 100) + '%';
         }
         drawCropCanvases();
       }
@@ -2739,6 +2910,204 @@
       toast('🔄 Klip dimuat ke Studio Clipper! Geser menit/detik atau SFX lalu klik Render Klip Manual.', 'ok');
     }
   }
+
+  // ==================== Visual Drag-Drop Watermark & Safe-Zone inside Post-Edit Modal ====================
+  const peWmState = {
+    enabled: false,
+    fullFrame: false,
+    customX: 0.72,
+    customY: 0.06,
+    scale: 0.22,
+    opacity: 0.95,
+    fileName: '',
+  };
+
+  function syncPeWmOverlay() {
+    const dragEl = $('peWmDrag');
+    const bodyEl = $('peWmBody');
+    if (!dragEl || !bodyEl) return;
+
+    peWmState.enabled = Boolean($('peWmEnabled')?.checked);
+    peWmState.fullFrame = Boolean($('peWmFullFrame')?.checked);
+    peWmState.scale = (parseInt($('peWmScale')?.value || '22', 10) || 22) / 100;
+    peWmState.opacity = (parseInt($('peWmOpacity')?.value || '95', 10) || 95) / 100;
+
+    if ($('lblPeWmScale')) $('lblPeWmScale').textContent = Math.round(peWmState.scale * 100) + '%';
+    if ($('lblPeWmOpacity')) $('lblPeWmOpacity').textContent = Math.round(peWmState.opacity * 100) + '%';
+    bodyEl.classList.toggle('hidden', !peWmState.enabled);
+
+    // Load active campaign watermark image if available
+    const camp = state.campaigns.find((c) => c.id === peState.job?.campaignId) || getActiveCampaign();
+    const wmFile = camp?.watermark?.fileName || '';
+    if (wmFile && peWmState.fileName !== wmFile) {
+      peWmState.fileName = wmFile;
+      $('peWmImg').src = `/api/assets/${encodeURIComponent(wmFile)}`;
+    }
+
+    if (!peWmState.enabled || !wmFile) {
+      dragEl.classList.add('hidden');
+      if (peWmState.enabled && !wmFile) {
+        $('peWmCoords').textContent = '⚠️ Upload file watermark dulu di tab Campaign!';
+      }
+      return;
+    }
+
+    dragEl.classList.remove('hidden');
+    dragEl.classList.toggle('fullframe', peWmState.fullFrame);
+    dragEl.style.opacity = String(peWmState.opacity);
+    if (!peWmState.fullFrame) {
+      dragEl.style.left = (peWmState.customX * 100).toFixed(1) + '%';
+      dragEl.style.top = (peWmState.customY * 100).toFixed(1) + '%';
+      dragEl.style.width = (peWmState.scale * 100).toFixed(1) + '%';
+      $('peWmCoords').textContent = `Posisi Manual: X ${Math.round(peWmState.customX * 100)}% · Y ${Math.round(peWmState.customY * 100)}% · Skala ${Math.round(peWmState.scale * 100)}%`;
+    } else {
+      $('peWmCoords').textContent = 'Mode Full-Frame 1:1 Template (1080x1920)';
+    }
+    if (peWmState.enabled) {
+      $('peSpeedHint').textContent = `🎯 Mode Watermark Manual + Mix (~10–15 dtk, Outro tetap bersih) · +${peState.sfxCues.length} SFX`;
+    }
+  }
+
+  function setupPostEditWatermarkDrag() {
+    const dragEl = $('peWmDrag');
+    const stage = $('peStage');
+    if (!dragEl || !stage) return;
+    let dragging = false;
+    let offX = 0, offY = 0;
+
+    const getPt = (e) => (e.touches ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : { x: e.clientX, y: e.clientY });
+    const onStart = (e) => {
+      if (peWmState.fullFrame) return;
+      dragging = true;
+      const pt = getPt(e);
+      const r = dragEl.getBoundingClientRect();
+      offX = pt.x - r.left;
+      offY = pt.y - r.top;
+      e.preventDefault();
+    };
+    const onMove = (e) => {
+      if (!dragging) return;
+      const pt = getPt(e);
+      const sr = stage.getBoundingClientRect();
+      const nx = Math.max(0, Math.min(0.92, (pt.x - sr.left - offX) / Math.max(1, sr.width)));
+      const ny = Math.max(0, Math.min(0.92, (pt.y - sr.top - offY) / Math.max(1, sr.height)));
+      peWmState.customX = Math.round(nx * 1000) / 1000;
+      peWmState.customY = Math.round(ny * 1000) / 1000;
+      syncPeWmOverlay();
+    };
+    const onEnd = () => { dragging = false; };
+
+    dragEl.addEventListener('mousedown', onStart);
+    dragEl.addEventListener('touchstart', onStart, { passive: false });
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('touchmove', onMove, { passive: true });
+    window.addEventListener('mouseup', onEnd);
+    window.addEventListener('touchend', onEnd);
+  }
+
+  if ($('peSafeZoneToggle')) {
+    $('peSafeZoneToggle').addEventListener('change', (e) => {
+      $('peSafeZone')?.classList.toggle('hidden', !e.target.checked);
+    });
+  }
+  ['peWmEnabled', 'peWmFullFrame', 'peWmScale', 'peWmOpacity'].forEach((id) => {
+    if ($(id)) {
+      $(id).addEventListener('input', syncPeWmOverlay);
+      $(id).addEventListener('change', syncPeWmOverlay);
+    }
+  });
+
+  // ==================== Beranda Command Center ====================
+  function renderHomeDashboard() {
+    if (!$('homePendingCount')) return;
+    const pending = state.jobs.filter((j) => j.reviewStatus === 'pending_review' || (!j.reviewStatus && j.status === 'done'));
+    const errors = state.jobs.filter((j) => j.status === 'error');
+    const done = state.jobs.filter((j) => j.status === 'done');
+    const approved = state.jobs.filter((j) => j.reviewStatus === 'approved');
+    const active = state.jobs.filter((j) => j.status === 'queued' || j.status === 'downloading' || j.status === 'rendering');
+
+    $('homePendingCount').textContent = pending.length;
+    $('homeErrorCount').textContent = errors.length;
+    $('homeDoneCount').textContent = done.length;
+    $('homeApprovedSub').textContent = `${approved.length} approved · ${active.length} sedang render`;
+
+    if (state.disk) {
+      $('homeDiskFree').textContent = `${state.disk.freeGb.toFixed(1)} GB`;
+      const ytVer = state.deps?.ytDlpVersion || '—';
+      const secIcon = state.security?.engineTokenEnabled ? '🔒 Protected' : '⚠️ Open';
+      $('homeHealthSub').textContent = `yt-dlp ${ytVer} · ${secIcon}${state.disk.lowDisk ? ' · ⚠️ Disk Rendah!' : ''}`;
+    }
+
+    const box = $('homeRecentList');
+    if (!box) return;
+    const recent = state.jobs.slice(0, 4);
+    if (recent.length === 0) {
+      box.innerHTML = '<div class="muted text-xs" style="padding:18px;">Belum ada klip. Tempel link YouTube di kotak atas untuk langsung mulai!</div>';
+      return;
+    }
+    box.innerHTML = '';
+    recent.forEach((j) => {
+      const card = document.createElement('div');
+      card.className = 'job-card';
+      card.innerHTML = `
+        <div class="job-head">
+          <div>
+            <div class="job-title">${escapeHtml(j.title)}</div>
+            <div class="text-xs muted">${escapeHtml(j.campaignName)} · ${j.finalDuration ? j.finalDuration.toFixed(1) + 's' : j.stage} · ${fmtBytes(j.fileSizeBytes)}</div>
+          </div>
+          <span class="job-status st-${j.status}">${j.reviewStatus || j.status}</span>
+        </div>
+        ${j.error ? `<div class="text-xs" style="color:#fda4af;">${escapeHtml(j.error)}</div>` : ''}
+        <div class="job-actions mt-8">
+          ${j.status === 'done' ? `<button class="btn btn-xs btn-primary h-edit">✂️ Edit &amp; +SFX / WM</button>` : ''}
+          ${j.status === 'done' ? `<a class="btn btn-xs btn-accent" href="/api/jobs/${encodeURIComponent(j.id)}/video?download=1">⬇️ MP4</a>` : ''}
+          ${j.status === 'error' ? `<button class="btn btn-xs btn-secondary h-reopen">🔄 Edit Menit VOD</button>` : ''}
+          <button class="btn btn-xs btn-ghost h-review">🕵️ Review</button>
+        </div>
+      `;
+      const he = card.querySelector('.h-edit');
+      if (he) he.addEventListener('click', () => openPostEditModal(j));
+      const hr = card.querySelector('.h-reopen');
+      if (hr) hr.addEventListener('click', () => reopenJobInWorkspace(j));
+      card.querySelector('.h-review').addEventListener('click', () => switchTab('review'));
+      box.appendChild(card);
+    });
+  }
+
+  if ($('kpiCardReview')) $('kpiCardReview').addEventListener('click', () => switchTab('review'));
+  if ($('kpiCardErrors')) $('kpiCardErrors').addEventListener('click', () => {
+    state.libFilter = 'error';
+    document.querySelectorAll('.lib-filter').forEach((b) => b.classList.toggle('active', b.dataset.lfilter === 'error'));
+    renderJobs();
+    switchTab('queue');
+  });
+  if ($('kpiCardDone')) $('kpiCardDone').addEventListener('click', () => {
+    state.libFilter = 'done';
+    document.querySelectorAll('.lib-filter').forEach((b) => b.classList.toggle('active', b.dataset.lfilter === 'done'));
+    renderJobs();
+    switchTab('queue');
+  });
+  if ($('kpiCardHealth')) $('kpiCardHealth').addEventListener('click', () => switchTab('settings'));
+  if ($('btnHomeGoReview')) $('btnHomeGoReview').addEventListener('click', () => switchTab('review'));
+  if ($('btnHomeGoLibrary')) $('btnHomeGoLibrary').addEventListener('click', () => switchTab('queue'));
+  if ($('btnHomeUpdateYt')) $('btnHomeUpdateYt').addEventListener('click', runUpdateYtDlp);
+  if ($('btnHomeCleanup')) $('btnHomeCleanup').addEventListener('click', runStorageCleanup);
+  if ($('btnHomeQuickScan')) $('btnHomeQuickScan').addEventListener('click', () => {
+    const url = ($('homeYtUrl')?.value || '').trim();
+    if (!url) {
+      toast('Tempel link YouTube terlebih dahulu!', 'err');
+      return;
+    }
+    if ($('homeCampaignSel')?.value) {
+      state.activeCampaignId = $('homeCampaignSel').value;
+      $('activeCampaignSelect').value = state.activeCampaignId;
+      renderCampaignStrip();
+      applyCampaignDefaultsToStudio();
+    }
+    $('ytUrlInput').value = url;
+    switchTab('studio');
+    $('btnAnalyze').click();
+  });
 
   $('btnClosePostEdit').addEventListener('click', closePostEditModal);
   $('postEditModal').addEventListener('click', (e) => {
@@ -2800,6 +3169,17 @@
       bgmAutoDuck: $('peBgmDuck').checked,
       speed: parseFloat($('peSpeed').value) || 1.0,
     };
+    if (peWmState.enabled) {
+      payload.watermark = {
+        enabled: true,
+        position: peWmState.fullFrame ? 'full-frame' : 'custom',
+        customX: peWmState.customX,
+        customY: peWmState.customY,
+        scale: peWmState.scale,
+        opacity: peWmState.opacity,
+        onOutro: false,
+      };
+    }
     try {
       await api(`/api/jobs/${encodeURIComponent(peState.job.id)}/post-edit`, {
         method: 'POST',
@@ -2820,5 +3200,6 @@
 
   setupChartInteractions();
   setupCropDrag();
+  setupPostEditWatermarkDrag();
   init();
 })();

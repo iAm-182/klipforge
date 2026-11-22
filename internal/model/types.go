@@ -300,19 +300,20 @@ type CompileOptions struct {
 	CRF              int              `json:"crf"`
 }
 
-// PostEditOptions lets the user trim an already-rendered clip's start/end timestamps
-// and stamp unlimited additional SFX cues (or BGM) directly onto the local MP4 without re-downloading!
+// PostEditOptions lets the user trim an already-rendered clip's start/end timestamps,
+// stamp unlimited additional SFX cues (or BGM), and place a manual drag-and-drop watermark!
 type PostEditOptions struct {
-	SourceJobID   string   `json:"sourceJobId"`
-	Title         string   `json:"title"`
-	TrimStartSec  float64  `json:"trimStartSec"`  // Seconds in rendered clip (0 = from beginning)
-	TrimEndSec    float64  `json:"trimEndSec"`    // Seconds in rendered clip (<=0 = until end of main body)
-	PreserveOutro bool     `json:"preserveOutro"` // Keep campaign's clean Outro template untouched at the end
-	SFXCues       []SFXCue `json:"sfxCues"`       // Additional SFX cues stamped at timestamps on the source clip timeline
-	BGMAssetID    string   `json:"bgmAssetId"`    // Optional additional BGM overlay
-	BGMVolume     float64  `json:"bgmVolume"`     // 0.05 - 0.60
-	BGMAutoDuck   bool     `json:"bgmAutoDuck"`
-	Speed         float64  `json:"speed"` // Optional 1.0 - 1.20
+	SourceJobID   string           `json:"sourceJobId"`
+	Title         string           `json:"title"`
+	TrimStartSec  float64          `json:"trimStartSec"`  // Seconds in rendered clip (0 = from beginning)
+	TrimEndSec    float64          `json:"trimEndSec"`    // Seconds in rendered clip (<=0 = until end of main body)
+	PreserveOutro bool             `json:"preserveOutro"` // Keep campaign's clean Outro template untouched at the end
+	SFXCues       []SFXCue         `json:"sfxCues"`       // Additional SFX cues stamped at timestamps on the source clip timeline
+	BGMAssetID    string           `json:"bgmAssetId"`    // Optional additional BGM overlay
+	BGMVolume     float64          `json:"bgmVolume"`     // 0.05 - 0.60
+	BGMAutoDuck   bool             `json:"bgmAutoDuck"`
+	Speed         float64          `json:"speed"`               // Optional 1.0 - 1.20
+	Watermark     *WatermarkConfig `json:"watermark,omitempty"` // Optional manual drag-and-drop watermark placement!
 }
 
 // RenderJob tracks a queued, running, completed, or failed clip render.

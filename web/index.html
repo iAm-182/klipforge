@@ -19,27 +19,95 @@
       </div>
 
       <nav class="nav-tabs" id="navTabs">
-        <button class="nav-btn active" data-tab="studio">🎬 Studio Clipper</button>
-        <button class="nav-btn" data-tab="topn">🏆 Top-N &amp; Kompilasi <span class="pill-count pill-green" id="navTopNCount">0</span></button>
-        <button class="nav-btn" data-tab="autopilot">🤖 Autopilot &amp; Review <span class="pill-count pill-amber" id="navReviewCount">0</span></button>
-        <button class="nav-btn" data-tab="audio">🎵 BGM &amp; SFX Pack</button>
-        <button class="nav-btn" data-tab="campaigns">📋 Campaign Rules</button>
-        <button class="nav-btn" data-tab="queue">📦 Queue &amp; Clips <span class="pill-count" id="navJobCount">0</span></button>
+        <button class="nav-btn active" data-tab="home">🏠 Beranda</button>
+        <button class="nav-btn" data-tab="studio">🎬 Studio</button>
+        <button class="nav-btn" data-tab="topn">🏆 Top-N <span class="pill-count pill-green" id="navTopNCount">0</span></button>
+        <button class="nav-btn" data-tab="review">🕵️ Review <span class="pill-count pill-amber" id="navReviewCount">0</span></button>
+        <button class="nav-btn" data-tab="queue">📦 Library <span class="pill-count" id="navJobCount">0</span></button>
+        <button class="nav-btn" data-tab="campaigns">📋 Campaign</button>
+        <button class="nav-btn" data-tab="audio">🎵 SFX &amp; BGM</button>
+        <button class="nav-btn" data-tab="autopilot">🤖 Autopilot</button>
         <button class="nav-btn" data-tab="settings">⚙️ Settings</button>
       </nav>
 
       <div class="topbar-right">
         <span class="status-dot" id="sseDot" title="Real-time SSE connection"></span>
         <span class="dep-pill" id="depBadge">Checking...</span>
-        <button class="btn btn-sm btn-ghost" id="btnOpenOutputs" title="Buka folder outputs di Explorer">📂 Outputs</button>
+        <button class="btn btn-sm btn-ghost hide-mobile" id="btnOpenOutputs" title="Buka folder outputs di Explorer">📂 Outputs</button>
       </div>
     </header>
 
     <!-- Toast Notification Container -->
     <div id="toastBox" class="toast-box"></div>
 
+    <!-- ==================== TAB 0: BERANDA (COMMAND CENTER) ==================== -->
+    <main id="tab-home" class="tab-panel active">
+      <section class="home-hero-grid">
+        <div class="home-kpi-card kpi-amber" id="kpiCardReview">
+          <div class="kpi-label">⏳ Menunggu Review</div>
+          <div class="kpi-val" id="homePendingCount">0</div>
+          <div class="kpi-sub">Klik untuk putuskan Approve / Reject</div>
+        </div>
+        <div class="home-kpi-card kpi-rose" id="kpiCardErrors">
+          <div class="kpi-label">❌ Job Gagal / Perhatian</div>
+          <div class="kpi-val" id="homeErrorCount">0</div>
+          <div class="kpi-sub">Cek di Library untuk Retry / Edit</div>
+        </div>
+        <div class="home-kpi-card kpi-green" id="kpiCardDone">
+          <div class="kpi-label">🎬 Klip Siap Upload</div>
+          <div class="kpi-val" id="homeDoneCount">0</div>
+          <div class="kpi-sub" id="homeApprovedSub">0 approved · 0 aktif</div>
+        </div>
+        <div class="home-kpi-card kpi-cyan" id="kpiCardHealth">
+          <div class="kpi-label">🛡️ Engine &amp; Disk</div>
+          <div class="kpi-val" id="homeDiskFree">— GB</div>
+          <div class="kpi-sub" id="homeHealthSub">yt-dlp — · 🔒 Protected</div>
+        </div>
+      </section>
+
+      <!-- Quick Scan & Quick System Actions -->
+      <section class="card mt-12">
+        <div class="card-head">
+          <div>
+            <h2>⚡ Mulai Cepat — Scan Link YouTube Baru</h2>
+            <div class="muted text-xs">Tempel link livestream / VOD YouTube untuk langsung berburu momen hits di Studio.</div>
+          </div>
+          <div class="head-actions">
+            <button class="btn btn-xs btn-secondary" id="btnHomeUpdateYt">⬆️ Update yt-dlp</button>
+            <button class="btn btn-xs btn-secondary" id="btnHomeCleanup">🧹 Bersihkan Cache</button>
+          </div>
+        </div>
+        <div class="intake-row">
+          <div class="intake-url-wrap">
+            <input type="text" id="homeYtUrl" class="input input-lg" placeholder="Tempel link YouTube di sini (contoh: https://www.youtube.com/watch?v=...)" />
+          </div>
+          <div class="intake-camp-wrap">
+            <select id="homeCampaignSel" class="input input-lg"></select>
+          </div>
+          <div class="intake-action-wrap">
+            <button class="btn btn-primary btn-lg" id="btnHomeQuickScan">🔍 Scan Sekarang</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Recent Attention Items -->
+      <section class="card mt-12">
+        <div class="card-head">
+          <div>
+            <h3>🔥 Klip Terbaru &amp; Antrean Perhatian</h3>
+            <div class="muted text-xs">Akses cepat ke klip terbaru untuk Review, Edit Manual (+SFX &amp; Watermark), atau Download MP4.</div>
+          </div>
+          <div class="head-actions">
+            <button class="btn btn-xs btn-accent" id="btnHomeGoReview">🕵️ Buka Review Inbox</button>
+            <button class="btn btn-xs btn-secondary" id="btnHomeGoLibrary">📦 Semua Library</button>
+          </div>
+        </div>
+        <div id="homeRecentList" class="jobs-grid"></div>
+      </section>
+    </main>
+
     <!-- ==================== TAB 1: STUDIO CLIPPER ==================== -->
-    <main id="tab-studio" class="tab-panel active">
+    <main id="tab-studio" class="tab-panel">
       <!-- URL Intake Bar -->
       <section class="card intake-card">
         <div class="intake-row">
@@ -244,14 +312,17 @@
               </div>
             </section>
 
-            <!-- Visual Framing, Facecam + Gameplay Crop & Output Preview -->
-            <section class="card">
-              <div class="card-head">
-                <h3>📐 Framing &amp; Layout Studio (Gameplay + Facecam)</h3>
-                <div class="head-actions">
+            <!-- Progressive Disclosure Drawer: Framing, Watermark Drag-Drop & FX -->
+            <details class="studio-drawer" id="studioFramingDrawer" open>
+              <summary>
+                <span>📐 Framing, Safe-Zone TikTok &amp; Geser Watermark Manual</span>
+                <span class="text-xs muted">Klik untuk buka / tutup</span>
+              </summary>
+              <div class="studio-drawer-body">
+                <div class="card-head" style="margin-bottom:8px;">
+                  <div class="text-xs muted">Preset Campaign aktif otomatis dipakai (Watermark, Outro 4s, Loudnorm).</div>
                   <button class="btn btn-xs btn-ghost" id="btnSaveLayoutToCampaign">💾 Simpan ke Campaign</button>
                 </div>
-              </div>
 
               <div class="layout-controls-grid">
                 <label>Mode Layout
@@ -286,7 +357,7 @@
                 </label>
               </div>
 
-              <!-- Visual Interactive Crop Canvas + 9:16 Output Live Simulator -->
+              <!-- Visual Interactive Crop Canvas + 9:16 Output Live Simulator with Safe-Zone & Drag Watermark -->
               <div class="crop-studio-row">
                 <div class="crop-source-col">
                   <div class="mini-label">
@@ -297,12 +368,18 @@
                   <canvas id="cropSourceCanvas" width="480" height="270"></canvas>
                 </div>
                 <div class="crop-preview-col">
-                  <div class="mini-label"><span>Simulasi Output 9:16 + Watermark</span></div>
-                  <canvas id="cropOutputCanvas" width="162" height="288"></canvas>
+                  <div class="mini-label" style="justify-content:space-between;gap:4px;">
+                    <span>Output 9:16</span>
+                    <label class="check-inline text-xs" title="Tampilkan garis aman UI TikTok/Reels/Shorts"><input type="checkbox" id="chkSafeZone" /> 📱 Safe Zone</label>
+                  </div>
+                  <canvas id="cropOutputCanvas" width="162" height="288" title="Drag watermark langsung di sini saat mode Geser WM aktif!"></canvas>
+                  <label class="check-inline text-xs mt-4" title="Klik & geser langsung posisi watermark di preview 9:16">
+                    <input type="checkbox" id="chkDragWm" /> 🎯 Geser WM Manual
+                  </label>
                 </div>
               </div>
 
-              <!-- Value-Add Editing & Campaign Toggles -->
+              <!-- Value-Add Editing & Campaign Preset Overrides -->
               <div class="edit-options-grid">
                 <label class="check-box">
                   <input type="checkbox" id="chkSubtitles" checked />
@@ -314,11 +391,11 @@
                 </label>
                 <label class="check-box">
                   <input type="checkbox" id="chkUseWatermark" checked />
-                  <span>Pasang Watermark</span>
+                  <span>Pasang Watermark Campaign</span>
                 </label>
                 <label class="check-box">
                   <input type="checkbox" id="chkUseOutro" checked />
-                  <span>Pasang Outro 3s (Akhir)</span>
+                  <span>Pasang Outro 4s (Akhir)</span>
                 </label>
               </div>
 
@@ -346,15 +423,18 @@
                   </select>
                 </label>
               </div>
-            </section>
+              </div>
+            </details>
 
-            <!-- FX, Backsound (BGM) & Sound Effects (SFX) Studio (ReaCut / FilmCraft-inspired) -->
-            <section class="card">
-              <div class="card-head">
-                <div>
-                  <h3>🎵 Efek Video, Backsound (BGM) &amp; Sound Effects (SFX)</h3>
-                  <div class="muted text-xs">Hanya berlaku di klip utama — Video Outro 3 detik tetap 100% bersih tanpa filter/BGM!</div>
-                </div>
+            <!-- FX, Backsound (BGM) & Sound Effects (SFX) Studio (Collapsible Progressive Disclosure!) -->
+            <details class="studio-drawer" id="studioFxDrawer">
+              <summary>
+                <span>🎵 Efek Video, Backsound (BGM) &amp; Sound Effects (SFX)</span>
+                <span class="text-xs muted">Klik untuk kustomisasi FX</span>
+              </summary>
+              <div class="studio-drawer-body">
+              <div class="card-head" style="margin-bottom:8px;">
+                <div class="muted text-xs">Hanya berlaku di klip utama — Video Outro 4 detik tetap 100% bersih tanpa filter/BGM!</div>
                 <button class="btn btn-xs btn-secondary" id="btnGoAudioLib">➕ Kelola / Upload SFX</button>
               </div>
 
@@ -430,7 +510,8 @@
                   <span>Crisp Gameplay Sharpen</span>
                 </label>
               </div>
-            </section>
+              </div>
+            </details>
           </div>
 
           <!-- RIGHT COLUMN: Ranked Viral Clip Candidates -->
@@ -608,16 +689,18 @@
           </div>
         </section>
       </div>
+    </main>
 
-      <!-- Human-in-the-Loop Final Review & Approval Inbox -->
+    <!-- ==================== TAB: REVIEW INBOX (STANDALONE — MOBILE 1-TANGAN!) ==================== -->
+    <main id="tab-review" class="tab-panel">
       <section class="card">
         <div class="card-head">
           <div>
-            <h2>🕵️ Human-in-the-Loop Review Inbox (Analisis Akhir Kamu)</h2>
-            <div class="muted text-xs">Semua klip hasil Autopilot (atau yang ditandai review) menunggu keputusan kamu: <strong>Approve (Siap Upload)</strong> atau <strong>Reject</strong>.</div>
+            <h2>🕵️ Review Inbox — Putuskan Klip Siap Upload</h2>
+            <div class="muted text-xs">Desain cepat &amp; ramah HP: tonton sebentar → <strong>Approve</strong>, <strong>Edit Manual (+SFX &amp; Watermark)</strong>, atau <strong>Reject</strong>.</div>
           </div>
           <div class="head-actions">
-            <button class="btn btn-xs btn-secondary review-filter active" data-rfilter="pending_review">⏳ Menunggu Review (<span id="cntPending">0</span>)</button>
+            <button class="btn btn-xs btn-secondary review-filter active" data-rfilter="pending_review">⏳ Menunggu (<span id="cntPending">0</span>)</button>
             <button class="btn btn-xs btn-ghost review-filter" data-rfilter="approved">✅ Approved (<span id="cntApproved">0</span>)</button>
             <button class="btn btn-xs btn-ghost review-filter" data-rfilter="rejected">❌ Rejected (<span id="cntRejected">0</span>)</button>
           </div>
@@ -633,7 +716,7 @@
           <div class="card-head">
             <div>
               <h2>💥 Sound Effects (SFX) Library</h2>
-              <div class="muted text-xs">Sudah termasuk 8 SFX starter bebas copyright + upload SFX meme favorit lo (Vine Boom, Bruh, Kaget, Ketawa, dll.)</div>
+              <div class="muted text-xs">Sudah termasuk <strong id="sfxBuiltInCount">10</strong> SFX starter bebas copyright + upload SFX meme favorit lo (Vine Boom, Metal Pipe, Scratch, Kaget, dll.)</div>
             </div>
             <button class="btn btn-xs btn-secondary" id="btnRegenAudio">🔄 Restore Starter Pack</button>
           </div>
@@ -809,25 +892,28 @@
             </div>
           </div>
 
-          <!-- Brief & Rules -->
+          <!-- Brief, Rules & Forbidden Words -->
           <div class="form-grid-2 mt-16">
             <label>Ringkasan Content Brief
-              <textarea id="cBrief" class="input textarea" rows="5"></textarea>
+              <textarea id="cBrief" class="input textarea" rows="4"></textarea>
             </label>
             <label>Checklist Rules Campaign (1 baris = 1 aturan)
-              <textarea id="cRules" class="input textarea" rows="5"></textarea>
+              <textarea id="cRules" class="input textarea" rows="4"></textarea>
             </label>
           </div>
+          <label class="mt-12">🚫 Kata Terlarang untuk Auto-Hook (pisahkan koma — tidak pernah dipakai di judul otomatis)
+            <input type="text" id="cForbiddenWords" class="input input-sm" placeholder="Contoh: judol, slot, sara, nama-terlarang" />
+          </label>
         </section>
       </div>
     </main>
 
-    <!-- ==================== TAB 3: QUEUE & CLIPS GALLERY ==================== -->
+    <!-- ==================== TAB 3: LIBRARY (QUEUE + HASIL CLIPS + FILTER) ==================== -->
     <main id="tab-queue" class="tab-panel">
       <section class="card">
         <div class="card-head">
           <div>
-            <h2>📦 Render Queue &amp; Hasil Clip Siap Upload</h2>
+            <h2>📦 Library Klip &amp; Render Queue</h2>
             <div class="muted text-xs">Semua clip otomatis tersimpan per folder campaign di direktori outputs</div>
           </div>
           <div class="head-actions">
@@ -835,22 +921,33 @@
             <button class="btn btn-sm btn-primary" id="btnOpenOutputs2">📂 Buka Folder Outputs</button>
           </div>
         </div>
+        <div class="lib-filters mt-8" style="margin-bottom:12px;">
+          <button class="btn btn-xs btn-secondary lib-filter active" data-lfilter="all">Semua</button>
+          <button class="btn btn-xs btn-ghost lib-filter" data-lfilter="active">⚡ Berjalan</button>
+          <button class="btn btn-xs btn-ghost lib-filter" data-lfilter="done">✅ Selesai</button>
+          <button class="btn btn-xs btn-ghost lib-filter" data-lfilter="approved">🏆 Approved</button>
+          <button class="btn btn-xs btn-ghost lib-filter" data-lfilter="error">❌ Error</button>
+        </div>
         <div id="jobsList" class="jobs-grid"></div>
       </section>
     </main>
 
-    <!-- ==================== TAB 4: SETTINGS & LOGS ==================== -->
+    <!-- ==================== TAB 4: SETTINGS, STORAGE & LOGS ==================== -->
     <main id="tab-settings" class="tab-panel">
       <div class="settings-grid">
         <section class="card">
           <div class="card-head">
-            <h3>🛠️ Engine &amp; Dependency Status</h3>
-            <button class="btn btn-xs btn-secondary" id="btnRefreshDeps">🔄 Re-Check</button>
+            <h3>🛠️ Engine, Security &amp; Dependency Status</h3>
+            <div class="head-actions">
+              <button class="btn btn-xs btn-accent" id="btnUpdateYtDlp">⬆️ Update yt-dlp</button>
+              <button class="btn btn-xs btn-secondary" id="btnRefreshDeps">🔄 Re-Check</button>
+            </div>
           </div>
           <div id="depsPanel" class="deps-list"></div>
+          <div id="diskHealthPanel" class="disk-bar-wrap"></div>
 
           <hr class="divider" />
-          <h3>⚙️ Render &amp; Download Settings</h3>
+          <h3>⚙️ Render, Storage Guard &amp; Webhook Notifikasi</h3>
           <div class="form-grid-2 mt-12">
             <label>Parallel Workers (Goroutines)
               <input type="number" id="sWorkers" class="input" min="1" max="8" value="2" />
@@ -884,15 +981,25 @@
                 <option value="firefox">Firefox</option>
               </select>
             </label>
+            <label>Batas Aman Disk Minimum (GB)
+              <input type="number" step="0.5" id="sMinFreeGb" class="input" min="0.5" max="100" value="2" />
+            </label>
+            <label>Retensi Pembersihan Klip Lama (Hari, 0=manual)
+              <input type="number" id="sRetentionDays" class="input" min="0" max="365" value="0" />
+            </label>
           </div>
+          <label class="mt-12">🔔 Webhook Notifikasi Global — Discord / n8n (Render Selesai/Gagal &amp; Engine Up/Down)
+            <input type="text" id="sNotifyWebhook" class="input" placeholder="https://discord.com/api/webhooks/... atau https://n8n.../webhook/klipforge" />
+          </label>
           <label class="mt-12">Output Folder
             <input type="text" id="sOutputDir" class="input" />
           </label>
           <label class="mt-12">Path File cookies.txt (Opsional, override browser cookies)
             <input type="text" id="sCookiesFile" class="input" placeholder="E:\klipforge\cookies.txt" />
           </label>
-          <div class="mt-16">
+          <div class="head-actions mt-16">
             <button class="btn btn-primary" id="btnSaveSettings">💾 Simpan Settings</button>
+            <button class="btn btn-secondary" id="btnCleanupStorage">🧹 Bersihkan Temp &amp; Klip Lama</button>
           </div>
         </section>
 
@@ -907,25 +1014,38 @@
     </main>
   </div>
 
-  <!-- ==================== POST-CLIP MANUAL EDITOR MODAL (Trim Menit/Detik + Tambah SFX) ==================== -->
+  <!-- ==================== POST-CLIP MANUAL EDITOR MODAL (Trim + +SFX + Drag-Drop Watermark + Safe-Zone) ==================== -->
   <div id="postEditModal" class="modal-backdrop hidden">
     <div class="modal-card">
       <div class="modal-head">
         <div>
-          <h2>✂️ Edit Manual Hasil Klip (Potong Menit &amp; +Sound Effect)</h2>
+          <h2>✂️ Edit Manual Hasil Klip (Potong Menit, +SFX &amp; Geser Watermark)</h2>
           <div class="muted text-xs" id="peSourceSubtitle">Edit langsung dari file MP4 lokal — cepat tanpa download ulang YouTube!</div>
         </div>
         <button class="btn btn-xs btn-ghost" id="btnClosePostEdit">✕ Tutup</button>
       </div>
 
       <div class="modal-body-grid">
-        <!-- Left: Interactive Video Preview + Frame/Second Controls -->
+        <!-- Left: Interactive Video Preview + Safe-Zone + Draggable Watermark + Precision Controls -->
         <div class="pe-left">
-          <div class="pe-video-wrap">
+          <div class="pe-video-wrap" id="peStage">
             <video id="peVideo" controls playsinline></video>
+            <div id="peSafeZone" class="safezone-overlay hidden">
+              <div class="sz-top">Area Status Bar / Following</div>
+              <div class="sz-right">Ikon<br/>Like<br/>Komen<br/>Share</div>
+              <div class="sz-bottom">Area Username, Caption &amp; Musik TikTok / Shorts</div>
+            </div>
+            <div id="peWmDrag" class="pe-wm-drag hidden" title="Geser posisi watermark dengan mouse / jari!">
+              <img id="peWmImg" src="" alt="WM" />
+            </div>
           </div>
           <div class="pe-time-bar">
             <span class="pe-clock" id="peClock">00:00.0 / 00:00.0</span>
+            <div class="head-actions">
+              <label class="check-inline text-xs"><input type="checkbox" id="peSafeZoneToggle" /> 📱 Safe Zone</label>
+            </div>
+          </div>
+          <div class="pe-time-bar">
             <div class="pe-nudge-group">
               <button class="btn btn-2xs btn-secondary pe-nudge" data-d="-5">-5s</button>
               <button class="btn btn-2xs btn-secondary pe-nudge" data-d="-1">-1s</button>
@@ -942,7 +1062,7 @@
           </div>
         </div>
 
-        <!-- Right: Trim Controls + SFX Timeline + Optional BGM -->
+        <!-- Right: Trim Controls + Manual Watermark + SFX Timeline + Optional BGM -->
         <div class="pe-right">
           <label>Judul Hasil Edit (otomatis disimpan sebagai file baru — file asli tetap aman)
             <input type="text" id="peTitle" class="input input-sm" />
@@ -972,6 +1092,27 @@
                 <span>🛡️ Pertahankan Outro MotionKlip utuh &amp; bersih di akhir</span>
               </label>
               <div class="text-xs muted" id="peDurInfo">Durasi hasil: —</div>
+            </div>
+          </div>
+
+          <div class="pe-section mt-12">
+            <div class="card-head" style="margin-bottom:4px;">
+              <label class="check-inline" style="font-weight:700;font-size:12px;">
+                <input type="checkbox" id="peWmEnabled" /> 🎯 Pasang / Geser Watermark Manual di Video
+              </label>
+              <label class="check-inline text-xs"><input type="checkbox" id="peWmFullFrame" /> Full-Frame 1:1</label>
+            </div>
+            <div id="peWmBody" class="hidden">
+              <div class="text-xs muted">Seret kotak watermark langsung di atas preview video di sebelah kiri! (Otomatis hilang saat Outro 4s)</div>
+              <div class="pe-wm-controls">
+                <label class="text-xs">Ukuran (<span id="lblPeWmScale">22%</span>)
+                  <input type="range" id="peWmScale" min="8" max="75" value="22" />
+                </label>
+                <label class="text-xs">Opacity (<span id="lblPeWmOpacity">95%</span>)
+                  <input type="range" id="peWmOpacity" min="20" max="100" value="95" />
+                </label>
+              </div>
+              <div class="text-xs muted mt-4" id="peWmCoords">Posisi: X 72% · Y 6%</div>
             </div>
           </div>
 
