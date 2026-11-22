@@ -15,6 +15,7 @@ import (
 	"klipforge/internal/deps"
 	"klipforge/internal/events"
 	"klipforge/internal/model"
+	"klipforge/internal/notify"
 	"klipforge/internal/store"
 	"klipforge/internal/youtube"
 )
@@ -60,6 +61,14 @@ func NewWorkerPool(st *store.Store, d *deps.Manager, yt *youtube.Client, audioLi
 	return wp
 }
 
+func (wp *WorkerPool) checkDiskGuard() error {
+	ds := wp.Store.DiskStats()
+	if ds.LowDisk {
+		return fmt.Errorf("sisa disk tinggal %.2f GB (batas aman %.1f GB). Bersihkan folder outputs/klip lama dulu di Settings sebelum render", ds.FreeGB, ds.MinFreeGB)
+	}
+	return nil
+}
+
 // Enqueue creates and queues a new RenderJob.
 func (wp *WorkerPool) Enqueue(opts model.RenderOptions) (*model.RenderJob, error) {
 	return wp.EnqueueWithReview(opts, "", "")
@@ -67,6 +76,9 @@ func (wp *WorkerPool) Enqueue(opts model.RenderOptions) (*model.RenderJob, error
 
 // EnqueueWithReview creates a RenderJob optionally tagged for Human-in-the-Loop (HITL) Autopilot Review.
 func (wp *WorkerPool) EnqueueWithReview(opts model.RenderOptions, reviewStatus, autopilotID string) (*model.RenderJob, error) {
+	if err := wp.checkDiskGuard(); err != nil {
+		return nil, err
+	}
 	proj, ok := wp.Store.GetProject(opts.ProjectID)
 	if !ok {
 		return nil, fmt.Errorf("project tidak ditemukan: %s", opts.ProjectID)
@@ -173,6 +185,9 @@ func (wp *WorkerPool) Cancel(jobID string) {
 
 // EnqueueCompilation creates and queues a multi-clip Top-N Countdown or Rapid Compilation job!
 func (wp *WorkerPool) EnqueueCompilation(opts model.CompileOptions) (*model.RenderJob, error) {
+	if err := wp.checkDiskGuard(); err != nil {
+		return nil, err
+	}
 	if len(opts.Segments) == 0 {
 		return nil, fmt.Errorf("minimal 1 klip diperlukan untuk membuat Top-N / Kompilasi")
 	}
@@ -280,6 +295,9 @@ func (wp *WorkerPool) EnqueueCompilation(opts model.CompileOptions) (*model.Rend
 // EnqueuePostEdit creates a fast local post-edit job (Trim start/end + stamp additional SFX/BGM)
 // from an already-rendered clip WITHOUT re-downloading anything from YouTube!
 func (wp *WorkerPool) EnqueuePostEdit(opts model.PostEditOptions) (*model.RenderJob, error) {
+	if err := wp.checkDiskGuard(); err != nil {
+		return nil, err
+	}
 	srcJob, ok := wp.Store.GetJob(opts.SourceJobID)
 	if !ok {
 		return nil, fmt.Errorf("klip sumber tidak ditemukan")
@@ -541,6 +559,7 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 	_ = wp.Store.SaveJob(job)
 	wp.Broker.Publish("job_update", job)
 	wp.Broker.Log("worker", "success", fmt.Sprintf("Clip selesai: %s (%.1fs, %.2f MB)", fileName, info.Duration, float64(size)/(1024*1024)))
+	wp.notifyJobDone(job)
 }
 
 func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) {
@@ -760,6 +779,7 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 	_ = wp.Store.SaveJob(job)
 	wp.Broker.Publish("job_update", job)
 	wp.Broker.Log("worker", "success", fmt.Sprintf("Kompilasi selesai: %s (%.1fs, %.2f MB)", fileName, info.Duration, float64(size)/(1024*1024)))
+	wp.notifyJobDone(job)
 }
 
 func (wp *WorkerPool) processPostEditJob(workerID int, job *model.RenderJob) {
@@ -887,6 +907,7 @@ func (wp *WorkerPool) processPostEditJob(workerID int, job *model.RenderJob) {
 	_ = wp.Store.SaveJob(job)
 	wp.Broker.Publish("job_update", job)
 	wp.Broker.Log("worker", "success", fmt.Sprintf("Post-Edit selesai: %s (%.1fs, %.2f MB)", fileName, info.Duration, float64(size)/(1024*1024)))
+	wp.notifyJobDone(job)
 }
 
 func (wp *WorkerPool) resolveSFXCues(cfg model.AudioFXConfig, peakOffset, clipDur float64) []ResolvedSFX {
@@ -954,6 +975,16 @@ func (wp *WorkerPool) updateJob(job *model.RenderJob, status, stage string, prog
 	wp.Broker.Publish("job_update", job)
 }
 
+func (wp *WorkerPool) notifyJobDone(job *model.RenderJob) {
+	if wh := strings.TrimSpace(wp.Store.GetSettings().NotifyWebhookURL); wh != "" {
+		go notify.Send(wh, "render_done",
+			fmt.Sprintf("✅ Klip Selesai: %s", job.Title),
+			fmt.Sprintf("Campaign: %s | Durasi: %.1fs | Ukuran: %.2f MB\nSiap direview & upload di https://klip.breakthematrix.id",
+				job.CampaignName, job.FinalDuration, float64(job.FileSizeBytes)/(1024*1024)),
+		)
+	}
+}
+
 func (wp *WorkerPool) failJob(job *model.RenderJob, errMsg string) {
 	job.Status = "error"
 	job.Stage = "Gagal render"
@@ -961,6 +992,12 @@ func (wp *WorkerPool) failJob(job *model.RenderJob, errMsg string) {
 	_ = wp.Store.SaveJob(job)
 	wp.Broker.Publish("job_update", job)
 	wp.Broker.Log("worker", "error", fmt.Sprintf("Render gagal (%s): %s", job.Title, errMsg))
+	if wh := strings.TrimSpace(wp.Store.GetSettings().NotifyWebhookURL); wh != "" {
+		go notify.Send(wh, "render_error",
+			fmt.Sprintf("❌ Render Gagal: %s", job.Title),
+			fmt.Sprintf("Campaign: %s\nError: %s", job.CampaignName, errMsg),
+		)
+	}
 }
 
 func evaluateCompliance(opts model.RenderOptions, camp *model.Campaign) model.ComplianceCheck {

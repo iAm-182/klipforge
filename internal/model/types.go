@@ -106,6 +106,7 @@ type Campaign struct {
 	SocialMentions     []string        `json:"socialMentions"`     // e.g. @windahbasudara, @rockstargames
 	BriefSummary       string          `json:"briefSummary"`
 	Rules              []string        `json:"rules"`
+	ForbiddenWords     []string        `json:"forbiddenWords,omitempty"` // Words banned from auto-generated hooks/captions
 	ReferenceDriveURL  string          `json:"referenceDriveUrl"`
 	Watermark          WatermarkConfig `json:"watermark"`
 	Intro              ClipAssetVideo  `json:"intro"`
@@ -377,14 +378,29 @@ type ChannelVideo struct {
 
 // AppSettings stores user-configurable runtime settings.
 type AppSettings struct {
-	MaxWorkers      int    `json:"maxWorkers"`      // Parallel render workers (default 2)
-	DefaultEncoder  string `json:"defaultEncoder"`  // libx264, h264_qsv, etc.
-	DefaultPreset   string `json:"defaultPreset"`   // veryfast, fast, medium
-	DefaultCRF      int    `json:"defaultCrf"`      // 20
-	CookiesBrowser  string `json:"cookiesBrowser"`  // "", "chrome", "edge", "firefox"
-	CookiesFile     string `json:"cookiesFile"`     // Optional path to cookies.txt
-	DownloadQuality string `json:"downloadQuality"` // 1080p, 720p, best
-	OutputDir       string `json:"outputDir"`       // Default E:\klipforge\outputs
+	MaxWorkers          int     `json:"maxWorkers"`          // Parallel render workers (default 2)
+	DefaultEncoder      string  `json:"defaultEncoder"`      // libx264, h264_qsv, etc.
+	DefaultPreset       string  `json:"defaultPreset"`       // veryfast, fast, medium
+	DefaultCRF          int     `json:"defaultCrf"`          // 20
+	CookiesBrowser      string  `json:"cookiesBrowser"`      // "", "chrome", "edge", "firefox"
+	CookiesFile         string  `json:"cookiesFile"`         // Optional path to cookies.txt
+	DownloadQuality     string  `json:"downloadQuality"`     // 1080p, 720p, best
+	OutputDir           string  `json:"outputDir"`           // Default E:\klipforge\outputs
+	NotifyWebhookURL    string  `json:"notifyWebhookUrl"`    // Optional Discord/n8n webhook for render done/fail & engine up/down
+	MinFreeDiskGB       float64 `json:"minFreeDiskGb"`       // Block new renders below this free GB threshold (default 2.0)
+	OutputRetentionDays int     `json:"outputRetentionDays"` // Optional cleanup threshold in days (0 = manual)
+}
+
+// DiskStats summarizes available storage & KlipForge disk usage.
+type DiskStats struct {
+	FreeBytes     uint64  `json:"freeBytes"`
+	TotalBytes    uint64  `json:"totalBytes"`
+	FreeGB        float64 `json:"freeGb"`
+	TotalGB       float64 `json:"totalGb"`
+	OutputsBytes  int64   `json:"outputsBytes"`
+	ProjectsBytes int64   `json:"projectsBytes"`
+	MinFreeGB     float64 `json:"minFreeGb"`
+	LowDisk       bool    `json:"lowDisk"`
 }
 
 // DepStatus describes the health of required external binaries.

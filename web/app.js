@@ -38,9 +38,40 @@
 
   const $ = (id) => document.getElementById(id);
 
-  // ==================== API Helper ====================
+  // ==================== API Helper (with Localhost Token Unlock) ====================
+  let unlockPromptOpen = false;
+  async function promptLocalUnlock() {
+    if (unlockPromptOpen) return false;
+    unlockPromptOpen = true;
+    try {
+      const tok = window.prompt(
+        '🔒 KlipForge Engine Dilindungi Token!\nMasukkan isi file E:\\klipforge\\.engine-token (cukup sekali di browser lokal ini):'
+      );
+      if (!tok || !tok.trim()) return false;
+      const res = await fetch('/api/auth/unlock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: tok.trim() }),
+      });
+      if (!res.ok) {
+        alert('Token tidak cocok! Cek isi file .engine-token di folder KlipForge.');
+        return false;
+      }
+      localStorage.setItem('kf_unlocked', '1');
+      return true;
+    } finally {
+      unlockPromptOpen = false;
+    }
+  }
+
   async function api(path, opts = {}) {
-    const res = await fetch(path, opts);
+    let res = await fetch(path, opts);
+    if (res.status === 401 && (location.hostname === '127.0.0.1' || location.hostname === 'localhost')) {
+      const ok = await promptLocalUnlock();
+      if (ok) {
+        res = await fetch(path, opts);
+      }
+    }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       throw new Error(data.error || `HTTP ${res.status}`);

@@ -2,6 +2,8 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -54,6 +56,7 @@ func NewStore(baseDir string) (*Store, error) {
 			DefaultCRF:      20,
 			DownloadQuality: "1080p",
 			OutputDir:       outputDir,
+			MinFreeDiskGB:   2.0,
 		},
 	}
 
@@ -63,83 +66,102 @@ func NewStore(baseDir string) (*Store, error) {
 	return s, nil
 }
 
+// readJSONWithBackupFallback reads a JSON data file and automatically falls back to .bak.1/.bak.2/.bak.3
+// if the primary file is corrupted, preserving the corrupted file for inspection instead of silently wiping data!
+func readJSONWithBackupFallback(path string, dest interface{}) bool {
+	if b, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(b, dest); err == nil {
+			return true
+		}
+		// Preserve corrupt file so user can inspect it later
+		corruptPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().Unix())
+		_ = os.WriteFile(corruptPath, b, 0o644)
+		log.Printf("[Store] WARNING: %s corrupt! Saved copy to %s — attempting .bak recovery...", filepath.Base(path), filepath.Base(corruptPath))
+	}
+	for i := 1; i <= 3; i++ {
+		bakPath := fmt.Sprintf("%s.bak.%d", path, i)
+		if b, err := os.ReadFile(bakPath); err == nil {
+			if err := json.Unmarshal(b, dest); err == nil {
+				log.Printf("[Store] RECOVERED %s from %s!", filepath.Base(path), filepath.Base(bakPath))
+				// Restore healthy backup into primary file immediately
+				_ = os.WriteFile(path, b, 0o644)
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (s *Store) loadAll() {
 	// Load settings
-	if b, err := os.ReadFile(filepath.Join(s.DataDir, "settings.json")); err == nil {
-		var cfg model.AppSettings
-		if json.Unmarshal(b, &cfg) == nil {
-			if cfg.MaxWorkers <= 0 {
-				cfg.MaxWorkers = 2
-			}
-			if cfg.DefaultEncoder == "" {
-				cfg.DefaultEncoder = "libx264"
-			}
-			if cfg.DefaultPreset == "" {
-				cfg.DefaultPreset = "veryfast"
-			}
-			if cfg.DefaultCRF <= 0 {
-				cfg.DefaultCRF = 20
-			}
-			if cfg.OutputDir == "" {
-				cfg.OutputDir = s.OutputDir
-			}
-			s.settings = cfg
+	var cfg model.AppSettings
+	if readJSONWithBackupFallback(filepath.Join(s.DataDir, "settings.json"), &cfg) {
+		if cfg.MaxWorkers <= 0 {
+			cfg.MaxWorkers = 2
 		}
+		if cfg.DefaultEncoder == "" {
+			cfg.DefaultEncoder = "libx264"
+		}
+		if cfg.DefaultPreset == "" {
+			cfg.DefaultPreset = "veryfast"
+		}
+		if cfg.DefaultCRF <= 0 {
+			cfg.DefaultCRF = 20
+		}
+		if cfg.OutputDir == "" {
+			cfg.OutputDir = s.OutputDir
+		}
+		if cfg.MinFreeDiskGB <= 0 {
+			cfg.MinFreeDiskGB = 2.0
+		}
+		s.settings = cfg
 	}
 
 	// Load campaigns
-	if b, err := os.ReadFile(filepath.Join(s.DataDir, "campaigns.json")); err == nil {
-		var list []*model.Campaign
-		if json.Unmarshal(b, &list) == nil {
-			for _, c := range list {
-				if c.ID != "" {
-					s.campaigns[c.ID] = c
-				}
+	var camps []*model.Campaign
+	if readJSONWithBackupFallback(filepath.Join(s.DataDir, "campaigns.json"), &camps) {
+		for _, c := range camps {
+			if c.ID != "" {
+				s.campaigns[c.ID] = c
 			}
 		}
 	}
 
 	// Load projects
-	if b, err := os.ReadFile(filepath.Join(s.DataDir, "projects.json")); err == nil {
-		var list []*model.Project
-		if json.Unmarshal(b, &list) == nil {
-			for _, p := range list {
-				if p.ID != "" {
-					// Reset interrupted scanning states on restart
-					if p.Status == "scanning" || p.Status == "downloading" {
-						p.Status = "ready"
-						p.StatusMessage = "Loaded from cache"
-					}
-					s.projects[p.ID] = p
+	var projs []*model.Project
+	if readJSONWithBackupFallback(filepath.Join(s.DataDir, "projects.json"), &projs) {
+		for _, p := range projs {
+			if p.ID != "" {
+				// Reset interrupted scanning states on restart
+				if p.Status == "scanning" || p.Status == "downloading" {
+					p.Status = "ready"
+					p.StatusMessage = "Loaded from cache"
 				}
+				s.projects[p.ID] = p
 			}
 		}
 	}
 
 	// Load jobs
-	if b, err := os.ReadFile(filepath.Join(s.DataDir, "jobs.json")); err == nil {
-		var list []*model.RenderJob
-		if json.Unmarshal(b, &list) == nil {
-			for _, j := range list {
-				if j.ID != "" {
-					if j.Status == "queued" || j.Status == "rendering" || j.Status == "downloading" {
-						j.Status = "error"
-						j.Error = "Interrupted by server restart — click retry to re-render"
-					}
-					s.jobs[j.ID] = j
+	var jobs []*model.RenderJob
+	if readJSONWithBackupFallback(filepath.Join(s.DataDir, "jobs.json"), &jobs) {
+		for _, j := range jobs {
+			if j.ID != "" {
+				if j.Status == "queued" || j.Status == "rendering" || j.Status == "downloading" {
+					j.Status = "error"
+					j.Error = "Interrupted by server restart — click retry to re-render"
 				}
+				s.jobs[j.ID] = j
 			}
 		}
 	}
 
 	// Load autopilot rules
-	if b, err := os.ReadFile(filepath.Join(s.DataDir, "autopilot.json")); err == nil {
-		var list []*model.AutopilotRule
-		if json.Unmarshal(b, &list) == nil {
-			for _, r := range list {
-				if r.ID != "" {
-					s.autopilots[r.ID] = r
-				}
+	var rules []*model.AutopilotRule
+	if readJSONWithBackupFallback(filepath.Join(s.DataDir, "autopilot.json"), &rules) {
+		for _, r := range rules {
+			if r.ID != "" {
+				s.autopilots[r.ID] = r
 			}
 		}
 	}
@@ -391,11 +413,69 @@ func writeJSONAtomic(path string, v interface{}) error {
 	if err != nil {
 		return err
 	}
+	// Rotate rolling backups (.bak.2 -> .bak.3, .bak.1 -> .bak.2, current -> .bak.1)
+	if orig, err := os.ReadFile(path); err == nil && len(orig) > 2 {
+		_ = os.Remove(path + ".bak.3")
+		_ = os.Rename(path+".bak.2", path+".bak.3")
+		_ = os.Rename(path+".bak.1", path+".bak.2")
+		_ = os.WriteFile(path+".bak.1", orig, 0o644)
+	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// DiskStats returns current free space on the output volume plus KlipForge storage usage.
+func (s *Store) DiskStats() model.DiskStats {
+	cfg := s.GetSettings()
+	outDir := cfg.OutputDir
+	if outDir == "" {
+		outDir = s.OutputDir
+	}
+	return GetDiskStats(outDir, s.DataDir, cfg.MinFreeDiskGB)
+}
+
+// CleanupStorage removes temp render directories and optionally removes non-approved rendered MP4 files older than olderThanDays.
+func (s *Store) CleanupStorage(olderThanDays int) (deletedFiles int, freedBytes int64) {
+	// 1. Always wipe stale data/tmp directories
+	tmpRoot := filepath.Join(s.DataDir, "tmp")
+	if entries, err := os.ReadDir(tmpRoot); err == nil {
+		for _, ent := range entries {
+			p := filepath.Join(tmpRoot, ent.Name())
+			freedBytes += dirSizeBytes(p)
+			if os.RemoveAll(p) == nil {
+				deletedFiles++
+			}
+		}
+	}
+
+	// 2. Optionally prune old unapproved output clips older than olderThanDays
+	if olderThanDays > 0 {
+		cutoff := time.Now().Add(-time.Duration(olderThanDays) * 24 * time.Hour)
+		s.mu.Lock()
+		changed := false
+		for id, j := range s.jobs {
+			if j.ReviewStatus == "approved" {
+				continue
+			}
+			if j.Status == "done" && j.OutputPath != "" && j.CreatedAt.Before(cutoff) {
+				if fi, err := os.Stat(j.OutputPath); err == nil {
+					freedBytes += fi.Size()
+				}
+				_ = os.Remove(j.OutputPath)
+				delete(s.jobs, id)
+				deletedFiles++
+				changed = true
+			}
+		}
+		if changed {
+			_ = s.saveJobsLocked()
+		}
+		s.mu.Unlock()
+	}
+	return deletedFiles, freedBytes
 }
 
 func (s *Store) saveCampaignsLocked() error {

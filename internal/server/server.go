@@ -2,10 +2,14 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -21,6 +25,7 @@ import (
 	"klipforge/internal/deps"
 	"klipforge/internal/events"
 	"klipforge/internal/model"
+	"klipforge/internal/notify"
 	"klipforge/internal/renderer"
 	"klipforge/internal/store"
 	"klipforge/internal/youtube"
@@ -29,13 +34,14 @@ import (
 
 // Server wires all REST endpoints, SSE streaming, media serving, and embedded dashboard UI.
 type Server struct {
-	Store     *store.Store
-	Deps      *deps.Manager
-	YT        *youtube.Client
-	Audio     *audiofx.Library
-	Broker    *events.Broker
-	Worker    *renderer.WorkerPool
-	Autopilot *autopilot.Scheduler
+	Store       *store.Store
+	Deps        *deps.Manager
+	YT          *youtube.Client
+	Audio       *audiofx.Library
+	Broker      *events.Broker
+	Worker      *renderer.WorkerPool
+	Autopilot   *autopilot.Scheduler
+	EngineToken string
 
 	// Cache raw signals in memory for instant re-analysis without re-fetching YouTube
 	cacheMu    sync.RWMutex
@@ -50,21 +56,46 @@ type cachedSignals struct {
 	StreamURL   string
 }
 
+func loadOrCreateEngineToken(baseDir string) string {
+	if envTok := strings.TrimSpace(os.Getenv("KLIPFORGE_ENGINE_TOKEN")); envTok != "" {
+		return envTok
+	}
+	tokPath := filepath.Join(baseDir, ".engine-token")
+	if b, err := os.ReadFile(tokPath); err == nil {
+		if tok := strings.TrimSpace(string(b)); len(tok) >= 16 {
+			return tok
+		}
+	}
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return ""
+	}
+	tok := hex.EncodeToString(buf)
+	_ = os.WriteFile(tokPath, []byte(tok), 0o600)
+	log.Printf("[Security] Generated new Engine Token in %s", tokPath)
+	return tok
+}
+
 func New(st *store.Store, d *deps.Manager, broker *events.Broker) *Server {
 	yt := youtube.NewClient(d)
 	audioLib := audiofx.NewLibrary(st.DataDir, d)
 	wp := renderer.NewWorkerPool(st, d, yt, audioLib, broker)
+	engTok := loadOrCreateEngineToken(st.BaseDir)
 	s := &Server{
-		Store:      st,
-		Deps:       d,
-		YT:         yt,
-		Audio:      audioLib,
-		Broker:     broker,
-		Worker:     wp,
-		rawSignals: make(map[string]*cachedSignals),
+		Store:       st,
+		Deps:        d,
+		YT:          yt,
+		Audio:       audioLib,
+		Broker:      broker,
+		Worker:      wp,
+		EngineToken: engTok,
+		rawSignals:  make(map[string]*cachedSignals),
 	}
 	s.Autopilot = autopilot.NewScheduler(st, yt, wp, broker, s.analyzeSyncFast)
 	go s.recoverIncompleteProjects()
+	if wh := strings.TrimSpace(st.GetSettings().NotifyWebhookURL); wh != "" {
+		go notify.Send(wh, "engine_start", "🟢 KlipForge Engine Menyala", "Engine lokal siap menerima job & auto-catchup Autopilot aktif.")
+	}
 	return s
 }
 
@@ -113,9 +144,13 @@ func (s *Server) recoverIncompleteProjects() {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// Health, SSE & Settings
+	// Health, Auth, Storage, SSE & Settings
+	mux.HandleFunc("GET /api/auth/check", s.handleAuthCheck)
+	mux.HandleFunc("POST /api/auth/unlock", s.handleAuthUnlock)
 	mux.HandleFunc("GET /api/status", s.handleStatus)
 	mux.HandleFunc("POST /api/deps/refresh", s.handleRefreshDeps)
+	mux.HandleFunc("POST /api/deps/update-ytdlp", s.handleUpdateYtDlp)
+	mux.HandleFunc("POST /api/storage/cleanup", s.handleStorageCleanup)
 	mux.Handle("GET /api/events", s.Broker)
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", s.handleSaveSettings)
@@ -173,14 +208,70 @@ func (s *Server) Handler() http.Handler {
 	fileServer := http.FileServer(http.FS(subFS))
 	mux.Handle("/", fileServer)
 
-	return corsMiddleware(mux)
+	return s.corsMiddleware(s.authMiddleware(mux))
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
+func (s *Server) isValidToken(provided string) bool {
+	if s.EngineToken == "" {
+		return true
+	}
+	p := strings.TrimSpace(provided)
+	if len(p) != len(s.EngineToken) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(p), []byte(s.EngineToken)) == 1
+}
+
+func (s *Server) requestHasValidAuth(r *http.Request) bool {
+	if s.EngineToken == "" {
+		return true
+	}
+	if s.isValidToken(r.Header.Get("X-Engine-Token")) {
+		return true
+	}
+	if ck, err := r.Cookie("kf_token"); err == nil && s.isValidToken(ck.Value) {
+		return true
+	}
+	if q := r.URL.Query().Get("token"); q != "" && s.isValidToken(q) {
+		return true
+	}
+	return false
+}
+
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Protect EVERY /api/* route with EngineToken (blocks direct trycloudflare.com bypass!)
+		if strings.HasPrefix(r.URL.Path, "/api/") &&
+			r.URL.Path != "/api/auth/unlock" &&
+			r.URL.Path != "/api/auth/check" {
+			if !s.requestHasValidAuth(r) {
+				writeErr(w, http.StatusUnauthorized, "Unauthorized: X-Engine-Token diperlukan")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
+	allowedOrigins := map[string]bool{
+		"https://klip.breakthematrix.id": true,
+		"http://127.0.0.1:8787":          true,
+		"http://localhost:8787":          true,
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" && allowedOrigins[origin] {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Engine-Token")
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -199,12 +290,44 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// --- Status & Settings ---
+// --- Auth, Status, Storage & Settings ---
+
+func (s *Server) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]bool{
+		"tokenRequired": s.EngineToken != "",
+		"authenticated": s.requestHasValidAuth(r),
+	})
+}
+
+func (s *Server) handleAuthUnlock(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "Format JSON tidak valid")
+		return
+	}
+	if !s.isValidToken(req.Token) {
+		writeErr(w, http.StatusUnauthorized, "Engine Token salah")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     "kf_token",
+		Value:    s.EngineToken,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   86400 * 30,
+	})
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"deps":      s.Deps.GetStatus(),
 		"settings":  s.Store.GetSettings(),
+		"disk":      s.Store.DiskStats(),
+		"security":  map[string]bool{"engineTokenEnabled": s.EngineToken != ""},
 		"campaigns": len(s.Store.ListCampaigns()),
 		"projects":  len(s.Store.ListProjects()),
 		"jobs":      len(s.Store.ListJobs()),
@@ -214,6 +337,45 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRefreshDeps(w http.ResponseWriter, r *http.Request) {
 	st := s.Deps.Refresh()
 	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) handleUpdateYtDlp(w http.ResponseWriter, r *http.Request) {
+	s.Broker.Log("system", "info", "Memeriksa update yt-dlp terbaru (yt-dlp -U)...")
+	oldVer, newVer, out, err := s.Deps.UpdateYtDlp(r.Context())
+	if err != nil {
+		s.Broker.Log("system", "warn", fmt.Sprintf("Update yt-dlp selesai dengan catatan: %s", out))
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok":         false,
+			"oldVersion": oldVer,
+			"newVersion": newVer,
+			"output":     out,
+			"error":      err.Error(),
+			"deps":       s.Deps.GetStatus(),
+		})
+		return
+	}
+	s.Broker.Log("system", "success", fmt.Sprintf("yt-dlp up-to-date: %s -> %s", oldVer, newVer))
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok":         true,
+		"oldVersion": oldVer,
+		"newVersion": newVer,
+		"output":     out,
+		"deps":       s.Deps.GetStatus(),
+	})
+}
+
+func (s *Server) handleStorageCleanup(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		OlderThanDays int `json:"olderThanDays"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	deleted, freed := s.Store.CleanupStorage(req.OlderThanDays)
+	s.Broker.Log("system", "success", fmt.Sprintf("Pembersihan storage selesai: %d item dihapus (%.1f MB bebas).", deleted, float64(freed)/(1024*1024)))
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"deleted":    deleted,
+		"freedBytes": freed,
+		"disk":       s.Store.DiskStats(),
+	})
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {

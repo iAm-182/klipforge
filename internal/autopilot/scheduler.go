@@ -46,6 +46,21 @@ func NewScheduler(st *store.Store, yt *youtube.Client, wp *renderer.WorkerPool, 
 }
 
 func (sc *Scheduler) loop() {
+	// Auto-Catchup on startup: 15s after PC wakes/engine boots, run any enabled overdue rules!
+	time.AfterFunc(15*time.Second, func() {
+		now := time.Now()
+		for _, rule := range sc.Store.ListAutopilots() {
+			if !rule.Enabled {
+				continue
+			}
+			overdue := rule.NextRunAt == nil || !now.Before(*rule.NextRunAt)
+			if overdue {
+				sc.Broker.Log("autopilot", "info", fmt.Sprintf("[%s] Auto-Catchup setelah PC menyala — memeriksa VOD terbaru...", rule.Name))
+				go sc.RunRule(rule.ID)
+			}
+		}
+	})
+
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 

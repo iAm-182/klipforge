@@ -46,6 +46,30 @@ func (m *Manager) Refresh() model.DepStatus {
 	return m.GetStatus()
 }
 
+// UpdateYtDlp runs `yt-dlp -U` to keep YouTube extraction up-to-date and refreshes version metadata.
+func (m *Manager) UpdateYtDlp(ctx context.Context) (oldVer, newVer, output string, err error) {
+	st := m.GetStatus()
+	if st.YtDlpPath == "" {
+		return "", "", "", os.ErrNotExist
+	}
+	oldVer = st.YtDlpVersion
+	uCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(uCtx, st.YtDlpPath, "-U")
+	outBytes, runErr := cmd.CombinedOutput()
+	output = strings.TrimSpace(string(outBytes))
+
+	// Re-probe version regardless so dashboard reflects accurate version
+	newVer = firstLineOutput(st.YtDlpPath, "--version")
+	if newVer != "" {
+		m.mu.Lock()
+		m.Status.YtDlpVersion = newVer
+		m.mu.Unlock()
+	}
+	return oldVer, newVer, output, runErr
+}
+
 func (m *Manager) detectPaths() {
 	ff := m.findBinary("ffmpeg")
 	fp := m.findBinary("ffprobe")

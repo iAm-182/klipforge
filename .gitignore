@@ -12,10 +12,14 @@ outputs/
 .env.*
 .tunnel-token
 .bridge-secret
+.access-key
+.engine-token
 .cloudflared.log
 .tmp_*.json
 cookies.txt
 *.log
+*.bak*
+*.corrupt*
 
 # Wrangler / Node local artifacts
 cloudflare/.wrangler/
