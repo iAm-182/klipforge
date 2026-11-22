@@ -500,10 +500,13 @@ func (c *Client) CutSectionFromStreams(ctx context.Context, pair *StreamPair, st
 		destMP4,
 	)
 
-	// Per-segment guard: max(90s, dur*6) so even slow CPUs have headroom while hung sockets always trip
+	// Per-segment guard: max(90s, dur*6) capped at 10m so even slow CPUs have headroom while bad durations never stall hours
 	segTimeout := time.Duration(dur*6)*time.Second + 75*time.Second
 	if segTimeout < 90*time.Second {
 		segTimeout = 90 * time.Second
+	}
+	if segTimeout > 10*time.Minute {
+		segTimeout = 10 * time.Minute
 	}
 	sliceCtx, cancel := context.WithTimeout(ctx, segTimeout)
 	defer cancel()

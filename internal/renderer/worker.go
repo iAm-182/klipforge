@@ -42,6 +42,14 @@ func NewWorkerPool(st *store.Store, d *deps.Manager, yt *youtube.Client, audioLi
 		queue:   make(chan string, 128),
 		cancels: make(map[string]context.CancelFunc),
 	}
+	// Clean up stale temp folders left behind by interrupted/canceled jobs so disk space never fills up!
+	if tmpRoot := filepath.Join(st.DataDir, "tmp"); tmpRoot != "" {
+		if entries, err := os.ReadDir(tmpRoot); err == nil {
+			for _, ent := range entries {
+				_ = os.RemoveAll(filepath.Join(tmpRoot, ent.Name()))
+			}
+		}
+	}
 	workers := st.GetSettings().MaxWorkers
 	if workers < 1 {
 		workers = 2
@@ -81,6 +89,12 @@ func (wp *WorkerPool) EnqueueWithReview(opts model.RenderOptions, reviewStatus, 
 	}
 	if opts.EndSec <= opts.StartSec {
 		return nil, fmt.Errorf("endSec harus lebih besar dari startSec")
+	}
+	if proj.DurationSec > 0 && opts.EndSec > proj.DurationSec+5 {
+		return nil, fmt.Errorf("End (%.0fs) melebihi durasi total video (%.0fs) — cek lagi kemungkinan typo angka!", opts.EndSec, proj.DurationSec)
+	}
+	if opts.EndSec-opts.StartSec > 600 {
+		return nil, fmt.Errorf("durasi klip terlalu panjang (%.0f detik / maks 10 menit per klip) — cek lagi angka Start/End!", opts.EndSec-opts.StartSec)
 	}
 
 	// Infer peak offset inside clip if candidate ID matches
@@ -173,8 +187,15 @@ func (wp *WorkerPool) EnqueueCompilation(opts model.CompileOptions) (*model.Rend
 		if seg.EndSec <= seg.StartSec+0.5 {
 			return nil, fmt.Errorf("durasi klip #%d (%s) tidak valid: End (%.0fs) harus lebih besar dari Start (%.0fs)", rankNum, seg.Label, seg.EndSec, seg.StartSec)
 		}
-		if _, ok := wp.Store.GetProject(seg.ProjectID); !ok {
+		proj, ok := wp.Store.GetProject(seg.ProjectID)
+		if !ok {
 			return nil, fmt.Errorf("project untuk klip #%d tidak ditemukan", rankNum)
+		}
+		if proj.DurationSec > 0 && seg.EndSec > proj.DurationSec+5 {
+			return nil, fmt.Errorf("klip #%d (%s) kemungkinan TYPO: End (%.0fs) melebihi durasi video (%.0fs)! Silakan ubah lewat tombol 'Edit Menit VOD'", rankNum, seg.Label, seg.EndSec, proj.DurationSec)
+		}
+		if seg.EndSec-seg.StartSec > 180 {
+			return nil, fmt.Errorf("klip #%d (%s) terlalu panjang (%.0f detik — maks 180 detik per slot Top-N). Cek lagi angka Start (%.0fs) & End (%.0fs)!", rankNum, seg.Label, seg.EndSec-seg.StartSec, seg.StartSec, seg.EndSec)
 		}
 	}
 	camp, _ := wp.Store.GetCampaign(opts.CampaignID)

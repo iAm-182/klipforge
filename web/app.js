@@ -2262,10 +2262,18 @@
         .concat(sfxs.map((s) => `<option value="${escapeAttr(s.id)}" ${s.id === slot.endSfxId ? 'selected' : ''}>${escapeHtml(s.name)}</option>`))
         .join('');
 
+      const slotProj = state.projects.find((p) => p.id === slot.projectId);
+      const maxDur = slotProj?.durationSec || 0;
+      const segLen = (slot.endSec || 0) - (slot.startSec || 0);
+      const isBadDur = segLen <= 0.5 || segLen > 180 || (maxDur > 0 && slot.endSec > maxDur + 2);
+      const durBadge = isBadDur
+        ? `<span style="color:#fb7185;font-weight:700;">⚠️ Cek Typo! (${fmtTime(slot.startSec)} – ${fmtTime(slot.endSec)} = ${Math.round(segLen)}s${maxDur > 0 && slot.endSec > maxDur + 2 ? ', melebihi durasi video!' : ''})</span>`
+        : `<span class="text-xs muted">${fmtTime(slot.startSec)} – ${fmtTime(slot.endSec)} (${Math.round(segLen)}s)</span>`;
+
       el.innerHTML = `
         <div class="topn-slot-head">
           <span class="rank-badge">#${rankNum}${isClimax ? ' 👑 KLIMAKS' : ''}</span>
-          <span class="text-xs muted">${fmtTime(slot.startSec)} – ${fmtTime(slot.endSec)} (${Math.round(slot.endSec - slot.startSec)}s)</span>
+          ${durBadge}
           <div class="head-actions ml-auto">
             <button class="btn btn-2xs btn-secondary btn-slot-prev" title="Preview">▶</button>
             <button class="btn btn-2xs btn-ghost btn-slot-up" ${idx === 0 ? 'disabled' : ''}>⬆</button>
@@ -2277,11 +2285,11 @@
           <label class="text-xs">Label Singkat (#${rankNum})
             <input type="text" class="input input-sm slot-lbl" value="${escapeAttr(slot.label || '')}" placeholder="cth: ngetrail / el alasan / paling jago" />
           </label>
-          <label class="text-xs">Start (s)
-            <input type="number" class="input input-sm slot-start" value="${Math.round(slot.startSec)}" min="0" />
+          <label class="text-xs">Start (mm:ss / dtk)
+            <input type="text" class="input input-sm slot-start" value="${Math.round(slot.startSec)}" title="Bisa ketik detik (2940) atau menit (49:00)" />
           </label>
-          <label class="text-xs">End (s)
-            <input type="number" class="input input-sm slot-end" value="${Math.round(slot.endSec)}" min="1" />
+          <label class="text-xs">End (mm:ss / dtk)
+            <input type="text" class="input input-sm slot-end" value="${Math.round(slot.endSec)}" title="Bisa ketik detik (2951) atau menit (49:11)" />
           </label>
           <label class="text-xs">SFX Punch Akhir
             <select class="input input-sm slot-sfx">${sfxOpts}</select>
@@ -2291,14 +2299,14 @@
 
       el.querySelector('.slot-lbl').addEventListener('input', (e) => (slot.label = e.target.value));
       el.querySelector('.slot-start').addEventListener('change', (e) => {
-        slot.startSec = Math.max(0, parseFloat(e.target.value) || 0);
+        slot.startSec = Math.max(0, Math.round(parseTimeInput(e.target.value)));
         if (slot.endSec <= slot.startSec + 2) {
           slot.endSec = slot.startSec + 15;
         }
         renderTopNBuilder();
       });
       el.querySelector('.slot-end').addEventListener('change', (e) => {
-        slot.endSec = Math.max(slot.startSec + 2, parseFloat(e.target.value) || slot.startSec + 15);
+        slot.endSec = Math.max(slot.startSec + 2, Math.round(parseTimeInput(e.target.value)));
         renderTopNBuilder();
       });
       el.querySelector('.slot-sfx').addEventListener('change', (e) => (slot.endSfxId = e.target.value));
@@ -2399,12 +2407,23 @@
 
   $('btnRenderTopN').addEventListener('click', async () => {
     if (state.topNSlots.length === 0) return;
-    // Sanity-check every slot so End is always > Start before queueing
+    // Sanity-check every slot so End is always > Start, within video duration, and <= 180s before queueing
     const n = state.topNSlots.length;
     for (let i = 0; i < n; i++) {
       const s = state.topNSlots[i];
+      const rankNum = n - i;
+      const proj = state.projects.find((p) => p.id === s.projectId);
+      const maxDur = proj?.durationSec || 0;
       if (!s.endSec || s.endSec <= s.startSec + 1) {
-        toast(`Klip #${n - i} (${s.label || 'tanpa label'}) durasinya tidak valid: End (${s.endSec}s) harus > Start (${s.startSec}s)!`, 'err');
+        toast(`Klip #${rankNum} (${s.label || 'tanpa label'}) tidak valid: End (${s.endSec}s) harus > Start (${s.startSec}s)!`, 'err');
+        return;
+      }
+      if (maxDur > 0 && s.endSec > maxDur + 2) {
+        toast(`⚠️ Klip #${rankNum} (${s.label || ''}) TYPO! End (${s.endSec}s) melebihi durasi video (${Math.round(maxDur)}s / ${fmtTime(maxDur)})!`, 'err');
+        return;
+      }
+      if (s.endSec - s.startSec > 180) {
+        toast(`⚠️ Klip #${rankNum} (${s.label || ''}) terlalu panjang (${Math.round(s.endSec - s.startSec)} dtk — maks 180 dtk per slot Top-N). Cek lagi angka Start/End!`, 'err');
         return;
       }
     }
