@@ -162,6 +162,21 @@ func (wp *WorkerPool) EnqueueCompilation(opts model.CompileOptions) (*model.Rend
 	if len(opts.Segments) == 0 {
 		return nil, fmt.Errorf("minimal 1 klip diperlukan untuk membuat Top-N / Kompilasi")
 	}
+	// Upfront validation of every segment so bad timestamps never fail halfway through downloading!
+	total := len(opts.Segments)
+	for i := range opts.Segments {
+		seg := &opts.Segments[i]
+		rankNum := total - i
+		if seg.StartSec < 0 {
+			seg.StartSec = 0
+		}
+		if seg.EndSec <= seg.StartSec+0.5 {
+			return nil, fmt.Errorf("durasi klip #%d (%s) tidak valid: End (%.0fs) harus lebih besar dari Start (%.0fs)", rankNum, seg.Label, seg.EndSec, seg.StartSec)
+		}
+		if _, ok := wp.Store.GetProject(seg.ProjectID); !ok {
+			return nil, fmt.Errorf("project untuk klip #%d tidak ditemukan", rankNum)
+		}
+	}
 	camp, _ := wp.Store.GetCampaign(opts.CampaignID)
 	settings := wp.Store.GetSettings()
 	if opts.Encoder == "" {
@@ -471,6 +486,10 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 	resolved := make([]ResolvedCompileSegment, 0, total)
 	allRankLabels := make(map[int]string)
 
+	// Cache resolved stream URLs & subtitles per project so a 5-clip Top-N only calls yt-dlp ONCE (prevents YouTube 403!)
+	streamCache := make(map[string]*youtube.StreamPair)
+	cuesCache := make(map[string][]model.TranscriptCue)
+
 	// Step 1: Download or map each segment (countdown rank = total - i, e.g. 5, 4, 3, 2, 1!)
 	for i, seg := range opts.Segments {
 		if ctx.Err() != nil {
@@ -489,8 +508,21 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 			return
 		}
 		if seg.EndSec <= seg.StartSec {
-			wp.failJob(job, fmt.Sprintf("Durasi segmen #%d tidak valid", rankNum))
+			wp.failJob(job, fmt.Sprintf("Durasi segmen #%d (%s) tidak valid: End (%.0fs) harus > Start (%.0fs)", rankNum, lbl, seg.EndSec, seg.StartSec))
 			return
+		}
+
+		// Load project subtitles once if available
+		var segCues []model.TranscriptCue
+		if cachedCues, exists := cuesCache[proj.ID]; exists {
+			segCues = cachedCues
+		} else {
+			if proj.SubtitlePath != "" && fileExists(proj.SubtitlePath) {
+				if parsed, err := youtube.ParseSubtitleFile(proj.SubtitlePath); err == nil {
+					segCues = parsed
+				}
+			}
+			cuesCache[proj.ID] = segCues
 		}
 
 		srcPath := ""
@@ -502,12 +534,40 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 			dlPct := 5.0 + (float64(i)/float64(total))*30.0
 			wp.updateJob(job, "downloading", fmt.Sprintf("Download segmen %d/%d (#%d %s)...", i+1, total, rankNum, lbl), dlPct, "")
 			secFile := filepath.Join(workDir, fmt.Sprintf("dl_%d.mp4", i))
-			if err := wp.YT.DownloadSection(ctx, proj.SourceURL, seg.StartSec, seg.EndSec, secFile, settings, nil); err != nil {
+
+			// Resolve stream pair once per project URL -> slice directly via FFmpeg (zero YouTube API spam!)
+			pair, hasCached := streamCache[proj.ID]
+			if !hasCached {
+				wp.updateJob(job, "downloading", fmt.Sprintf("Menyiapkan stream anti-403 (%d klip)...", total), 4, "")
+				if resolvedPair, err := wp.YT.ResolveStreamPair(ctx, proj.SourceURL, settings); err == nil {
+					pair = resolvedPair
+					streamCache[proj.ID] = pair
+				} else {
+					streamCache[proj.ID] = nil
+				}
+			}
+
+			var dlErr error
+			if pair != nil {
+				dlErr = wp.YT.CutSectionFromStreams(ctx, pair, seg.StartSec, seg.EndSec, secFile)
+			} else {
+				dlErr = fmt.Errorf("stream cache tidak tersedia")
+			}
+
+			// Automatic fallback to 3-tier resilient yt-dlp DownloadSection (H.264 -> HLS m3u8 -> 720p IPv4)
+			if dlErr != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				wp.failJob(job, fmt.Sprintf("Gagal download segmen #%d: %v", rankNum, err))
-				return
+				wp.Broker.Log("worker", "info", fmt.Sprintf("[W%d] Direct slice segmen #%d fallback ke 3-tier yt-dlp...", workerID, rankNum))
+				wp.updateJob(job, "downloading", fmt.Sprintf("Download ulang segmen %d/%d (#%d %s)...", i+1, total, rankNum, lbl), dlPct, "")
+				if err := wp.YT.DownloadSection(ctx, proj.SourceURL, seg.StartSec, seg.EndSec, secFile, settings, nil); err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					wp.failJob(job, fmt.Sprintf("Gagal download segmen #%d: %v", rankNum, err))
+					return
+				}
 			}
 			srcPath = secFile
 			seekStart = 0
@@ -526,6 +586,7 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 			ClipDuration: seg.EndSec - seg.StartSec,
 			RankNumber:   rankNum,
 			Label:        lbl,
+			Cues:         segCues,
 			OrigStart:    seg.StartSec,
 			OrigEnd:      seg.EndSec,
 			EndSFXPath:   endSfxPath,

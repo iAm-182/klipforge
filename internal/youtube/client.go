@@ -394,30 +394,201 @@ var ytDlpPctRe = regexp.MustCompile(`(\d{1,3}(?:\.\d+)?)%`)
 func formatSelector(quality string) string {
 	switch quality {
 	case "720p":
-		return "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/bv*[height<=720]+ba/best[height<=720]/best"
+		return "bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/bv*[height<=720]+ba/best[height<=720]/best"
 	case "best":
-		return "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/best"
-	default: // 1080p
-		return "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/bv*[height<=1080]+ba/best[height<=1080]/best"
+		return "bv*[vcodec^=avc1]+ba[ext=m4a]/bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/best"
+	default: // 1080p — prefer H.264 (avc1) to avoid AV1 itag=399 403/slow-decode issues!
+		return "bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/bv*[height<=1080]+ba/best[height<=1080]/best"
 	}
 }
 
-// DownloadSection downloads only the requested [startSec, endSec] range using yt-dlp --download-sections.
+func hlsFallbackSelector(quality string) string {
+	if quality == "720p" {
+		return "bv*[height<=720][protocol*=m3u8]+ba[protocol*=m3u8]/b[height<=720][protocol*=m3u8]/bv*[height<=720][vcodec^=avc1]+ba/best[height<=720]/best"
+	}
+	return "bv*[height<=1080][protocol*=m3u8]+ba[protocol*=m3u8]/b[height<=1080][protocol*=m3u8]/bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]/best[height<=720]/best"
+}
+
+// StreamPair holds resolved direct video+audio stream URLs from a single yt-dlp lookup,
+// allowing multi-segment Top-N downloads without repeatedly hammering YouTube API (prevents 403!).
+type StreamPair struct {
+	VideoURL  string
+	AudioURL  string
+	UserAgent string
+}
+
+// ResolveStreamPair resolves direct stream URLs once via yt-dlp -g so multiple sections can be sliced fast with FFmpeg.
+// Prefers chunked HLS (m3u8) first because it seeks 4-hour VODs cleanly at ~1x speed and avoids DASH 403 rate-limits!
+func (c *Client) ResolveStreamPair(ctx context.Context, videoURL string, settings model.AppSettings) (*StreamPair, error) {
+	ytBin := c.Deps.GetStatus().YtDlpPath
+	if ytBin == "" {
+		return nil, fmt.Errorf("yt-dlp tidak ditemukan")
+	}
+	formats := []string{
+		hlsFallbackSelector(settings.DownloadQuality),
+		formatSelector(settings.DownloadQuality),
+	}
+	var lastErr error
+	for _, fmtSel := range formats {
+		args := append(c.baseArgs(settings),
+			"-f", fmtSel,
+			"-g",
+			videoURL,
+		)
+		cmd := exec.CommandContext(ctx, ytBin, args...)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			lastErr = fmt.Errorf("%s", strings.TrimSpace(stderr.String()))
+			continue
+		}
+		var urls []string
+		for _, ln := range strings.Split(stdout.String(), "\n") {
+			ln = strings.TrimSpace(ln)
+			if strings.HasPrefix(ln, "http://") || strings.HasPrefix(ln, "https://") {
+				urls = append(urls, ln)
+			}
+		}
+		if len(urls) >= 2 {
+			return &StreamPair{VideoURL: urls[0], AudioURL: urls[1]}, nil
+		}
+		if len(urls) == 1 {
+			return &StreamPair{VideoURL: urls[0]}, nil
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("stream URL tidak ditemukan")
+	}
+	return nil, lastErr
+}
+
+// CutSectionFromStreams slices [startSec, endSec] directly via FFmpeg using pre-resolved stream URLs (ultrafast + reconnect!).
+func (c *Client) CutSectionFromStreams(ctx context.Context, pair *StreamPair, startSec, endSec float64, destMP4 string) error {
+	ffBin := c.Deps.GetStatus().FFmpegPath
+	if ffBin == "" {
+		return fmt.Errorf("ffmpeg tidak ditemukan")
+	}
+	if pair == nil || pair.VideoURL == "" {
+		return fmt.Errorf("stream URL kosong")
+	}
+	if startSec < 0 {
+		startSec = 0
+	}
+	dur := endSec - startSec
+	if dur <= 0.1 {
+		return fmt.Errorf("durasi potong tidak valid")
+	}
+
+	_ = os.Remove(destMP4)
+	reconnect := []string{"-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"}
+	args := []string{"-y", "-hide_banner", "-loglevel", "error"}
+	args = append(args, reconnect...)
+	args = append(args, "-ss", fmt.Sprintf("%.3f", startSec), "-t", fmt.Sprintf("%.3f", dur), "-i", pair.VideoURL)
+	if pair.AudioURL != "" {
+		args = append(args, reconnect...)
+		args = append(args, "-ss", fmt.Sprintf("%.3f", startSec), "-t", fmt.Sprintf("%.3f", dur), "-i", pair.AudioURL)
+		args = append(args, "-map", "0:v:0", "-map", "1:a:0")
+	} else {
+		args = append(args, "-map", "0:v:0", "-map", "0:a:0?")
+	}
+	args = append(args,
+		"-c:v", "libx264", "-preset", "ultrafast", "-crf", "18", "-pix_fmt", "yuv420p",
+		"-c:a", "aac", "-b:a", "128k",
+		"-movflags", "+faststart",
+		destMP4,
+	)
+
+	cmd := exec.CommandContext(ctx, ffBin, args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		_ = os.Remove(destMP4)
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return fmt.Errorf("ffmpeg direct slice gagal: %s", msg)
+	}
+	if fi, err := os.Stat(destMP4); err != nil || fi.Size() < 4096 {
+		_ = os.Remove(destMP4)
+		return fmt.Errorf("hasil potongan video kosong")
+	}
+	return nil
+}
+
+// DownloadSection downloads only the requested [startSec, endSec] range using yt-dlp --download-sections,
+// with fast ultrafast keyframe re-encode, H.264 preference, and 3-tier anti-403 retry + HLS/m3u8 fallback!
 func (c *Client) DownloadSection(ctx context.Context, videoURL string, startSec, endSec float64, destMP4 string, settings model.AppSettings, onProgress func(pct float64, line string)) error {
 	if startSec < 0 {
 		startSec = 0
 	}
 	section := fmt.Sprintf("*%.2f-%.2f", startSec, endSec)
-	args := append(c.baseArgs(settings),
-		"-f", formatSelector(settings.DownloadQuality),
-		"--merge-output-format", "mp4",
-		"--download-sections", section,
-		"--force-keyframes-at-cuts",
-		"--newline",
-		"-o", destMP4,
-		videoURL,
-	)
-	return c.runDownloadCmd(ctx, args, onProgress)
+
+	attempts := []struct {
+		label  string
+		fmtSel string
+		extra  []string
+		delay  time.Duration
+	}{
+		{
+			label:  "H.264 Primary",
+			fmtSel: formatSelector(settings.DownloadQuality),
+			delay:  0,
+		},
+		{
+			label:  "HLS m3u8 Anti-403 Fallback",
+			fmtSel: hlsFallbackSelector(settings.DownloadQuality),
+			delay:  3 * time.Second,
+		},
+		{
+			label:  "720p Universal Fallback",
+			fmtSel: "bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]/b[height<=720][ext=mp4]/best[height<=720]/best",
+			extra:  []string{"--force-ipv4"},
+			delay:  4 * time.Second,
+		},
+	}
+
+	var lastErr error
+	for idx, att := range attempts {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if att.delay > 0 {
+			if onProgress != nil {
+				onProgress(-1, fmt.Sprintf("Retry %d/3 (%s) setelah error YouTube...", idx+1, att.label))
+			}
+			select {
+			case <-time.After(att.delay):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		_ = os.Remove(destMP4)
+		args := append(c.baseArgs(settings),
+			"-f", att.fmtSel,
+			"--merge-output-format", "mp4",
+			"--download-sections", section,
+			"--force-keyframes-at-cuts",
+			"--downloader-args", "ffmpeg_o:-c:v libx264 -preset ultrafast -crf 18 -c:a aac -b:a 128k",
+			"--retries", "5",
+			"--fragment-retries", "5",
+			"--sleep-requests", "1",
+			"--newline",
+		)
+		args = append(args, att.extra...)
+		args = append(args, "-o", destMP4, videoURL)
+
+		err := c.runDownloadCmd(ctx, args, onProgress)
+		if err == nil {
+			if fi, statErr := os.Stat(destMP4); statErr == nil && fi.Size() > 4096 {
+				return nil
+			}
+			err = fmt.Errorf("file hasil download kosong")
+		}
+		lastErr = err
+	}
+	return lastErr
 }
 
 // DownloadFullVideo downloads the full source MP4 video locally for instant scrubbing, audio analysis & fast re-renders.
@@ -425,6 +596,9 @@ func (c *Client) DownloadFullVideo(ctx context.Context, videoURL, destMP4 string
 	args := append(c.baseArgs(settings),
 		"-f", formatSelector(settings.DownloadQuality),
 		"--merge-output-format", "mp4",
+		"--retries", "10",
+		"--fragment-retries", "10",
+		"--sleep-requests", "1",
 		"--newline",
 		"-o", destMP4,
 		videoURL,

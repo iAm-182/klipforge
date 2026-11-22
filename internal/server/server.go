@@ -1087,7 +1087,15 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "Job tidak ditemukan")
 		return
 	}
-	newJob, err := s.Worker.Enqueue(oldJob.Options)
+	var (
+		newJob *model.RenderJob
+		err    error
+	)
+	if oldJob.JobType == "compilation" && oldJob.CompileOpts != nil {
+		newJob, err = s.Worker.EnqueueCompilation(*oldJob.CompileOpts)
+	} else {
+		newJob, err = s.Worker.Enqueue(oldJob.Options)
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return

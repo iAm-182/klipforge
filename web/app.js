@@ -2283,6 +2283,9 @@
       el.querySelector('.slot-lbl').addEventListener('input', (e) => (slot.label = e.target.value));
       el.querySelector('.slot-start').addEventListener('change', (e) => {
         slot.startSec = Math.max(0, parseFloat(e.target.value) || 0);
+        if (slot.endSec <= slot.startSec + 2) {
+          slot.endSec = slot.startSec + 15;
+        }
         renderTopNBuilder();
       });
       el.querySelector('.slot-end').addEventListener('change', (e) => {
@@ -2320,8 +2323,9 @@
 
   $('btnAddManualToTopN').addEventListener('click', () => {
     if (!state.activeProject) return;
-    const s = parseFloat($('manualStart').value) || 0;
-    const e = parseFloat($('manualEnd').value) || s + 18;
+    const s = Math.max(0, parseFloat($('manualStart').value) || 0);
+    const rawE = parseFloat($('manualEnd').value) || (s + 18);
+    const e = rawE > s + 2 ? rawE : (s + 18);
     const lbl = $('manualHook').value.trim() || `momen ${fmtTime(s)}`;
     addSlotToTopN({ projectId: state.activeProject.id, startSec: s, endSec: e, label: lbl, endSfxId: 'sfx-metal-pipe', endSfxOffset: 1.0 });
   });
@@ -2386,6 +2390,15 @@
 
   $('btnRenderTopN').addEventListener('click', async () => {
     if (state.topNSlots.length === 0) return;
+    // Sanity-check every slot so End is always > Start before queueing
+    const n = state.topNSlots.length;
+    for (let i = 0; i < n; i++) {
+      const s = state.topNSlots[i];
+      if (!s.endSec || s.endSec <= s.startSec + 1) {
+        toast(`Klip #${n - i} (${s.label || 'tanpa label'}) durasinya tidak valid: End (${s.endSec}s) harus > Start (${s.startSec}s)!`, 'err');
+        return;
+      }
+    }
     const camp = getActiveCampaign();
     const payload = {
       campaignId: camp ? camp.id : '',
