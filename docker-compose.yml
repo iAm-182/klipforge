@@ -1,0 +1,21 @@
+services:
+  klipforge:
+    build: .
+    container_name: klipforge-engine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+
+  # Optional: Connect automatically to https://klip.breakthematrix.id via Cloudflare Tunnel
+  # Set CF_TUNNEL_TOKEN in .env on your VPS
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: klipforge-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
+    network_mode: service:klipforge
+    profiles:
+      - tunnel

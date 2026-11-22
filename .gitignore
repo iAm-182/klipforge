@@ -1,0 +1,23 @@
+# Binaries & build artifacts
+klipforge.exe
+klipforge
+bin/*.exe
+bin/yt-dlp
+bin/cloudflared
+
+# Runtime user data, clips & secrets (NEVER commit!)
+data/
+outputs/
+.env
+.env.*
+.tunnel-token
+.bridge-secret
+.cloudflared.log
+.tmp_*.json
+cookies.txt
+*.log
+
+# Wrangler / Node local artifacts
+cloudflare/.wrangler/
+cloudflare/node_modules/
+node_modules/
