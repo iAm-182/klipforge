@@ -1,19 +1,21 @@
 package store
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"klipforge/internal/model"
 )
 
-// Store manages thread-safe persistent JSON storage for campaigns, projects, jobs, and settings.
+// Store manages thread-safe persistent JSON storage for campaigns, projects, jobs, team members, and settings.
 type Store struct {
 	mu        sync.RWMutex
 	BaseDir   string
@@ -25,6 +27,7 @@ type Store struct {
 	projects   map[string]*model.Project
 	jobs       map[string]*model.RenderJob
 	autopilots map[string]*model.AutopilotRule
+	team       map[string]*model.TeamMember
 	settings   model.AppSettings
 }
 
@@ -49,6 +52,7 @@ func NewStore(baseDir string) (*Store, error) {
 		projects:   make(map[string]*model.Project),
 		jobs:       make(map[string]*model.RenderJob),
 		autopilots: make(map[string]*model.AutopilotRule),
+		team:       make(map[string]*model.TeamMember),
 		settings: model.AppSettings{
 			MaxWorkers:      2,
 			DefaultEncoder:  "libx264",
@@ -162,6 +166,19 @@ func (s *Store) loadAll() {
 		for _, r := range rules {
 			if r.ID != "" {
 				s.autopilots[r.ID] = r
+			}
+		}
+	}
+
+	// Load team members (personal web AccessKey + personal Muse AgentKey)
+	var members []*model.TeamMember
+	if readJSONWithBackupFallback(filepath.Join(s.DataDir, "team.json"), &members) {
+		for _, m := range members {
+			if m.ID != "" {
+				if m.MaxActive <= 0 {
+					m.MaxActive = 3
+				}
+				s.team[m.ID] = m
 			}
 		}
 	}
@@ -682,4 +699,158 @@ func (s *Store) SaveSettings(cfg model.AppSettings) error {
 	_ = os.MkdirAll(cfg.OutputDir, 0o755)
 	s.settings = cfg
 	return writeJSONAtomic(filepath.Join(s.DataDir, "settings.json"), s.settings)
+}
+
+// --- Team Members CRUD & Key Lookup ---
+
+func constantTimeStrEq(a, b string) bool {
+	sa := strings.TrimSpace(a)
+	sb := strings.TrimSpace(b)
+	if sa == "" || len(sa) != len(sb) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(sa), []byte(sb)) == 1
+}
+
+func (s *Store) saveTeamLocked() error {
+	list := make([]*model.TeamMember, 0, len(s.team))
+	for _, m := range s.team {
+		list = append(list, m)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].CreatedAt.Before(list[j].CreatedAt)
+	})
+	return writeJSONAtomic(filepath.Join(s.DataDir, "team.json"), list)
+}
+
+func (s *Store) ListTeam() []*model.TeamMember {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	list := make([]*model.TeamMember, 0, len(s.team))
+	for _, m := range s.team {
+		cp := *m
+		list = append(list, &cp)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].CreatedAt.Before(list[j].CreatedAt)
+	})
+	return list
+}
+
+func (s *Store) GetTeamMember(id string) (*model.TeamMember, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	m, ok := s.team[id]
+	if !ok {
+		return nil, false
+	}
+	cp := *m
+	return &cp, true
+}
+
+func (s *Store) SaveTeamMember(m *model.TeamMember) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	if ex, ok := s.team[m.ID]; ok {
+		m.CreatedAt = ex.CreatedAt
+		if m.LastSeenAt == nil {
+			m.LastSeenAt = ex.LastSeenAt
+		}
+	} else if m.CreatedAt.IsZero() {
+		m.CreatedAt = now
+	}
+	if m.MaxActive <= 0 {
+		m.MaxActive = 3
+	}
+	if m.Role != "owner" && m.Role != "qc" && m.Role != "clipper" {
+		m.Role = "clipper"
+	}
+	cp := *m
+	s.team[m.ID] = &cp
+	return s.saveTeamLocked()
+}
+
+func (s *Store) DeleteTeamMember(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.team, id)
+	return s.saveTeamLocked()
+}
+
+// FindTeamByAccessKey looks up an enabled team member by personal web AccessKey in constant time.
+func (s *Store) FindTeamByAccessKey(key string) (*model.TeamMember, bool) {
+	k := strings.TrimSpace(key)
+	if k == "" {
+		return nil, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var match *model.TeamMember
+	for _, m := range s.team {
+		if m.Enabled && constantTimeStrEq(m.AccessKey, k) {
+			cp := *m
+			match = &cp
+		}
+	}
+	if match == nil {
+		return nil, false
+	}
+	return match, true
+}
+
+// FindTeamByAgentKey looks up an enabled team member by personal Muse AgentKey in constant time.
+func (s *Store) FindTeamByAgentKey(key string) (*model.TeamMember, bool) {
+	k := strings.TrimSpace(key)
+	if k == "" {
+		return nil, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var match *model.TeamMember
+	for _, m := range s.team {
+		if m.Enabled && constantTimeStrEq(m.AgentKey, k) {
+			cp := *m
+			match = &cp
+		}
+	}
+	if match == nil {
+		return nil, false
+	}
+	return match, true
+}
+
+// TouchTeamMemberLastSeen updates LastSeenAt in memory and persists at most once per 60 seconds.
+func (s *Store) TouchTeamMemberLastSeen(id string) {
+	if id == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.team[id]
+	if !ok {
+		return
+	}
+	now := time.Now()
+	shouldPersist := m.LastSeenAt == nil || now.Sub(*m.LastSeenAt) >= 60*time.Second
+	m.LastSeenAt = &now
+	if shouldPersist {
+		_ = s.saveTeamLocked()
+	}
+}
+
+// CountActiveJobsByMember counts queued/downloading/rendering jobs created by a specific member ID.
+func (s *Store) CountActiveJobsByMember(memberID string) int {
+	if memberID == "" {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for _, j := range s.jobs {
+		if j.CreatedByID == memberID && (j.Status == "queued" || j.Status == "downloading" || j.Status == "rendering") {
+			n++
+		}
+	}
+	return n
 }

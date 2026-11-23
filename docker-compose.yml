@@ -5,17 +5,36 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8787:8787"
+    environment:
+      # Wajib sama persis dengan secret di Cloudflare Worker (klip.breakthematrix.id)
+      - KLIPFORGE_ENGINE_TOKEN=${KLIPFORGE_ENGINE_TOKEN:-}
+      - KLIPFORGE_AGENT_KEY=${KLIPFORGE_AGENT_KEY:-}
+      - KLIPFORGE_BRIDGE_SECRET=${KLIPFORGE_BRIDGE_SECRET:-}
+      - KLIPFORGE_EDGE_URL=${KLIPFORGE_EDGE_URL:-https://klip.breakthematrix.id}
+      # Opsional: kalau akses langsung lewat subdomain VPS sendiri (mis. https://engine.breakthematrix.id)
+      - KLIPFORGE_EXTRA_ORIGIN=${KLIPFORGE_EXTRA_ORIGIN:-}
     volumes:
       - ./data:/app/data
       - ./outputs:/app/outputs
 
-  # Optional: Connect automatically to https://klip.breakthematrix.id via Cloudflare Tunnel
-  # Set CF_TUNNEL_TOKEN in .env on your VPS
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: klipforge-tunnel
+  # Opsional 1 (Recommended): Auto-HTTPS Reverse Proxy pakai Caddy (aktifkan: docker compose --profile caddy up -d)
+  caddy:
+    image: caddy:2-alpine
+    container_name: klipforge-caddy
+    profiles: ["caddy"]
     restart: unless-stopped
-    command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
-    network_mode: service:klipforge
-    profiles:
-      - tunnel
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - ENGINE_DOMAIN=${ENGINE_DOMAIN:-engine.breakthematrix.id}
+    volumes:
+      - ./deploy/vps/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - klipforge
+
+volumes:
+  caddy_data:
+  caddy_config:

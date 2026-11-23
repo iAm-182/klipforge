@@ -7,11 +7,17 @@
     settings: null,
     disk: null,
     security: null,
+    user: null,
+    team: [],
+    teamStats: {},
+    teamEdgeSyncConfigured: false,
     campaigns: [],
     autopilots: [],
     editingAutopilotId: '',
     reviewFilter: 'pending_review',
+    reviewMemberFilter: 'all',
     libFilter: 'all',
+    libMemberFilter: 'all',
     topNSlots: [], // Ordered compilation slots (first plays as #N, last plays as #1 climax!)
     audioAssets: [],
     audioPresets: [],
@@ -262,6 +268,7 @@
       state.settings = status.settings;
       state.disk = status.disk || null;
       state.security = status.security || null;
+      state.user = status.user || { id: 'owner', name: 'Owner', role: status.security?.role || 'owner', via: 'web' };
       state.campaigns = campaigns || [];
       state.projects = projects || [];
       state.jobs = jobs || [];
@@ -269,6 +276,11 @@
       state.autopilots = autopilots || [];
       state.audioPresets = audioPresets || [];
 
+      renderUserIdentityAndRoleUI();
+      if (isOwnerRole()) {
+        await loadTeamData();
+      }
+      renderMemberFilterDropdowns();
       renderDepsAndSettings();
       renderAudioLibrary();
       if (state.campaigns.length > 0) {
@@ -1428,6 +1440,68 @@
     $('navJobCount').textContent = active > 0 ? `${active}⚡` : total;
   }
 
+  function renderCreatorChip(j) {
+    const who = (j.createdBy || '').trim();
+    if (!who) return '';
+    const isAgent = j.createdVia === 'agent';
+    const icon = isAgent ? '🤖' : '👤';
+    const suffix = isAgent ? ' (Muse)' : '';
+    const rev = j.reviewedBy ? ` <span class="creator-chip" title="Direview oleh">✓ QC: ${escapeHtml(j.reviewedBy)}</span>` : '';
+    return `<span class="creator-chip ${isAgent ? 'via-agent' : ''}">${icon} ${escapeHtml(who + suffix)}</span>${rev}`;
+  }
+
+  function isOwnerRole() {
+    const r = state.user?.role || state.security?.role || 'owner';
+    return r === 'owner' || r === 'admin';
+  }
+
+  function canReviewRole() {
+    const r = state.user?.role || state.security?.role || 'owner';
+    return r === 'owner' || r === 'admin' || r === 'qc';
+  }
+
+  function renderUserIdentityAndRoleUI() {
+    const badge = $('userBadge');
+    const u = state.user || { name: 'Owner', role: 'owner' };
+    if (badge) {
+      const roleIcon = u.role === 'qc' ? '🕵️' : (u.role === 'clipper' ? '🎬' : '👑');
+      const roleLbl = u.role === 'qc' ? 'QC' : (u.role === 'clipper' ? 'Clipper' : 'Owner');
+      badge.textContent = `${roleIcon} ${u.name || roleLbl} (${roleLbl})`;
+      badge.className = `user-pill role-${u.role || 'owner'}`;
+    }
+    const owner = isOwnerRole();
+    const teamCard = $('teamManagementCard');
+    if (teamCard) teamCard.classList.toggle('hidden', !owner);
+    // Softly hide owner-only destructive controls for clippers/QC (backend strictly enforces 403 too)
+    ['btnSaveSettings', 'btnCleanupStorage', 'btnUpdateYtDlp', 'btnHomeUpdateYt', 'btnHomeCleanup', 'btnDeleteCamp', 'btnSaveCamp', 'btnNewCampaign', 'btnDeleteProject', 'btnSaveAutopilot', 'btnDeleteAutopilot', 'btnNewAutopilot'].forEach((id) => {
+      if ($(id)) $(id).classList.toggle('hidden', !owner);
+    });
+  }
+
+  function renderMemberFilterDropdowns() {
+    const names = new Map();
+    names.set('owner', '👑 Owner');
+    (state.team || []).forEach((m) => names.set(m.id, `${m.role === 'qc' ? '🕵️' : '🎬'} ${m.name}`));
+    (state.jobs || []).forEach((j) => {
+      if (j.createdById && j.createdBy && !names.has(j.createdById)) {
+        names.set(j.createdById, `👤 ${j.createdBy}`);
+      }
+    });
+    ['libMemberFilter', 'reviewMemberFilter'].forEach((selId) => {
+      const sel = $(selId);
+      if (!sel) return;
+      const cur = selId === 'libMemberFilter' ? state.libMemberFilter : state.reviewMemberFilter;
+      sel.innerHTML = '<option value="all">👤 Semua Anggota</option>';
+      names.forEach((label, id) => {
+        const opt = document.createElement('option');
+        opt.value = id;
+        opt.textContent = label;
+        sel.appendChild(opt);
+      });
+      sel.value = names.has(cur) ? cur : 'all';
+    });
+  }
+
   function renderJobs() {
     const box = $('jobsList');
     let list = state.jobs;
@@ -1439,6 +1513,9 @@
       list = state.jobs.filter((j) => j.reviewStatus === 'approved');
     } else if (state.libFilter === 'error') {
       list = state.jobs.filter((j) => j.status === 'error' || j.status === 'canceled');
+    }
+    if (state.libMemberFilter && state.libMemberFilter !== 'all') {
+      list = list.filter((j) => (j.createdById || 'owner') === state.libMemberFilter);
     }
 
     if (list.length === 0) {
@@ -1467,12 +1544,14 @@
       const metaLine = j.status === 'done'
         ? `${j.campaignName} · ${j.finalDuration ? j.finalDuration.toFixed(1) + 's' : ''} · ${fmtBytes(j.fileSizeBytes)}`
         : `${j.campaignName} · ${j.stage || j.status} ${j.speed ? '(' + j.speed + ')' : ''}`;
+      const canDel = isOwnerRole() || (j.reviewStatus !== 'approved' && (state.user?.role === 'qc' || j.createdById === state.user?.id));
 
       card.innerHTML = `
         <div class="job-head">
           <div>
             <div class="job-title">${escapeHtml(j.title)}</div>
             <div class="text-xs muted">${escapeHtml(metaLine)}</div>
+            <div class="mt-4" style="display:flex;gap:4px;flex-wrap:wrap;">${renderCreatorChip(j)}</div>
           </div>
           <span class="job-status st-${j.status}">${j.status}</span>
         </div>
@@ -1489,7 +1568,7 @@
           ${j.hashtagLine ? `<button class="btn btn-xs btn-ghost btn-copy-hash">#️⃣ Copy Hashtags</button>` : ''}
           ${(j.status === 'queued' || j.status === 'downloading' || j.status === 'rendering') ? `<button class="btn btn-xs btn-danger-ghost btn-cancel-job">⏹ Cancel</button>` : ''}
           ${(j.status === 'error' || j.status === 'canceled') ? `<button class="btn btn-xs btn-secondary btn-retry-job">🔁 Retry</button>` : ''}
-          <button class="btn btn-xs btn-danger-ghost btn-del-job ml-auto">🗑️</button>
+          ${canDel ? `<button class="btn btn-xs btn-danger-ghost btn-del-job ml-auto">🗑️</button>` : ''}
         </div>
       `;
 
@@ -1502,15 +1581,22 @@
       const copyHashBtn = card.querySelector('.btn-copy-hash');
       if (copyHashBtn) copyHashBtn.addEventListener('click', () => copyText(j.hashtagLine, 'Urutan Hashtag wajib disalin!'));
       const cancelBtn = card.querySelector('.btn-cancel-job');
-      if (cancelBtn) cancelBtn.addEventListener('click', () => api(`/api/jobs/${j.id}/cancel`, { method: 'POST' }));
+      if (cancelBtn) cancelBtn.addEventListener('click', () => api(`/api/jobs/${j.id}/cancel`, { method: 'POST' }).catch((e) => toast(e.message, 'err')));
       const retryBtn = card.querySelector('.btn-retry-job');
-      if (retryBtn) retryBtn.addEventListener('click', () => api(`/api/jobs/${j.id}/retry`, { method: 'POST' }).then(() => toast('Job diulang!', 'info')));
-      card.querySelector('.btn-del-job').addEventListener('click', async () => {
-        await api(`/api/jobs/${j.id}`, { method: 'DELETE' });
-        state.jobs = state.jobs.filter((x) => x.id !== j.id);
-        updateJobBadge();
-        renderJobs();
-      });
+      if (retryBtn) retryBtn.addEventListener('click', () => api(`/api/jobs/${j.id}/retry`, { method: 'POST' }).then(() => toast('Job diulang!', 'info')).catch((e) => toast(e.message, 'err')));
+      const delBtn = card.querySelector('.btn-del-job');
+      if (delBtn) {
+        delBtn.addEventListener('click', async () => {
+          try {
+            await api(`/api/jobs/${j.id}`, { method: 'DELETE' });
+            state.jobs = state.jobs.filter((x) => x.id !== j.id);
+            updateJobBadge();
+            renderJobs();
+          } catch (e) {
+            toast(e.message, 'err');
+          }
+        });
+      }
 
       box.appendChild(card);
     });
@@ -2042,6 +2128,233 @@
     }
   });
 
+  // Upload YouTube cookies.txt (1-click VPS anti-bot setup)
+  if ($('fileUploadCookies')) {
+    $('fileUploadCookies').addEventListener('change', async (e) => {
+      const f = e.target.files?.[0];
+      if (!f) return;
+      const fd = new FormData();
+      fd.append('file', f);
+      toast('⬆️ Mengunggah cookies.txt ke engine...', 'info');
+      try {
+        const res = await api('/api/settings/cookies', { method: 'POST', body: fd });
+        if ($('sCookiesFile')) $('sCookiesFile').value = res.cookiesFile || '';
+        if (state.settings) state.settings.cookiesFile = res.cookiesFile || '';
+        toast('✅ cookies.txt aktif untuk yt-dlp (anti-bot VPS siap)!', 'ok');
+      } catch (err) {
+        toast('Upload cookies gagal: ' + err.message, 'err');
+      } finally {
+        e.target.value = '';
+      }
+    });
+  }
+
+  // ==================== Team Mode Management (Per-Member Access Key & Muse Agent Key) ====================
+  function maskKey(k) {
+    const s = String(k || '');
+    if (s.length <= 12) return '••••••••';
+    return `${s.slice(0, 10)}••••••••${s.slice(-4)}`;
+  }
+
+  async function loadTeamData() {
+    try {
+      const res = await api('/api/team');
+      state.team = res.members || [];
+      state.teamStats = res.stats || {};
+      state.teamEdgeSyncConfigured = Boolean(res.edgeSyncConfigured);
+      renderTeamSection();
+      renderMemberFilterDropdowns();
+    } catch (e) {
+      // Non-owners receive 403; hide card silently
+      if ($('teamManagementCard')) $('teamManagementCard').classList.add('hidden');
+    }
+  }
+
+  function renderTeamSection() {
+    const box = $('teamMembersList');
+    if (!box) return;
+    const syncEl = $('teamEdgeSyncStatus');
+    if (syncEl) {
+      syncEl.textContent = state.teamEdgeSyncConfigured
+        ? `☁️ Cloudflare Edge Sync: AKTIF (${state.team.filter((m) => m.enabled).length} aktif)`
+        : '☁️ Mode Lokal / Direct VPS (Edge Sync opsional)';
+    }
+
+    const ownerSt = state.teamStats?.owner || { totalJobs: 0, approvedJobs: 0, activeJobs: 0 };
+    if (state.team.length === 0) {
+      box.innerHTML = `
+        <div class="muted text-xs" style="padding:14px;grid-column:1/-1;background:var(--bg-input);border-radius:10px;border:1px dashed var(--border);">
+          Belum ada anggota tim terdaftar (Owner sudah bikin <strong>${ownerSt.totalJobs}</strong> klip · <strong>${ownerSt.approvedJobs}</strong> approved).<br/>
+          Ketik nama teman di atas lalu klik <strong>➕ Buat Key Anggota</strong> — sistem langsung membuatkan <strong>Web Access Key</strong> + <strong>Muse Agent Key</strong> pribadi dan sinkron ke <code>klip.breakthematrix.id</code>!
+        </div>
+      `;
+      return;
+    }
+
+    box.innerHTML = '';
+    state.team.forEach((m) => {
+      const st = state.teamStats?.[m.id] || { totalJobs: 0, doneJobs: 0, approvedJobs: 0, pendingJobs: 0, activeJobs: 0, agentJobs: 0 };
+      const card = document.createElement('div');
+      card.className = 'team-member-card' + (m.enabled ? '' : ' disabled');
+      const seenTxt = m.lastSeenAt ? `Aktif ${new Date(m.lastSeenAt).toLocaleString('id-ID')}` : 'Belum pernah login';
+      card.innerHTML = `
+        <div class="team-member-head">
+          <div>
+            <strong>${m.enabled ? '🟢' : '🔴'} ${escapeHtml(m.name)}</strong>
+            <div class="text-xs muted">${escapeHtml(seenTxt)} · Maks ${m.maxActive || 3} antrean paralel</div>
+          </div>
+          <span class="team-role-badge r-${escapeAttr(m.role)}">${escapeHtml(m.role)}</span>
+        </div>
+        <div class="team-stat-strip">
+          <span>🎬 ${st.totalJobs} klip</span>
+          <span>🏆 ${st.approvedJobs} approved</span>
+          <span>⏳ ${st.pendingJobs} review</span>
+          <span>🤖 ${st.agentJobs} via Muse</span>
+        </div>
+        <div class="team-key-box">
+          <span title="Access Key Login Web">🔑</span>
+          <code class="tk-acc" data-full="${escapeAttr(m.accessKey)}" data-shown="0">${escapeHtml(maskKey(m.accessKey))}</code>
+          <button class="btn btn-2xs btn-ghost btn-tk-rev-acc" title="Tampilkan/Sembunyikan">👁️</button>
+          <button class="btn btn-2xs btn-secondary btn-tk-cp-acc" title="Copy Web Access Key">📋</button>
+        </div>
+        <div class="team-key-box">
+          <span title="Agent Key untuk Asisten Muse">🤖</span>
+          <code class="tk-agt" data-full="${escapeAttr(m.agentKey)}" data-shown="0">${escapeHtml(maskKey(m.agentKey))}</code>
+          <button class="btn btn-2xs btn-ghost btn-tk-rev-agt" title="Tampilkan/Sembunyikan">👁️</button>
+          <button class="btn btn-2xs btn-secondary btn-tk-cp-agt" title="Copy Muse Agent Key">📋</button>
+        </div>
+        <div class="head-actions" style="flex-wrap:wrap;gap:6px;margin-top:2px;">
+          <button class="btn btn-2xs btn-accent btn-tk-wa">📲 Copy Panduan WA</button>
+          <button class="btn btn-2xs btn-secondary btn-tk-rot">🔄 Rotate Key</button>
+          <button class="btn btn-2xs btn-secondary btn-tk-tog">${m.enabled ? '⏸️ Nonaktifkan' : '▶️ Aktifkan'}</button>
+          <button class="btn btn-2xs btn-danger-ghost btn-tk-del ml-auto">🗑️</button>
+        </div>
+      `;
+
+      const wireReveal = (btnSel, codeSel) => {
+        card.querySelector(btnSel).addEventListener('click', () => {
+          const c = card.querySelector(codeSel);
+          const shown = c.dataset.shown === '1';
+          c.dataset.shown = shown ? '0' : '1';
+          c.textContent = shown ? maskKey(c.dataset.full) : c.dataset.full;
+        });
+      };
+      wireReveal('.btn-tk-rev-acc', '.tk-acc');
+      wireReveal('.btn-tk-rev-agt', '.tk-agt');
+      card.querySelector('.btn-tk-cp-acc').addEventListener('click', () => copyText(m.accessKey, `Access Key ${m.name} disalin!`));
+      card.querySelector('.btn-tk-cp-agt').addEventListener('click', () => copyText(m.agentKey, `Muse Agent Key ${m.name} disalin!`));
+      card.querySelector('.btn-tk-wa').addEventListener('click', () => {
+        const waMsg = [
+          `⚡ *Akses KlipForge Studio — ${m.name} (${m.role.toUpperCase()})*`,
+          ``,
+          `🌐 *Web Dashboard:* https://klip.breakthematrix.id`,
+          `• Username: ${m.name.toLowerCase().replace(/\s+/g, '')}`,
+          `• Password (Access Key): \`${m.accessKey}\``,
+          ``,
+          `🤖 *Untuk Asisten Muse kamu (API Header):*`,
+          `• Base URL: https://klip.breakthematrix.id/api`,
+          `• Header: \`X-Agent-Key: ${m.agentKey}\``,
+          `• Scope Muse: Baca project/transkrip, cari momen, scan & render klip (otomatis tercatat atas nama ${m.name}).`,
+          ``,
+          `_⚠️ Rahasiakan key ini — kalau bocor kabari Owner untuk Rotate 1 klik._`,
+        ].join('\n');
+        copyText(waMsg, `📲 Panduan login & Muse buat ${m.name} siap ditempel ke WA!`);
+      });
+      card.querySelector('.btn-tk-rot').addEventListener('click', async () => {
+        if (!confirm(`Putar ulang (ganti baru) Access Key & Agent Key milik ${m.name}? Key lama langsung tidak berlaku!`)) return;
+        try {
+          await api(`/api/team/${encodeURIComponent(m.id)}/rotate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ target: 'all' }),
+          });
+          await loadTeamData();
+          toast(`🔄 Key baru dibuat untuk ${m.name} & disinkron ke Edge!`, 'ok');
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      });
+      card.querySelector('.btn-tk-tog').addEventListener('click', async () => {
+        try {
+          await api(`/api/team/${encodeURIComponent(m.id)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: !m.enabled }),
+          });
+          await loadTeamData();
+          toast(m.enabled ? `⏸️ Akses ${m.name} (+Muse) dinonaktifkan seketika!` : `▶️ Akses ${m.name} diaktifkan kembali!`, 'info');
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      });
+      card.querySelector('.btn-tk-del').addEventListener('click', async () => {
+        if (!confirm(`Hapus permanen anggota "${m.name}" beserta Access Key & Agent Key-nya?`)) return;
+        try {
+          await api(`/api/team/${encodeURIComponent(m.id)}`, { method: 'DELETE' });
+          await loadTeamData();
+          toast(`🗑️ Anggota ${m.name} dihapus & dicabut dari Edge.`, 'info');
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      });
+      box.appendChild(card);
+    });
+  }
+
+  if ($('btnAddTeamMember')) {
+    $('btnAddTeamMember').addEventListener('click', async () => {
+      const name = ($('teamNewName')?.value || '').trim();
+      if (!name) {
+        toast('Isi nama anggota tim dulu!', 'err');
+        return;
+      }
+      const role = $('teamNewRole')?.value || 'clipper';
+      const maxActive = parseInt($('teamNewMaxActive')?.value || '3', 10) || 3;
+      try {
+        const res = await api('/api/team', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, role, maxActive }),
+        });
+        if ($('teamNewName')) $('teamNewName').value = '';
+        await loadTeamData();
+        toast(
+          res.edgeSynced
+            ? `✅ ${name} dibuat (Access Key + Muse Key) & langsung aktif di klip.breakthematrix.id!`
+            : `✅ ${name} dibuat (Access Key + Muse Key)!`,
+          'ok'
+        );
+      } catch (err) {
+        toast('Gagal tambah anggota: ' + err.message, 'err');
+      }
+    });
+  }
+
+  if ($('btnSyncTeamEdge')) {
+    $('btnSyncTeamEdge').addEventListener('click', async () => {
+      try {
+        const res = await api('/api/team/sync-edge', { method: 'POST' });
+        toast(`☁️ ${res.members} anggota tersinkron ke ${res.edgeUrl}!`, 'ok');
+        await loadTeamData();
+      } catch (err) {
+        toast('Sync gagal: ' + err.message, 'err');
+      }
+    });
+  }
+
+  if ($('libMemberFilter')) {
+    $('libMemberFilter').addEventListener('change', (e) => {
+      state.libMemberFilter = e.target.value || 'all';
+      renderJobs();
+    });
+  }
+  if ($('reviewMemberFilter')) {
+    $('reviewMemberFilter').addEventListener('change', (e) => {
+      state.reviewMemberFilter = e.target.value || 'all';
+      renderReviewInbox();
+    });
+  }
+
   $('btnClearLogs').addEventListener('click', () => ($('liveConsole').innerHTML = ''));
 
   // ==================== Audio & SFX Library ====================
@@ -2275,12 +2588,16 @@
     $('cntRejected').textContent = rejected.length;
     $('navReviewCount').textContent = pending.length;
 
-    const list = state.reviewFilter === 'approved' ? approved : (state.reviewFilter === 'rejected' ? rejected : pending);
+    let list = state.reviewFilter === 'approved' ? approved : (state.reviewFilter === 'rejected' ? rejected : pending);
+    if (state.reviewMemberFilter && state.reviewMemberFilter !== 'all') {
+      list = list.filter((j) => (j.createdById || 'owner') === state.reviewMemberFilter);
+    }
     if (list.length === 0) {
       box.innerHTML = `<div class="muted" style="padding:20px;">Tidak ada klip pada kategori ini. Aktifkan Autopilot atau render klip dari Studio!</div>`;
       return;
     }
 
+    const canReview = canReviewRole();
     box.innerHTML = '';
     list.forEach((j) => {
       const card = document.createElement('div');
@@ -2297,6 +2614,7 @@
           <div>
             <div class="job-title">${escapeHtml(j.title)}</div>
             <div class="text-xs muted">${escapeHtml(j.campaignName)} · ${j.finalDuration ? j.finalDuration.toFixed(1) + 's' : j.stage} · ${fmtBytes(j.fileSizeBytes)}</div>
+            <div class="mt-4" style="display:flex;gap:4px;flex-wrap:wrap;">${renderCreatorChip(j)}</div>
           </div>
           <span class="job-status st-${j.status}">${j.reviewStatus || j.status}</span>
         </div>
@@ -2306,10 +2624,11 @@
           <textarea class="input textarea rev-caption" rows="3">${escapeHtml(j.postCaption || '')}</textarea>
         </label>
         <input type="text" class="input input-sm rev-note" value="${escapeAttr(j.reviewNote || '')}" placeholder="Catatan analisis kamu (opsional)..." />
+        ${canReview ? `
         <div class="review-big-actions">
           <button class="btn btn-accent btn-rev-approve">✅ Approve (Siap Upload)</button>
           <button class="btn btn-danger-ghost btn-rev-reject">❌ Reject &amp; Hapus</button>
-        </div>
+        </div>` : `<div class="text-xs muted mt-4">🔒 Tombol Approve/Reject khusus Owner atau QC Reviewer.</div>`}
         <div class="job-actions mt-8">
           ${j.status === 'done' && j.outputPath ? `<button class="btn btn-xs btn-primary btn-rev-edit">✂️ Edit &amp; +SFX / WM</button>` : ''}
           ${j.status === 'done' && j.outputPath ? `<a class="btn btn-xs btn-secondary" href="/api/jobs/${encodeURIComponent(j.id)}/video?download=1">⬇️ MP4</a>` : ''}
@@ -2319,26 +2638,40 @@
 
       const revEditBtn = card.querySelector('.btn-rev-edit');
       if (revEditBtn) revEditBtn.addEventListener('click', () => openPostEditModal(j));
-      card.querySelector('.btn-rev-approve').addEventListener('click', async () => {
-        const cap = card.querySelector('.rev-caption').value;
-        const note = card.querySelector('.rev-note').value;
-        await api(`/api/jobs/${encodeURIComponent(j.id)}/review`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ reviewStatus: 'approved', postCaption: cap, reviewNote: note }),
+      const appBtn = card.querySelector('.btn-rev-approve');
+      if (appBtn) {
+        appBtn.addEventListener('click', async () => {
+          try {
+            const cap = card.querySelector('.rev-caption').value;
+            const note = card.querySelector('.rev-note').value;
+            await api(`/api/jobs/${encodeURIComponent(j.id)}/review`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ reviewStatus: 'approved', postCaption: cap, reviewNote: note }),
+            });
+            toast('✅ Klip Approved & siap upload!', 'ok');
+          } catch (e) {
+            toast(e.message, 'err');
+          }
         });
-        toast('✅ Klip Approved & siap upload!', 'ok');
-      });
-      card.querySelector('.btn-rev-reject').addEventListener('click', async () => {
-        if (!confirm('Reject dan hapus file MP4 klip ini?')) return;
-        const note = card.querySelector('.rev-note').value;
-        await api(`/api/jobs/${encodeURIComponent(j.id)}/review`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ reviewStatus: 'rejected', reviewNote: note, deleteFileOnReject: true }),
+      }
+      const rejBtn = card.querySelector('.btn-rev-reject');
+      if (rejBtn) {
+        rejBtn.addEventListener('click', async () => {
+          if (!confirm('Reject dan hapus file MP4 klip ini?')) return;
+          try {
+            const note = card.querySelector('.rev-note').value;
+            await api(`/api/jobs/${encodeURIComponent(j.id)}/review`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ reviewStatus: 'rejected', reviewNote: note, deleteFileOnReject: true }),
+            });
+            toast('❌ Klip ditolak & file dihapus.', 'info');
+          } catch (e) {
+            toast(e.message, 'err');
+          }
         });
-        toast('❌ Klip ditolak & file dihapus.', 'info');
-      });
+      }
       card.querySelector('.btn-rev-copy').addEventListener('click', () => {
         copyText(card.querySelector('.rev-caption').value, 'Caption + Hashtags disalin!');
       });
@@ -3300,6 +3633,7 @@
           <div>
             <div class="job-title">${escapeHtml(j.title)}</div>
             <div class="text-xs muted">${escapeHtml(j.campaignName)} · ${j.finalDuration ? j.finalDuration.toFixed(1) + 's' : j.stage} · ${fmtBytes(j.fileSizeBytes)}</div>
+            <div class="mt-4" style="display:flex;gap:4px;flex-wrap:wrap;">${renderCreatorChip(j)}</div>
           </div>
           <span class="job-status st-${j.status}">${j.reviewStatus || j.status}</span>
         </div>

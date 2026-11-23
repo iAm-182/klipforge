@@ -2,12 +2,15 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"klipforge/internal/deps"
 	"klipforge/internal/events"
+	"klipforge/internal/model"
 	"klipforge/internal/store"
 )
 
@@ -126,6 +129,8 @@ func TestServerSecurity_AuthAndCORS(t *testing.T) {
 		{http.MethodPost, "/api/jobs/job-123/review"},
 		{http.MethodPost, "/api/open-output-folder"},
 		{http.MethodPost, "/api/deps/update-ytdlp"},
+		{http.MethodGet, "/api/team"},
+		{http.MethodPost, "/api/team"},
 	}
 	for _, tc := range forbiddenCases {
 		reqF := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(`{}`))
@@ -134,6 +139,154 @@ func TestServerSecurity_AuthAndCORS(t *testing.T) {
 		h.ServeHTTP(recF, reqF)
 		if recF.Code != http.StatusForbidden {
 			t.Fatalf("expected 403 Forbidden for X-Agent-Key %s %s, got %d", tc.method, tc.path, recF.Code)
+		}
+	}
+}
+
+func TestServerTeamMode_AccessKey_AgentKey_RBAC_And_Quota(t *testing.T) {
+	tmp := t.TempDir()
+	st, err := store.NewStore(tmp)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+	srv := New(st, deps.NewManager(tmp), events.NewBroker())
+	h := srv.Handler()
+
+	// 1. Owner creates a Clipper (Budi) and a QC Reviewer (Raka)
+	createMember := func(name, role string, maxActive int) model.TeamMember {
+		t.Helper()
+		body, _ := json.Marshal(map[string]interface{}{"name": name, "role": role, "maxActive": maxActive})
+		req := httptest.NewRequest(http.MethodPost, "/api/team", bytes.NewReader(body))
+		req.Header.Set("X-Engine-Token", srv.EngineToken)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create %s failed: HTTP %d %s", name, rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Member model.TeamMember `json:"member"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode member: %v", err)
+		}
+		if len(resp.Member.AccessKey) < 20 || len(resp.Member.AgentKey) < 20 {
+			t.Fatalf("expected generated accessKey & agentKey for %s", name)
+		}
+		return resp.Member
+	}
+
+	budi := createMember("Budi", "clipper", 2)
+	raka := createMember("Raka", "qc", 3)
+
+	// 2. Budi logs in via X-Access-Key -> /api/auth/me returns Budi (clipper)
+	meReq := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	meReq.Header.Set("X-Access-Key", budi.AccessKey)
+	meRec := httptest.NewRecorder()
+	h.ServeHTTP(meRec, meReq)
+	if meRec.Code != http.StatusOK {
+		t.Fatalf("Budi /api/auth/me failed: %d", meRec.Code)
+	}
+	var budiPrincipal model.Principal
+	_ = json.Unmarshal(meRec.Body.Bytes(), &budiPrincipal)
+	if budiPrincipal.Name != "Budi" || budiPrincipal.Role != "clipper" || budiPrincipal.Via != "web" {
+		t.Fatalf("unexpected Budi principal: %+v", budiPrincipal)
+	}
+
+	// 3. Budi's personal Muse uses Budi's AgentKey -> /api/auth/me returns Name=Budi, Role=agent, Via=agent!
+	museReq := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	museReq.Header.Set("X-Agent-Key", budi.AgentKey)
+	museRec := httptest.NewRecorder()
+	h.ServeHTTP(museRec, museReq)
+	if museRec.Code != http.StatusOK {
+		t.Fatalf("Budi Muse /api/auth/me failed: %d", museRec.Code)
+	}
+	var musePrincipal model.Principal
+	_ = json.Unmarshal(museRec.Body.Bytes(), &musePrincipal)
+	if musePrincipal.ID != budi.ID || musePrincipal.Name != "Budi" || musePrincipal.Role != "agent" || musePrincipal.Via != "agent" {
+		t.Fatalf("unexpected Budi Muse principal: %+v", musePrincipal)
+	}
+
+	// 4. Clipper RBAC: Budi CANNOT access /api/team, CANNOT change settings, CANNOT delete campaign, CANNOT self-approve review!
+	budiForbidden := []struct{ m, p string }{
+		{http.MethodGet, "/api/team"},
+		{http.MethodPost, "/api/team"},
+		{http.MethodPut, "/api/settings"},
+		{http.MethodPost, "/api/storage/cleanup"},
+		{http.MethodDelete, "/api/campaigns/windah-gtavi-motionklip"},
+		{http.MethodDelete, "/api/projects/proj-1"},
+		{http.MethodPost, "/api/jobs/job-budi-1/review"},
+	}
+	for _, tc := range budiForbidden {
+		req := httptest.NewRequest(tc.m, tc.p, bytes.NewBufferString(`{"reviewStatus":"approved"}`))
+		req.Header.Set("X-Access-Key", budi.AccessKey)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 for clipper Budi %s %s, got %d", tc.m, tc.p, rec.Code)
+		}
+	}
+
+	// 5. Job ownership & QC review: seed 2 jobs (one by Budi, one by Owner)
+	_ = st.SaveJob(&model.RenderJob{ID: "job-budi-1", Title: "Budi Clip", Status: "done", CreatedByID: budi.ID, CreatedBy: "Budi", CreatedAt: time.Now()})
+	_ = st.SaveJob(&model.RenderJob{ID: "job-owner-1", Title: "Owner Clip", Status: "done", CreatedByID: "owner", CreatedBy: "Owner", CreatedAt: time.Now()})
+
+	// Budi CANNOT delete Owner's job (403)
+	delOwnerReq := httptest.NewRequest(http.MethodDelete, "/api/jobs/job-owner-1", nil)
+	delOwnerReq.Header.Set("X-Access-Key", budi.AccessKey)
+	delOwnerRec := httptest.NewRecorder()
+	h.ServeHTTP(delOwnerRec, delOwnerReq)
+	if delOwnerRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 when clipper deletes another member's job, got %d", delOwnerRec.Code)
+	}
+
+	// QC Raka CAN approve Budi's job -> sets ReviewedBy = "Raka", but Raka CANNOT touch /api/team or /api/settings!
+	revReq := httptest.NewRequest(http.MethodPost, "/api/jobs/job-budi-1/review", bytes.NewBufferString(`{"reviewStatus":"approved"}`))
+	revReq.Header.Set("X-Access-Key", raka.AccessKey)
+	revRec := httptest.NewRecorder()
+	h.ServeHTTP(revRec, revReq)
+	if revRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 when QC approves job, got %d: %s", revRec.Code, revRec.Body.String())
+	}
+	approvedJob, _ := st.GetJob("job-budi-1")
+	if approvedJob.ReviewStatus != "approved" || approvedJob.ReviewedBy != "Raka" {
+		t.Fatalf("expected approved by Raka, got %+v", approvedJob)
+	}
+
+	// Once approved, even Budi CANNOT delete his own approved clip (403)!
+	delApprovedReq := httptest.NewRequest(http.MethodDelete, "/api/jobs/job-budi-1", nil)
+	delApprovedReq.Header.Set("X-Access-Key", budi.AccessKey)
+	delApprovedRec := httptest.NewRecorder()
+	h.ServeHTTP(delApprovedRec, delApprovedReq)
+	if delApprovedRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 when deleting approved clip as clipper, got %d", delApprovedRec.Code)
+	}
+
+	// 6. Fair-Queue Limit (Budi has maxActive=2; seed 2 active jobs -> Budi AND Budi's Muse both get 429!)
+	_ = st.SaveJob(&model.RenderJob{ID: "job-budi-a1", Status: "rendering", CreatedByID: budi.ID, CreatedAt: time.Now()})
+	_ = st.SaveJob(&model.RenderJob{ID: "job-budi-a2", Status: "queued", CreatedByID: budi.ID, CreatedAt: time.Now()})
+	qReq := httptest.NewRequest(http.MethodPost, "/api/jobs/render", bytes.NewBufferString(`{"projectId":"p1","startSec":0,"endSec":10}`))
+	qReq.Header.Set("X-Agent-Key", budi.AgentKey)
+	qRec := httptest.NewRecorder()
+	h.ServeHTTP(qRec, qReq)
+	if qRec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 fair-queue limit for Budi's Muse, got %d", qRec.Code)
+	}
+
+	// 7. Instant Revocation: Owner disables Budi -> BOTH AccessKey AND AgentKey immediately get 401!
+	disReq := httptest.NewRequest(http.MethodPut, "/api/team/"+budi.ID, bytes.NewBufferString(`{"enabled":false}`))
+	disReq.Header.Set("X-Engine-Token", srv.EngineToken)
+	disRec := httptest.NewRecorder()
+	h.ServeHTTP(disRec, disReq)
+	if disRec.Code != http.StatusOK {
+		t.Fatalf("disable Budi failed: %d", disRec.Code)
+	}
+	for _, pair := range [][2]string{{"X-Access-Key", budi.AccessKey}, {"X-Agent-Key", budi.AgentKey}} {
+		rRev := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		rRev.Header.Set(pair[0], pair[1])
+		recRev := httptest.NewRecorder()
+		h.ServeHTTP(recRev, rRev)
+		if recRev.Code != http.StatusUnauthorized {
+			t.Fatalf("expected instant 401 after disabling Budi (%s), got %d", pair[0], recRev.Code)
 		}
 	}
 }

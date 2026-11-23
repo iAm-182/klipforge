@@ -236,6 +236,8 @@ type Project struct {
 	Candidates      []ClipCandidate    `json:"candidates"`
 	CreatedAt       time.Time          `json:"createdAt"`
 	UpdatedAt       time.Time          `json:"updatedAt"`
+	CreatedByID     string             `json:"createdById,omitempty"`
+	CreatedBy       string             `json:"createdBy,omitempty"`
 }
 
 // ComplianceCheck reports whether a rendered clip satisfies campaign rules.
@@ -358,10 +360,37 @@ type RenderJob struct {
 	Compliance    ComplianceCheck `json:"compliance"`
 	ReviewStatus  string          `json:"reviewStatus"` // "", "pending_review", "approved", "rejected"
 	ReviewNote    string          `json:"reviewNote,omitempty"`
+	ReviewedBy    string          `json:"reviewedBy,omitempty"`
+	CreatedByID   string          `json:"createdById,omitempty"`
+	CreatedBy     string          `json:"createdBy,omitempty"`
+	CreatedVia    string          `json:"createdVia,omitempty"` // "web", "agent", "autopilot"
 	AutopilotID   string          `json:"autopilotId,omitempty"`
 	Error         string          `json:"error,omitempty"`
 	CreatedAt     time.Time       `json:"createdAt"`
 	CompletedAt   *time.Time      `json:"completedAt,omitempty"`
+}
+
+// TeamMember represents a team user with their own personal web Access Key AND personal Muse Agent Key.
+type TeamMember struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Role       string     `json:"role"`      // "owner", "qc", "clipper"
+	AccessKey  string     `json:"accessKey"` // Personal web login key
+	AgentKey   string     `json:"agentKey"`  // Personal Muse AI key (X-Agent-Key)
+	Enabled    bool       `json:"enabled"`
+	MaxActive  int        `json:"maxActive"` // Fair-queue max concurrent active jobs (default 3)
+	Notes      string     `json:"notes,omitempty"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	LastSeenAt *time.Time `json:"lastSeenAt,omitempty"`
+}
+
+// Principal describes the authenticated caller resolved by Go Engine auth middleware.
+type Principal struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Role      string `json:"role"` // "owner", "qc", "clipper", "agent"
+	Via       string `json:"via"`  // "token", "web", "agent"
+	MaxActive int    `json:"maxActive,omitempty"`
 }
 
 // AutopilotRule defines a scheduled autonomous channel watcher & HITL clipper workflow (n8n-style).

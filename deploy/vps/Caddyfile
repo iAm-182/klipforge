@@ -1,0 +1,6 @@
+{$ENGINE_DOMAIN:engine.breakthematrix.id} {
+    encode zstd gzip
+    reverse_proxy klipforge:8787 {
+        flush_interval -1
+    }
+}

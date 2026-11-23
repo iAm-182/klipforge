@@ -96,6 +96,7 @@ func New(st *store.Store, d *deps.Manager, broker *events.Broker) *Server {
 	}
 	s.Autopilot = autopilot.NewScheduler(st, yt, wp, broker, s.analyzeSyncFast)
 	go s.recoverIncompleteProjects()
+	s.syncTeamToEdgeAsync()
 	if wh := strings.TrimSpace(st.GetSettings().NotifyWebhookURL); wh != "" {
 		go notify.Send(wh, "engine_start", "🟢 KlipForge Engine Menyala", "Engine lokal siap menerima job & auto-catchup Autopilot aktif.")
 	}
@@ -170,6 +171,7 @@ func (s *Server) Handler() http.Handler {
 	// Health, Auth, Storage, SSE & Settings
 	mux.HandleFunc("GET /api/auth/check", s.handleAuthCheck)
 	mux.HandleFunc("POST /api/auth/unlock", s.handleAuthUnlock)
+	mux.HandleFunc("GET /api/auth/me", s.handleAuthMe)
 	mux.HandleFunc("GET /api/status", s.handleStatus)
 	mux.HandleFunc("POST /api/deps/refresh", s.handleRefreshDeps)
 	mux.HandleFunc("POST /api/deps/update-ytdlp", s.handleUpdateYtDlp)
@@ -177,7 +179,16 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/events", s.Broker)
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", s.handleSaveSettings)
+	mux.HandleFunc("POST /api/settings/cookies", s.handleUploadCookiesFile)
 	mux.HandleFunc("POST /api/open-output-folder", s.handleOpenOutputFolder)
+
+	// Team Mode Management (Owner-only: personal AccessKey + personal Muse AgentKey per member)
+	mux.HandleFunc("GET /api/team", s.handleListTeam)
+	mux.HandleFunc("POST /api/team", s.handleCreateTeamMember)
+	mux.HandleFunc("PUT /api/team/{id}", s.handleUpdateTeamMember)
+	mux.HandleFunc("POST /api/team/{id}/rotate", s.handleRotateTeamKeys)
+	mux.HandleFunc("DELETE /api/team/{id}", s.handleDeleteTeamMember)
+	mux.HandleFunc("POST /api/team/sync-edge", s.handleSyncTeamEdge)
 
 	// Campaigns & Asset uploads (Watermark / Outro / Intro)
 	mux.HandleFunc("GET /api/campaigns", s.handleListCampaigns)
@@ -320,19 +331,27 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Protect EVERY /api/* route with EngineToken (admin) or X-Agent-Key (least-privilege agent)
+		// Protect EVERY /api/* route with Owner EngineToken, Team AccessKey, or Scoped AgentKey (Owner/Member Muse)
 		if strings.HasPrefix(r.URL.Path, "/api/") &&
 			r.URL.Path != "/api/auth/unlock" &&
 			r.URL.Path != "/api/auth/check" {
-			role := s.authRole(r)
-			if role == "" {
-				writeErr(w, http.StatusUnauthorized, "Unauthorized: X-Engine-Token atau X-Agent-Key diperlukan")
+			principal, ok := s.resolvePrincipal(r)
+			if !ok {
+				writeErr(w, http.StatusUnauthorized, "Unauthorized: Access Key, Engine Token, atau Agent Key diperlukan")
 				return
 			}
-			if role == "agent" && !isAgentAllowed(r.Method, r.URL.Path) {
-				writeErr(w, http.StatusForbidden, "Forbidden: X-Agent-Key hanya diizinkan untuk baca, cari transkrip, analisis, dan render (tidak boleh hapus/ubah config)")
+			if !isRoleAllowed(principal, r.Method, r.URL.Path) {
+				if principal.Role == "agent" {
+					writeErr(w, http.StatusForbidden, "Forbidden: X-Agent-Key hanya diizinkan untuk baca, cari transkrip, analisis, dan render (tidak boleh hapus/ubah config/review/tim)")
+				} else {
+					writeErr(w, http.StatusForbidden, fmt.Sprintf("Forbidden: Role '%s' (%s) tidak memiliki izin untuk aksi ini", principal.Role, principal.Name))
+				}
 				return
 			}
+			if principal.ID != "" && principal.ID != "owner" && principal.ID != "owner-agent" {
+				go s.Store.TouchTeamMemberLastSeen(principal.ID)
+			}
+			r = r.WithContext(withPrincipal(r.Context(), principal))
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -344,6 +363,13 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 		"http://127.0.0.1:8787":          true,
 		"http://localhost:8787":          true,
 	}
+	if extra := strings.TrimSpace(os.Getenv("KLIPFORGE_EXTRA_ORIGIN")); extra != "" {
+		for _, o := range strings.Split(extra, ",") {
+			if t := strings.TrimSpace(o); t != "" {
+				allowedOrigins[t] = true
+			}
+		}
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin != "" && allowedOrigins[origin] {
@@ -351,7 +377,7 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Engine-Token, X-Agent-Key")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Engine-Token, X-Access-Key, X-Agent-Key")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -374,12 +400,17 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 // --- Auth, Status, Storage & Settings ---
 
 func (s *Server) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
-	role := s.authRole(r)
+	p, ok := s.resolvePrincipal(r)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"tokenRequired": s.EngineToken != "",
-		"authenticated": role != "",
-		"role":          role,
+		"authenticated": ok,
+		"role":          p.Role,
+		"user":          p,
 	})
+}
+
+func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, getPrincipal(r))
 }
 
 func (s *Server) handleAuthUnlock(w http.ResponseWriter, r *http.Request) {
@@ -390,31 +421,54 @@ func (s *Server) handleAuthUnlock(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "Format JSON tidak valid")
 		return
 	}
-	if !s.isValidToken(req.Token) {
-		writeErr(w, http.StatusUnauthorized, "Engine Token salah")
+	tok := strings.TrimSpace(req.Token)
+	if s.isValidToken(tok) {
+		http.SetCookie(w, &http.Cookie{
+			Name:     "kf_token",
+			Value:    s.EngineToken,
+			Path:     "/",
+			HttpOnly: true,
+			SameSite: http.SameSiteStrictMode,
+			MaxAge:   86400 * 30,
+		})
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok":   true,
+			"role": "owner",
+			"user": model.Principal{ID: "owner", Name: "Owner", Role: "owner", Via: "token"},
+		})
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     "kf_token",
-		Value:    s.EngineToken,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   86400 * 30,
-	})
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "role": "admin"})
+	if m, ok := s.Store.FindTeamByAccessKey(tok); ok {
+		http.SetCookie(w, &http.Cookie{
+			Name:     "kf_access_key",
+			Value:    m.AccessKey,
+			Path:     "/",
+			HttpOnly: true,
+			SameSite: http.SameSiteStrictMode,
+			MaxAge:   86400 * 30,
+		})
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok":   true,
+			"role": m.Role,
+			"user": model.Principal{ID: m.ID, Name: m.Name, Role: m.Role, Via: "web", MaxActive: m.MaxActive},
+		})
+		return
+	}
+	writeErr(w, http.StatusUnauthorized, "Engine Token atau Team Access Key salah")
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	role := s.authRole(r)
+	p := getPrincipal(r)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"deps":     s.Deps.GetStatus(),
 		"settings": s.Store.GetSettings(),
 		"disk":     s.Store.DiskStats(),
+		"user":     p,
 		"security": map[string]interface{}{
 			"engineTokenEnabled": s.EngineToken != "",
 			"agentKeyEnabled":    s.AgentKey != "",
-			"role":               role,
+			"teamCount":          len(s.Store.ListTeam()),
+			"role":               p.Role,
 		},
 		"campaigns": len(s.Store.ListCampaigns()),
 		"projects":  len(s.Store.ListProjects()),
@@ -729,6 +783,7 @@ func (s *Server) handleAnalyzeProject(w http.ResponseWriter, r *http.Request) {
 		includeChat = *req.IncludeChat
 	}
 
+	p := getPrincipal(r)
 	proj := &model.Project{
 		ID:            projID,
 		VideoID:       videoID,
@@ -740,6 +795,8 @@ func (s *Server) handleAnalyzeProject(w http.ResponseWriter, r *http.Request) {
 		DetectConfig:  detectCfg,
 		CreatedAt:     time.Now(),
 		UpdatedAt:     time.Now(),
+		CreatedByID:   p.ID,
+		CreatedBy:     p.Name,
 	}
 	if err := s.Store.SaveProject(proj); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -1079,6 +1136,11 @@ func (s *Server) handleSearchTranscript(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleRenderCompile(w http.ResponseWriter, r *http.Request) {
+	p := getPrincipal(r)
+	if err := s.checkMemberQueueLimit(p); err != nil {
+		writeErr(w, http.StatusTooManyRequests, err.Error())
+		return
+	}
 	var opts model.CompileOptions
 	if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
 		writeErr(w, http.StatusBadRequest, "Format JSON compile tidak valid")
@@ -1089,6 +1151,7 @@ func (s *Server) handleRenderCompile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.tagJobWithPrincipal(job, p)
 	writeJSON(w, http.StatusAccepted, job)
 }
 
@@ -1298,6 +1361,11 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRenderSingle(w http.ResponseWriter, r *http.Request) {
+	p := getPrincipal(r)
+	if err := s.checkMemberQueueLimit(p); err != nil {
+		writeErr(w, http.StatusTooManyRequests, err.Error())
+		return
+	}
 	var opts model.RenderOptions
 	if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
 		writeErr(w, http.StatusBadRequest, "Format render options tidak valid")
@@ -1308,10 +1376,16 @@ func (s *Server) handleRenderSingle(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.tagJobWithPrincipal(job, p)
 	writeJSON(w, http.StatusAccepted, job)
 }
 
 func (s *Server) handleRenderBatch(w http.ResponseWriter, r *http.Request) {
+	p := getPrincipal(r)
+	if err := s.checkMemberQueueLimit(p); err != nil {
+		writeErr(w, http.StatusTooManyRequests, err.Error())
+		return
+	}
 	var req struct {
 		Items []model.RenderOptions `json:"items"`
 	}
@@ -1321,21 +1395,42 @@ func (s *Server) handleRenderBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	var jobs []*model.RenderJob
 	for _, item := range req.Items {
+		if err := s.checkMemberQueueLimit(p); err != nil {
+			break
+		}
 		job, err := s.Worker.Enqueue(item)
 		if err != nil {
 			continue
 		}
+		s.tagJobWithPrincipal(job, p)
 		jobs = append(jobs, job)
+	}
+	if len(jobs) == 0 {
+		writeErr(w, http.StatusTooManyRequests, "Batas antrean aktif anggota tercapai atau tidak ada item valid")
+		return
 	}
 	writeJSON(w, http.StatusAccepted, jobs)
 }
 
 func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
-	s.Worker.Cancel(r.PathValue("id"))
+	id := r.PathValue("id")
+	p := getPrincipal(r)
+	if p.Role == "clipper" {
+		if job, ok := s.Store.GetJob(id); ok && job.CreatedByID != "" && job.CreatedByID != p.ID {
+			writeErr(w, http.StatusForbidden, "Clipper hanya boleh membatalkan job miliknya sendiri")
+			return
+		}
+	}
+	s.Worker.Cancel(id)
 	writeJSON(w, http.StatusOK, map[string]bool{"canceled": true})
 }
 
 func (s *Server) handlePostEditJob(w http.ResponseWriter, r *http.Request) {
+	p := getPrincipal(r)
+	if err := s.checkMemberQueueLimit(p); err != nil {
+		writeErr(w, http.StatusTooManyRequests, err.Error())
+		return
+	}
 	id := r.PathValue("id")
 	var opts model.PostEditOptions
 	if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
@@ -1348,10 +1443,16 @@ func (s *Server) handlePostEditJob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.tagJobWithPrincipal(job, p)
 	writeJSON(w, http.StatusAccepted, job)
 }
 
 func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
+	p := getPrincipal(r)
+	if err := s.checkMemberQueueLimit(p); err != nil {
+		writeErr(w, http.StatusTooManyRequests, err.Error())
+		return
+	}
 	oldJob, ok := s.Store.GetJob(r.PathValue("id"))
 	if !ok {
 		writeErr(w, http.StatusNotFound, "Job tidak ditemukan")
@@ -1372,11 +1473,25 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.tagJobWithPrincipal(newJob, p)
 	writeJSON(w, http.StatusAccepted, newJob)
 }
 
 func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	p := getPrincipal(r)
+	if p.Role == "clipper" || p.Role == "qc" {
+		if job, ok := s.Store.GetJob(id); ok {
+			if job.ReviewStatus == "approved" {
+				writeErr(w, http.StatusForbidden, "Klip yang sudah Approved hanya boleh dihapus oleh Owner")
+				return
+			}
+			if p.Role == "clipper" && job.CreatedByID != p.ID {
+				writeErr(w, http.StatusForbidden, "Clipper hanya boleh menghapus klip miliknya sendiri")
+				return
+			}
+		}
+	}
 	s.Worker.Cancel(id)
 	_ = s.Store.DeleteJob(id)
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
@@ -1509,7 +1624,9 @@ func (s *Server) handleReviewJob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "reviewStatus harus approved, rejected, atau pending_review")
 		return
 	}
+	p := getPrincipal(r)
 	job.ReviewStatus = req.ReviewStatus
+	job.ReviewedBy = p.Name
 	if req.ReviewNote != "" {
 		job.ReviewNote = req.ReviewNote
 	}

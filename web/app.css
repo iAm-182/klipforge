@@ -1151,7 +1151,110 @@ input[type="range"] { width: 100%; accent-color: var(--primary-hi); }
   align-items: center;
 }
 
+/* Team Mode UI: User Pill, Creator Badges, Member Key Cards */
+.user-pill {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 99px;
+  background: rgba(99, 102, 241, 0.22);
+  border: 1px solid rgba(129, 140, 248, 0.45);
+  color: #e0e7ff;
+  white-space: nowrap;
+}
+.user-pill.role-qc { background: rgba(245, 158, 11, 0.2); border-color: rgba(245, 158, 11, 0.5); color: #fde68a; }
+.user-pill.role-clipper { background: rgba(16, 185, 129, 0.2); border-color: rgba(16, 185, 129, 0.45); color: #a7f3d0; }
+.creator-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 99px;
+  background: rgba(56, 189, 248, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.32);
+  color: #bae6fd;
+}
+.creator-chip.via-agent {
+  background: rgba(168, 85, 247, 0.18);
+  border-color: rgba(192, 132, 252, 0.42);
+  color: #e9d5ff;
+}
+.team-add-bar {
+  display: grid;
+  grid-template-columns: 1.1fr 1.6fr 76px auto;
+  gap: 8px;
+  align-items: center;
+}
+.team-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 12px;
+}
+.team-member-card {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.team-member-card.disabled {
+  opacity: 0.58;
+  border-style: dashed;
+}
+.team-member-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.team-role-badge {
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 99px;
+  text-transform: uppercase;
+}
+.team-role-badge.r-owner { background: rgba(99,102,241,0.28); color: #c7d2fe; }
+.team-role-badge.r-qc { background: rgba(245,158,11,0.25); color: #fde68a; }
+.team-role-badge.r-clipper { background: rgba(16,185,129,0.22); color: #6ee7b7; }
+.team-key-box {
+  background: #0a0f1c;
+  border: 1px solid rgba(51, 65, 85, 0.85);
+  border-radius: 8px;
+  padding: 6px 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.team-key-box code {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: Consolas, monospace;
+  color: #cbd5e1;
+  font-size: 11px;
+}
+.team-stat-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.team-stat-strip span {
+  background: rgba(30, 41, 59, 0.75);
+  padding: 2px 7px;
+  border-radius: 6px;
+}
+
 @media (max-width: 1100px) {
+  .team-add-bar { grid-template-columns: 1fr 1fr; }
   .home-hero-grid { grid-template-columns: repeat(2, 1fr); }
   .studio-grid, .campaigns-layout, .settings-grid, .assets-grid { grid-template-columns: 1fr; }
   .studio-right { order: -1; }
