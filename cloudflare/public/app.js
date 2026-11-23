@@ -2541,6 +2541,113 @@
     toast('Built-in SFX & BGM Starter Pack siap!', 'ok');
   });
 
+  // ==================== TikTok Trending Sounds Radar & 1-Click Extractor ====================
+  let activeTrendCat = 'id_viral';
+
+  async function loadTrendingSounds(forceRefresh = false) {
+    const box = $('trendingSoundsList');
+    if (!box) return;
+    const q = ($('inpTrendQuery')?.value || '').trim();
+    box.innerHTML = '<div class="muted text-xs" style="padding:12px;">🔥 Memindai sound trend TikTok terbaru...</div>';
+    try {
+      const qs = new URLSearchParams({ category: activeTrendCat });
+      if (q) qs.set('q', q);
+      if (forceRefresh) qs.set('refresh', '1');
+      const res = await api(`/api/audio/trending?${qs.toString()}`);
+      const items = res.items || [];
+      if (items.length === 0) {
+        box.innerHTML = '<div class="muted text-xs" style="padding:12px;">Belum ada hasil cocok — coba kata kunci atau kategori lain!</div>';
+        return;
+      }
+      box.innerHTML = '';
+      items.forEach((item) => {
+        const card = document.createElement('div');
+        card.className = 'trend-card';
+        const durTxt = item.duration ? `${Math.round(item.duration)}s` : '-';
+        const viewsTxt = item.viewCount ? fmtViews(item.viewCount) : '';
+        card.innerHTML = `
+          <div class="trend-card-title">🔥 ${escapeHtml(item.title)}</div>
+          <div class="trend-card-meta">${escapeHtml(item.creator || 'TikTok Trend')} · ${durTxt}${viewsTxt ? ' · ' + viewsTxt : ''}</div>
+          <div class="head-actions" style="gap:6px;margin-top:2px;">
+            <button class="btn btn-2xs btn-accent btn-imp-bgm">⬇️ +BGM</button>
+            <button class="btn btn-2xs btn-primary btn-imp-sfx">💥 +SFX</button>
+            <a class="btn btn-2xs btn-ghost ml-auto" href="${escapeAttr(item.sourceURL || item.sourceUrl)}" target="_blank" rel="noopener">🔗 Buka</a>
+          </div>
+        `;
+        const doImport = async (kind, btn) => {
+          btn.disabled = true;
+          const orig = btn.textContent;
+          btn.textContent = '⏳ Importing...';
+          try {
+            const added = await api('/api/audio/trending/import', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                url: item.sourceUrl,
+                name: item.title,
+                kind,
+                category: item.category || 'TikTok Trend',
+                maxDurationSec: kind === 'sfx' ? 12 : 45,
+              }),
+            });
+            state.audioAssets.unshift(added);
+            renderAudioLibrary();
+            toast(`🔥 "${added.name}" masuk ke ${kind.toUpperCase()} Library!`, 'ok');
+          } catch (e) {
+            toast('Gagal import sound: ' + e.message, 'err');
+          } finally {
+            btn.disabled = false;
+            btn.textContent = orig;
+          }
+        };
+        card.querySelector('.btn-imp-bgm').addEventListener('click', (e) => doImport('bgm', e.currentTarget));
+        card.querySelector('.btn-imp-sfx').addEventListener('click', (e) => doImport('sfx', e.currentTarget));
+        box.appendChild(card);
+      });
+    } catch (e) {
+      box.innerHTML = `<div class="muted text-xs" style="padding:12px;color:#fda4af;">Gagal memuat sound trend: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  async function importDirectSoundUrl(kind) {
+    const url = ($('inpDirectSoundUrl')?.value || '').trim();
+    const name = ($('inpDirectSoundName')?.value || '').trim();
+    if (!url) {
+      toast('Tempel link TikTok / YouTube dulu!', 'err');
+      return;
+    }
+    toast(`⬇️ Mengekstrak audio jadi ${kind.toUpperCase()}...`, 'info');
+    try {
+      const added = await api('/api/audio/trending/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, name, kind, category: 'TikTok Trend', maxDurationSec: kind === 'sfx' ? 12 : 45 }),
+      });
+      state.audioAssets.unshift(added);
+      renderAudioLibrary();
+      if ($('inpDirectSoundUrl')) $('inpDirectSoundUrl').value = '';
+      if ($('inpDirectSoundName')) $('inpDirectSoundName').value = '';
+      toast(`✅ "${added.name}" berhasil masuk ${kind.toUpperCase()} Library!`, 'ok');
+    } catch (e) {
+      toast('Gagal ekstrak link: ' + e.message, 'err');
+    }
+  }
+
+  document.querySelectorAll('#trendCatBar .pe-cat-pill').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#trendCatBar .pe-cat-pill').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeTrendCat = btn.dataset.tcat || 'id_viral';
+      if ($('inpTrendQuery')) $('inpTrendQuery').value = '';
+      loadTrendingSounds(false);
+    });
+  });
+  if ($('btnRefreshTrends')) $('btnRefreshTrends').addEventListener('click', () => loadTrendingSounds(true));
+  if ($('btnSearchTrends')) $('btnSearchTrends').addEventListener('click', () => loadTrendingSounds(true));
+  if ($('inpTrendQuery')) $('inpTrendQuery').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadTrendingSounds(true); });
+  if ($('btnExtractUrlBgm')) $('btnExtractUrlBgm').addEventListener('click', () => importDirectSoundUrl('bgm'));
+  if ($('btnExtractUrlSfx')) $('btnExtractUrlSfx').addEventListener('click', () => importDirectSoundUrl('sfx'));
+
   // ==================== Autopilot Scheduler & HITL Review Inbox ====================
   function renderAutopilotList() {
     const box = $('autopilotList');

@@ -221,9 +221,10 @@ func BuildFaceTrackFilter(pts []TrackPoint, srcW, srcH, outW, outH int, inLabel,
 }
 
 // inlineOpenCVFaceScript samples the video segment at ~4 fps and detects the largest frontal face
-// using OpenCV (YuNet if ONNX present, else bundled Haar Cascade — zero external downloads required!).
+// using YuNet ONNX (230 KB CPU model, per reelsaw design) when present, falling back cleanly to
+// OpenCV's bundled Haar Cascade (zero external downloads required!).
 const inlineOpenCVFaceScript = `
-import sys, json
+import sys, os, json
 try:
     import cv2
 except Exception:
@@ -240,8 +241,19 @@ if not cap.isOpened():
     print("[]")
     sys.exit(0)
 
-cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-detector = cv2.CascadeClassifier(cascade_path)
+yunet = None
+for cand in ["data/models/face_detection_yunet.onnx", "/data/workspace/klipforge/data/models/face_detection_yunet.onnx"]:
+    if os.path.exists(cand) and hasattr(cv2, "FaceDetectorYN"):
+        try:
+            yunet = cv2.FaceDetectorYN.create(cand, "", (320, 320), 0.65, 0.3, 50)
+            break
+        except Exception:
+            yunet = None
+
+cascade = None
+if yunet is None:
+    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+
 results = []
 t = 0.0
 step = 1.0 / sample_fps
@@ -253,29 +265,45 @@ while t <= dur_sec:
     h, w = frame.shape[:2]
     scale = 480.0 / max(1, w)
     small = cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))))
-    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-    faces = detector.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=5, minSize=(28, 28))
-    if len(faces) > 0:
-        fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])
-        sh, sw = small.shape[:2]
+    sh, sw = small.shape[:2]
+    best = None
+    if yunet is not None:
+        yunet.setInputSize((sw, sh))
+        _, dets = yunet.detect(small)
+        if dets is not None and len(dets) > 0:
+            top = max(dets, key=lambda d: float(d[2]) * float(d[3]))
+            fx, fy, fw, fh, conf = float(top[0]), float(top[1]), float(top[2]), float(top[3]), float(top[-1])
+            best = (fx, fy, fw, fh, conf)
+    elif cascade is not None:
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=5, minSize=(28, 28))
+        if len(faces) > 0:
+            fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])
+            best = (float(fx), float(fy), float(fw), float(fh), 0.9)
+    if best is not None:
+        fx, fy, fw, fh, conf = best
         results.append({
             "t": round(t, 3),
             "cx": round((fx + fw / 2.0) / max(1, sw), 4),
             "cy": round((fy + fh / 2.0) / max(1, sh), 4),
             "w": round(fw / max(1, sw), 4),
             "h": round(fh / max(1, sh), 4),
-            "conf": 0.9
+            "conf": round(conf, 3)
         })
     t += step
 cap.release()
 print(json.dumps(results))
 `
 
-// DetectFacesInVideo optionally invokes a lightweight Python+OpenCV 4fps face sampler.
+// DetectFacesInVideo optionally invokes a lightweight Python+OpenCV (YuNet ONNX / Haar) 4fps face sampler.
 // If Python or cv2 is unavailable, returns nil cleanly so caller gracefully falls back to centered 9:16 crop.
 func DetectFacesInVideo(ctx context.Context, videoPath string, seekStart, durationSec float64) []FaceDetection {
 	pyBin := ""
-	for _, cand := range []string{"python3", "python"} {
+	for _, cand := range []string{
+		"/data/workspace/klipforge/.venv/bin/python",
+		"python3",
+		"python",
+	} {
 		if p, err := exec.LookPath(cand); err == nil {
 			pyBin = p
 			break

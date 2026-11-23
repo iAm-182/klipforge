@@ -720,6 +720,43 @@
 
     <!-- ==================== TAB: AUDIO & SFX LIBRARY ==================== -->
     <main id="tab-audio" class="tab-panel">
+      <!-- TikTok Trending Sounds Radar & 1-Click Extractor -->
+      <section class="card" style="margin-bottom:14px;">
+        <div class="card-head">
+          <div>
+            <h2>🔥 Radar Sound Trend TikTok (ID, Meme SFX, Phonk &amp; Extract Link)</h2>
+            <div class="muted text-xs">Cari sound viral TikTok Indonesia / Meme SFX terbaru &amp; import 1-klik langsung ke BGM/SFX Library (otomatis Loudnorm -14 LUFS!), atau tempel link TikTok/YouTube langsung!</div>
+          </div>
+          <div class="head-actions">
+            <button class="btn btn-xs btn-secondary" id="btnRefreshTrends">🔄 Refresh Trend</button>
+          </div>
+        </div>
+
+        <div class="trend-controls-row mt-8">
+          <div class="pe-cat-bar" id="trendCatBar">
+            <button class="pe-cat-pill active" data-tcat="id_viral">🇮🇩 Viral TikTok ID</button>
+            <button class="pe-cat-pill" data-tcat="meme_sfx">💀 Meme SFX Viral</button>
+            <button class="pe-cat-pill" data-tcat="phonk_gaming">🔥 Phonk &amp; Jedag-Jedug</button>
+            <button class="pe-cat-pill" data-tcat="windah_viral">🎮 Windah / Gaming</button>
+          </div>
+          <div class="input-with-btn">
+            <input type="text" id="inpTrendQuery" class="input input-sm" placeholder="Cari trend (cth: roblox ahh, velocity, gta)..." />
+            <button class="btn btn-xs btn-primary" id="btnSearchTrends">🔍 Cari</button>
+          </div>
+        </div>
+
+        <div class="input-with-btn mt-8" style="background:var(--bg-input);padding:8px 10px;border-radius:8px;border:1px solid var(--border);">
+          <input type="text" id="inpDirectSoundUrl" class="input input-sm" placeholder="🔗 Atau tempel link video TikTok / YouTube langsung untuk ambil audionya..." />
+          <input type="text" id="inpDirectSoundName" class="input input-sm" style="max-width:190px;" placeholder="Nama sound (opsional)" />
+          <button class="btn btn-xs btn-accent" id="btnExtractUrlBgm">🎵 Ambil Jadi BGM</button>
+          <button class="btn btn-xs btn-primary" id="btnExtractUrlSfx">💥 Ambil Jadi SFX</button>
+        </div>
+
+        <div id="trendingSoundsList" class="trend-grid mt-12">
+          <div class="muted text-xs" style="padding:10px;">Klik salah satu kategori di atas atau klik <strong>🔄 Refresh Trend</strong> untuk memuat daftar sound viral TikTok terbaru!</div>
+        </div>
+      </section>
+
       <div class="settings-grid">
         <section class="card">
           <div class="card-head">

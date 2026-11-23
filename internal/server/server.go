@@ -243,6 +243,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/audio/presets", s.handleListAudioPresets)
 	mux.HandleFunc("POST /api/audio/presets", s.handleSaveAudioPreset)
 	mux.HandleFunc("DELETE /api/audio/presets/{id}", s.handleDeleteAudioPreset)
+	mux.HandleFunc("GET /api/audio/trending", s.handleListTrendingAudio)
+	mux.HandleFunc("POST /api/audio/trending/import", s.handleImportTrendingAudio)
 
 	// Embedded Web Dashboard UI
 	subFS, _ := fs.Sub(web.FS, ".")
@@ -1862,6 +1864,48 @@ func (s *Server) handleServeAudio(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRegenerateAudio(w http.ResponseWriter, r *http.Request) {
 	s.Audio.EnsureBuiltIns()
 	writeJSON(w, http.StatusOK, s.Audio.List())
+}
+
+func (s *Server) handleListTrendingAudio(w http.ResponseWriter, r *http.Request) {
+	cat := r.URL.Query().Get("category")
+	q := r.URL.Query().Get("q")
+	refresh := r.URL.Query().Get("refresh") == "1"
+	items, err := s.Audio.FetchTrendingSounds(r.Context(), cat, q, refresh, s.Store.GetSettings())
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"category": cat,
+		"query":    q,
+		"count":    len(items),
+		"items":    items,
+	})
+}
+
+func (s *Server) handleImportTrendingAudio(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URL            string  `json:"url"`
+		Name           string  `json:"name"`
+		Kind           string  `json:"kind"` // "bgm" or "sfx"
+		Category       string  `json:"category"`
+		MaxDurationSec float64 `json:"maxDurationSec"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "Format JSON import sound tidak valid")
+		return
+	}
+	asset, err := s.Audio.ImportSoundFromURL(r.Context(), req.URL, req.Name, req.Kind, req.Category, req.MaxDurationSec, s.Store.GetSettings())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if info, err := renderer.ProbeMedia(r.Context(), s.Deps.GetStatus().FFprobePath, asset.FilePath); err == nil && info.Duration > 0 {
+		asset.Duration = info.Duration
+	}
+	p := getPrincipal(r)
+	s.Broker.Log("audio", "success", fmt.Sprintf("🔥 Import Sound Trend (%s) oleh %s: %s (%.1fs)", strings.ToUpper(asset.Kind), p.Name, asset.Name, asset.Duration))
+	writeJSON(w, http.StatusCreated, asset)
 }
 
 // --- Human-in-the-Loop (HITL) Review & Autopilot Scheduler ---
