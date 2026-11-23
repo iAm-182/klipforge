@@ -168,3 +168,72 @@ func TestPhase4_2_EditScriptEndpoint(t *testing.T) {
 		t.Fatalf("expected HTTP 400 for forbidden word in textOverlay, got %d: %s", recBad.Code, recBad.Body.String())
 	}
 }
+
+func TestPhase4_4_CandidateVerdictStore(t *testing.T) {
+	srv, st, h := setupPhase4TestServer(t)
+	jobsBefore := len(st.ListJobs())
+
+	// 1. Agent posts "keep" verdict -> 200 OK, stored with verdictBy, NEVER auto-renders!
+	vKeep := bytes.NewBufferString(`{"verdict":"keep","funny":5,"note":"pecah banget pas ketembak","momentType":"fail"}`)
+	req1 := httptest.NewRequest(http.MethodPost, "/api/projects/proj-test-windah/candidates/cand-1/verdict", vKeep)
+	req1.Header.Set("X-Agent-Key", srv.AgentKey)
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("expected 200 on verdict keep, got %d: %s", rec1.Code, rec1.Body.String())
+	}
+	if len(st.ListJobs()) != jobsBefore {
+		t.Fatalf("keep verdict MUST NOT auto-render! jobs before=%d after=%d", jobsBefore, len(st.ListJobs()))
+	}
+
+	// 2. Agent posts "drop" verdict on cand-2 -> hidden by default on GET /api/projects/{id}, visible with ?includeDropped=1!
+	vDrop := bytes.NewBufferString(`{"verdict":"drop","funny":1,"note":"basi"}`)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/projects/proj-test-windah/candidates/cand-2/verdict", vDrop)
+	req2.Header.Set("X-Agent-Key", srv.AgentKey)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("expected 200 on verdict drop, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+
+	// Default GET hides dropped candidate
+	g1 := httptest.NewRequest(http.MethodGet, "/api/projects/proj-test-windah", nil)
+	g1.Header.Set("X-Agent-Key", srv.AgentKey)
+	rg1 := httptest.NewRecorder()
+	h.ServeHTTP(rg1, g1)
+	if rg1.Code != http.StatusOK {
+		t.Fatalf("GET project failed: %d", rg1.Code)
+	}
+	var projDefault model.Project
+	_ = json.Unmarshal(rg1.Body.Bytes(), &projDefault)
+	if len(projDefault.Candidates) != 1 || projDefault.Candidates[0].ID != "cand-1" {
+		t.Fatalf("expected default GET to hide drop candidate (len=1 cand-1), got len=%d", len(projDefault.Candidates))
+	}
+	if projDefault.Candidates[0].Verdict == nil || projDefault.Candidates[0].Verdict.Verdict != "keep" || projDefault.Candidates[0].Verdict.Funny != 5 {
+		t.Fatalf("expected keep verdict with funny=5 on cand-1, got %+v", projDefault.Candidates[0].Verdict)
+	}
+	if projDefault.Candidates[0].Verdict.Via != "agent" || projDefault.Candidates[0].Verdict.VerdictBy == "" {
+		t.Fatalf("expected verdictBy attribution, got %+v", projDefault.Candidates[0].Verdict)
+	}
+
+	// GET with ?includeDropped=1 returns both
+	g2 := httptest.NewRequest(http.MethodGet, "/api/projects/proj-test-windah?includeDropped=1", nil)
+	g2.Header.Set("X-Agent-Key", srv.AgentKey)
+	rg2 := httptest.NewRecorder()
+	h.ServeHTTP(rg2, g2)
+	var projAll model.Project
+	_ = json.Unmarshal(rg2.Body.Bytes(), &projAll)
+	if len(projAll.Candidates) != 2 {
+		t.Fatalf("expected includeDropped=1 to return 2 candidates, got %d", len(projAll.Candidates))
+	}
+
+	// 3. Invalid verdict -> 400
+	vBad := bytes.NewBufferString(`{"verdict":"auto_render"}`)
+	reqBad := httptest.NewRequest(http.MethodPost, "/api/projects/proj-test-windah/candidates/cand-1/verdict", vBad)
+	reqBad.Header.Set("X-Agent-Key", srv.AgentKey)
+	recBad := httptest.NewRecorder()
+	h.ServeHTTP(recBad, reqBad)
+	if recBad.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid verdict value, got %d", recBad.Code)
+	}
+}

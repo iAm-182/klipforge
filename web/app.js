@@ -919,6 +919,8 @@
         ? `<div class="text-xs" style="color:#a5f3fc;margin:3px 0;">🎬 <strong>Arc:</strong> ${escapeHtml(c.arcReason)}${c.viralityBreakdown ? ` <span class="muted">(Hook ${Math.round(c.viralityBreakdown.hook)} · Emosi ${Math.round(c.viralityBreakdown.emotion)} · Konflik ${Math.round(c.viralityBreakdown.conflict)})</span>` : ''}</div>`
         : '';
 
+      const verdictHtml = renderVerdictReadOnly(c.verdict, c.momentType, c.autoEdit);
+
       const framesHtml = (c.startFrameUrl || c.peakFrameUrl)
         ? `<div class="cand-frames-row">
             ${c.startFrameUrl ? `<figure class="cand-frame"><img src="${escapeAttr(c.startFrameUrl)}" loading="lazy" alt="Start" /><figcaption>Start ${fmtTime(c.arcStartSec || c.startSec)}</figcaption></figure>` : ''}
@@ -935,6 +937,7 @@
           <span class="${scoreCls}">⚡ ${Math.round(c.score)}</span>
         </div>
         <div class="cand-reasons">${reasonsHtml}</div>
+        ${verdictHtml}
         ${arcHtml}
         <div class="text-xs muted">${sigLine}</div>
         ${framesHtml}
@@ -1454,6 +1457,30 @@
     const active = state.jobs.filter((j) => j.status === 'queued' || j.status === 'downloading' || j.status === 'rendering').length;
     const total = state.jobs.length;
     $('navJobCount').textContent = active > 0 ? `${active}⚡` : total;
+  }
+
+  function renderVerdictReadOnly(v, momentType, autoEdit) {
+    const pills = [];
+    if (momentType) {
+      const mIcons = { crash: '💥', fail: '💀', hype: '🔥', twist: '😱', victory: '🏆', meme: '🤡', custom: '✨' };
+      const ic = mIcons[momentType] || '🎬';
+      const aeTitle = autoEdit && autoEdit.reason ? ` title="${escapeAttr(autoEdit.reason)}"` : '';
+      pills.push(`<span class="reason-chip"${aeTitle} style="background:rgba(139,92,246,0.22);color:#ddd6fe;">${ic} ${escapeHtml(momentType)}</span>`);
+    }
+    if (v && v.verdict) {
+      const vMap = {
+        keep: { icon: '✅', bg: 'rgba(16,185,129,0.22)', fg: '#6ee7b7' },
+        maybe: { icon: '🤔', bg: 'rgba(245,158,11,0.22)', fg: '#fcd34d' },
+        drop: { icon: '🗑️', bg: 'rgba(244,63,94,0.22)', fg: '#fda4af' },
+      };
+      const st = vMap[v.verdict] || vMap.maybe;
+      const funnyTxt = v.funny > 0 ? ` · 😂 ${v.funny}/5` : '';
+      const byTxt = v.verdictBy ? ` · ${escapeHtml(v.verdictBy)}` : '';
+      const noteTxt = v.note ? ` — “${escapeHtml(v.note)}”` : '';
+      pills.push(`<span class="reason-chip" style="background:${st.bg};color:${st.fg};font-weight:600;">${st.icon} ${escapeHtml(v.verdict.toUpperCase())}${funnyTxt}${byTxt}${noteTxt}</span>`);
+    }
+    if (pills.length === 0) return '';
+    return `<div style="display:flex;gap:5px;flex-wrap:wrap;margin:4px 0;">${pills.join('')}</div>`;
   }
 
   function renderCreatorChip(j) {
@@ -2733,12 +2760,19 @@
       if (comp.hasValueAdd) badges.push('<span class="comp-ok">✅ Value-Add</span>');
       (comp.warnings || []).forEach((w) => badges.push(`<span class="comp-warn">⚠️ ${escapeHtml(w)}</span>`));
 
+      const matchedProj = (state.projects || []).find((pr) => pr.id === j.projectId);
+      const matchedCand = matchedProj && j.options?.candidateId
+        ? (matchedProj.candidates || []).find((c) => c.id === j.options.candidateId)
+        : null;
+      const revVerdictHtml = renderVerdictReadOnly(matchedCand?.verdict, matchedCand?.momentType || j.autoEdit?.momentType, j.autoEdit || matchedCand?.autoEdit);
+
       card.innerHTML = `
         <div class="job-head">
           <div>
             <div class="job-title">${escapeHtml(j.title)}</div>
             <div class="text-xs muted">${escapeHtml(j.campaignName)} · ${j.finalDuration ? j.finalDuration.toFixed(1) + 's' : j.stage} · ${fmtBytes(j.fileSizeBytes)}</div>
             <div class="mt-4" style="display:flex;gap:4px;flex-wrap:wrap;">${renderCreatorChip(j)}</div>
+            ${revVerdictHtml}
           </div>
           <span class="job-status st-${j.status}">${j.reviewStatus || j.status}</span>
         </div>
@@ -3752,12 +3786,19 @@
     recent.forEach((j) => {
       const card = document.createElement('div');
       card.className = 'job-card';
+      const matchedProj = (state.projects || []).find((pr) => pr.id === j.projectId);
+      const matchedCand = matchedProj && j.options?.candidateId
+        ? (matchedProj.candidates || []).find((c) => c.id === j.options.candidateId)
+        : null;
+      const revVerdictHtml = renderVerdictReadOnly(matchedCand?.verdict, matchedCand?.momentType || j.autoEdit?.momentType, j.autoEdit || matchedCand?.autoEdit);
+
       card.innerHTML = `
         <div class="job-head">
           <div>
             <div class="job-title">${escapeHtml(j.title)}</div>
             <div class="text-xs muted">${escapeHtml(j.campaignName)} · ${j.finalDuration ? j.finalDuration.toFixed(1) + 's' : j.stage} · ${fmtBytes(j.fileSizeBytes)}</div>
             <div class="mt-4" style="display:flex;gap:4px;flex-wrap:wrap;">${renderCreatorChip(j)}</div>
+            ${revVerdictHtml}
           </div>
           <span class="job-status st-${j.status}">${j.reviewStatus || j.status}</span>
         </div>

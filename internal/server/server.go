@@ -210,6 +210,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/projects/{id}/download-full", s.handleDownloadFull)
 	mux.HandleFunc("POST /api/projects/{id}/grab-frame", s.handleGrabFrame)
 	mux.HandleFunc("POST /api/projects/{id}/verify-frames", s.handleVerifyCandidateFrames)
+	mux.HandleFunc("POST /api/projects/{id}/candidates/{candId}/verdict", s.handleCandidateVerdict)
 	mux.HandleFunc("GET /api/projects/{id}/candidate-frame/{candId}/{kind}", s.handleServeCandidateFrame)
 	mux.HandleFunc("GET /api/projects/{id}/preview-frame", s.handleServePreviewFrame)
 	mux.HandleFunc("GET /api/projects/{id}/video", s.handleServeProjectVideo)
@@ -322,7 +323,8 @@ func isAgentAllowed(method, path string) bool {
 		if strings.HasSuffix(path, "/reanalyze") ||
 			strings.HasSuffix(path, "/scan-audio") ||
 			strings.HasSuffix(path, "/verify-frames") ||
-			strings.HasSuffix(path, "/grab-frame") {
+			strings.HasSuffix(path, "/grab-frame") ||
+			(strings.Contains(path, "/candidates/") && strings.HasSuffix(path, "/verdict")) {
 			return true
 		}
 	}
@@ -737,17 +739,20 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) enrichProjectAutoEdit(proj *model.Project) {
-	if proj == nil || s.Audio == nil {
+	if proj == nil || s.Audio == nil || len(proj.Candidates) == 0 {
 		return
 	}
-	for i := range proj.Candidates {
-		c := &proj.Candidates[i]
+	cands := make([]model.ClipCandidate, len(proj.Candidates))
+	copy(cands, proj.Candidates)
+	for i := range cands {
+		c := &cands[i]
 		if strings.TrimSpace(c.MomentType) == "" {
 			c.MomentType = analyzer.ClassifyMomentType(c.Transcript, c.ArcReason, c.SampleChats)
 		}
 		dec := s.Audio.ResolveAutoEditForMoment(c.MomentType, "", "")
 		c.AutoEdit = &dec
 	}
+	proj.Candidates = cands
 }
 
 func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
@@ -757,6 +762,18 @@ func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.enrichProjectAutoEdit(proj)
+	incDrop := r.URL.Query().Get("includeDropped")
+	includeDropped := incDrop == "1" || strings.EqualFold(incDrop, "true")
+	if !includeDropped && len(proj.Candidates) > 0 {
+		filtered := make([]model.ClipCandidate, 0, len(proj.Candidates))
+		for _, c := range proj.Candidates {
+			if c.Verdict != nil && strings.EqualFold(c.Verdict.Verdict, "drop") {
+				continue
+			}
+			filtered = append(filtered, c)
+		}
+		proj.Candidates = filtered
+	}
 	writeJSON(w, http.StatusOK, proj)
 }
 

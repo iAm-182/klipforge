@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"strings"
+	"time"
 
 	"klipforge/internal/analyzer"
 	"klipforge/internal/model"
@@ -343,4 +344,112 @@ func (s *Server) handleEditScript(w http.ResponseWriter, r *http.Request) {
 
 	// Returns HTTP 200 OK echoing full job + appliedPlan!
 	writeJSON(w, http.StatusOK, job)
+}
+
+func isValidMomentType(mt string) bool {
+	switch mt {
+	case "crash", "fail", "hype", "twist", "victory", "meme", "custom":
+		return true
+	default:
+		return false
+	}
+}
+
+// handleCandidateVerdict stores a human or agent (Muse) judgment ("keep"|"drop"|"maybe", funny 0-5, note, momentType)
+// directly on a project candidate. NEVER auto-renders on "keep".
+func (s *Server) handleCandidateVerdict(w http.ResponseWriter, r *http.Request) {
+	projID := r.PathValue("id")
+	candID := r.PathValue("candId")
+	proj, ok := s.Store.GetProject(projID)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "Project tidak ditemukan")
+		return
+	}
+
+	var req struct {
+		Verdict    string `json:"verdict"`    // keep | drop | maybe
+		Funny      int    `json:"funny"`      // 0 - 5
+		Note       string `json:"note"`       // free-form note
+		MomentType string `json:"momentType"` // optional override
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "Format JSON verdict tidak valid")
+		return
+	}
+	v := strings.ToLower(strings.TrimSpace(req.Verdict))
+	if v != "keep" && v != "drop" && v != "maybe" {
+		writeErr(w, http.StatusBadRequest, "verdict harus salah satu dari: keep, drop, maybe")
+		return
+	}
+	funny := req.Funny
+	if funny < 0 {
+		funny = 0
+	} else if funny > 5 {
+		funny = 5
+	}
+	mt := strings.ToLower(strings.TrimSpace(req.MomentType))
+	if mt != "" && !isValidMomentType(mt) {
+		writeErr(w, http.StatusBadRequest, "momentType harus salah satu dari: crash, fail, hype, twist, victory, meme, custom")
+		return
+	}
+
+	p := getPrincipal(r)
+	verdictBy := p.Name
+	if p.Via != "" {
+		verdictBy = fmt.Sprintf("%s (%s)", p.Name, p.Via)
+	}
+
+	// Copy candidate slice before mutating so we never race with concurrent readers
+	cands := make([]model.ClipCandidate, len(proj.Candidates))
+	copy(cands, proj.Candidates)
+
+	foundIdx := -1
+	for i := range cands {
+		if cands[i].ID == candID {
+			foundIdx = i
+			break
+		}
+	}
+	if foundIdx < 0 {
+		writeErr(w, http.StatusNotFound, "Kandidat tidak ditemukan pada project ini")
+		return
+	}
+
+	if mt != "" {
+		cands[foundIdx].MomentType = mt
+	} else if cands[foundIdx].MomentType != "" {
+		mt = cands[foundIdx].MomentType
+	}
+	if s.Audio != nil && cands[foundIdx].MomentType != "" {
+		dec := s.Audio.ResolveAutoEditForMoment(cands[foundIdx].MomentType, "", "")
+		cands[foundIdx].AutoEdit = &dec
+	}
+
+	cv := &model.CandidateVerdict{
+		Verdict:    v,
+		Funny:      funny,
+		Note:       strings.TrimSpace(req.Note),
+		MomentType: mt,
+		VerdictBy:  verdictBy,
+		MemberID:   p.ID,
+		Via:        p.Via,
+		UpdatedAt:  time.Now(),
+	}
+	cands[foundIdx].Verdict = cv
+	proj.Candidates = cands
+
+	if err := s.Store.SaveProject(proj); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.Broker.Publish("project_update", proj)
+	s.Broker.Log("verdict", "info", fmt.Sprintf("📝 Verdict [%s] (funny=%d/5) pada %s/%s oleh %s", strings.ToUpper(v), funny, proj.ID, candID, verdictBy))
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok":          true,
+		"projectId":   proj.ID,
+		"candidateId": candID,
+		"verdict":     cv,
+		"candidate":   cands[foundIdx],
+	})
 }
