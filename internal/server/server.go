@@ -245,6 +245,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/audio/presets/{id}", s.handleDeleteAudioPreset)
 	mux.HandleFunc("GET /api/audio/trending", s.handleListTrendingAudio)
 	mux.HandleFunc("POST /api/audio/trending/import", s.handleImportTrendingAudio)
+	mux.HandleFunc("GET /api/audio/moment-map", s.handleGetMomentEditMap)
 
 	// Embedded Web Dashboard UI
 	subFS, _ := fs.Sub(web.FS, ".")
@@ -733,12 +734,27 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.Store.ListProjects())
 }
 
+func (s *Server) enrichProjectAutoEdit(proj *model.Project) {
+	if proj == nil || s.Audio == nil {
+		return
+	}
+	for i := range proj.Candidates {
+		c := &proj.Candidates[i]
+		if strings.TrimSpace(c.MomentType) == "" {
+			c.MomentType = analyzer.ClassifyMomentType(c.Transcript, c.ArcReason, c.SampleChats)
+		}
+		dec := s.Audio.ResolveAutoEditForMoment(c.MomentType, "", "")
+		c.AutoEdit = &dec
+	}
+}
+
 func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 	proj, ok := s.Store.GetProject(r.PathValue("id"))
 	if !ok {
 		writeErr(w, http.StatusNotFound, "Project tidak ditemukan")
 		return
 	}
+	s.enrichProjectAutoEdit(proj)
 	writeJSON(w, http.StatusOK, proj)
 }
 
@@ -1022,6 +1038,7 @@ func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat
 
 	proj.Timeline = res.Timeline
 	proj.Candidates = res.Candidates
+	s.enrichProjectAutoEdit(proj)
 	proj.Signals = res.Signals
 	proj.Status = "ready"
 	proj.StatusMessage = fmt.Sprintf("Siap! Ditemukan %d momen arc hits.", len(res.Candidates))
@@ -1146,6 +1163,7 @@ func (s *Server) handleReanalyzeProject(w http.ResponseWriter, r *http.Request) 
 	proj.DetectConfig = cfg
 	proj.Timeline = res.Timeline
 	proj.Candidates = res.Candidates
+	s.enrichProjectAutoEdit(proj)
 	proj.Signals = res.Signals
 	proj.StatusMessage = fmt.Sprintf("Re-analisis selesai: %d momen terdeteksi.", len(res.Candidates))
 	_ = s.Store.SaveProject(proj)
@@ -1864,6 +1882,13 @@ func (s *Server) handleServeAudio(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRegenerateAudio(w http.ResponseWriter, r *http.Request) {
 	s.Audio.EnsureBuiltIns()
 	writeJSON(w, http.StatusOK, s.Audio.List())
+}
+
+func (s *Server) handleGetMomentEditMap(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"path": s.Audio.MomentMapPath(),
+		"map":  s.Audio.GetMomentEditMap(),
+	})
 }
 
 func (s *Server) handleListTrendingAudio(w http.ResponseWriter, r *http.Request) {

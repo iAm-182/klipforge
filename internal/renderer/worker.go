@@ -468,17 +468,54 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 	}
 
 	// Step 3: Resolve Backsound (BGM) + Sound Effects (SFX) cues from Audio Library
-	bgmPath := ""
-	if wp.Audio != nil && opts.AudioFX.BGMAssetID != "" {
-		if a, ok := wp.Audio.Get(opts.AudioFX.BGMAssetID); ok && fileExists(a.FilePath) {
-			bgmPath = a.FilePath
-		}
-	}
+	// Support SFXAutoPreset == "auto_by_moment" (explicit BGMAssetID / SFXCues ALWAYS win!)
 	peakOffset := opts.VideoFX.PeakOffsetSec
 	if peakOffset <= 0.2 || peakOffset >= clipDur-0.5 {
 		peakOffset = clipDur * 0.38
 	}
-	resolvedSFX := wp.resolveSFXCues(opts.AudioFX, peakOffset, clipDur)
+	momentType := wp.inferCandidateMomentType(proj, opts)
+	bgmAssetID := strings.TrimSpace(opts.AudioFX.BGMAssetID)
+	var autoSFX []model.SFXCue
+	if wp.Audio != nil && opts.AudioFX.SFXAutoPreset == "auto_by_moment" {
+		explicitSFX := ""
+		if len(opts.AudioFX.SFXCues) > 0 {
+			explicitSFX = opts.AudioFX.SFXCues[0].AssetID
+		}
+		dec := wp.Audio.ResolveAutoEditForMoment(momentType, explicitSFX, bgmAssetID)
+		if bgmAssetID == "" && dec.BGMID != "" {
+			bgmAssetID = dec.BGMID
+		}
+		if len(opts.AudioFX.SFXCues) == 0 && dec.SFXID != "" {
+			rules := wp.Audio.GetMomentEditMap()
+			rule := rules[dec.MomentType]
+			if rule.SecondarySFXID != "" && dec.SFXID == rule.SFXID {
+				autoSFX = []model.SFXCue{
+					{AssetID: dec.SFXID, AtSec: math.Max(0.1, peakOffset-1.6), Volume: 0.78},
+					{AssetID: rule.SecondarySFXID, AtPeak: true, Volume: 1.02},
+				}
+			} else {
+				autoSFX = []model.SFXCue{
+					{AssetID: dec.SFXID, AtPeak: true, Volume: 0.96},
+				}
+			}
+		}
+		decCopy := dec
+		job.AutoEdit = &decCopy
+		_ = wp.Store.SaveJob(job)
+	}
+
+	bgmPath := ""
+	if wp.Audio != nil && bgmAssetID != "" {
+		if a, ok := wp.Audio.Get(bgmAssetID); ok && fileExists(a.FilePath) {
+			bgmPath = a.FilePath
+		}
+	}
+	audioFXForResolve := opts.AudioFX
+	if len(autoSFX) > 0 {
+		audioFXForResolve.SFXAutoPreset = "custom"
+		audioFXForResolve.SFXCues = autoSFX
+	}
+	resolvedSFX := wp.resolveSFXCues(audioFXForResolve, peakOffset, clipDur)
 
 	// Step 4: Prepare campaign watermark / intro / outro paths
 	var wmCfg *model.WatermarkConfig
@@ -691,15 +728,35 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 			seekStart = 0
 		}
 
+		segEndSFXID := strings.TrimSpace(seg.EndSFXID)
+		segBGMAssetID := strings.TrimSpace(seg.BGMAssetID)
+		if wp.Audio != nil && opts.AudioFX.SFXAutoPreset == "auto_by_moment" && strings.TrimSpace(seg.MomentType) != "" {
+			explicitBGM := segBGMAssetID
+			if explicitBGM == "" {
+				explicitBGM = strings.TrimSpace(opts.AudioFX.BGMAssetID)
+			}
+			dec := wp.Audio.ResolveAutoEditForMoment(seg.MomentType, segEndSFXID, explicitBGM)
+			if segEndSFXID == "" && dec.SFXID != "" {
+				segEndSFXID = dec.SFXID
+			}
+			if explicitBGM == "" && dec.BGMID != "" {
+				segBGMAssetID = dec.BGMID
+			}
+			if job.AutoEdit == nil {
+				decCopy := dec
+				job.AutoEdit = &decCopy
+			}
+		}
+
 		endSfxPath := ""
-		if wp.Audio != nil && seg.EndSFXID != "" {
-			if a, ok := wp.Audio.Get(seg.EndSFXID); ok && fileExists(a.FilePath) {
+		if wp.Audio != nil && segEndSFXID != "" {
+			if a, ok := wp.Audio.Get(segEndSFXID); ok && fileExists(a.FilePath) {
 				endSfxPath = a.FilePath
 			}
 		}
 		segBGMPath := ""
-		if wp.Audio != nil && seg.BGMAssetID != "" {
-			if a, ok := wp.Audio.Get(seg.BGMAssetID); ok && fileExists(a.FilePath) {
+		if wp.Audio != nil && segBGMAssetID != "" {
+			if a, ok := wp.Audio.Get(segBGMAssetID); ok && fileExists(a.FilePath) {
 				segBGMPath = a.FilePath
 			}
 		}
@@ -961,6 +1018,26 @@ func (wp *WorkerPool) processPostEditJob(workerID int, job *model.RenderJob) {
 	wp.Broker.Publish("job_update", job)
 	wp.Broker.Log("worker", "success", fmt.Sprintf("Post-Edit selesai: %s (%.1fs, %.2f MB)", fileName, info.Duration, float64(size)/(1024*1024)))
 	wp.notifyJobDone(job)
+}
+
+func (wp *WorkerPool) inferCandidateMomentType(proj *model.Project, opts model.RenderOptions) string {
+	if proj == nil {
+		return "hype"
+	}
+	if opts.CandidateID != "" {
+		for _, c := range proj.Candidates {
+			if c.ID == opts.CandidateID && strings.TrimSpace(c.MomentType) != "" {
+				return strings.ToLower(strings.TrimSpace(c.MomentType))
+			}
+		}
+	}
+	mid := (opts.StartSec + opts.EndSec) / 2
+	for _, c := range proj.Candidates {
+		if mid >= c.StartSec && mid <= c.EndSec && strings.TrimSpace(c.MomentType) != "" {
+			return strings.ToLower(strings.TrimSpace(c.MomentType))
+		}
+	}
+	return "hype"
 }
 
 func (wp *WorkerPool) resolveSFXCues(cfg model.AudioFXConfig, peakOffset, clipDur float64) []ResolvedSFX {

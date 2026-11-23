@@ -402,3 +402,56 @@ func clamp0100(v float64) float64 {
 	}
 	return v
 }
+
+// ClassifyMomentType performs fast offline rule-based classification of a candidate moment
+// into one of: crash, fail, victory, twist, meme, or hype.
+func ClassifyMomentType(transcript, arcReason string, sampleChats []string) string {
+	var sb strings.Builder
+	sb.WriteByte(' ')
+	sb.WriteString(strings.ToLower(transcript))
+	sb.WriteByte(' ')
+	sb.WriteString(strings.ToLower(arcReason))
+	for _, ch := range sampleChats {
+		sb.WriteByte(' ')
+		sb.WriteString(strings.ToLower(ch))
+	}
+	sb.WriteByte(' ')
+	hay := sb.String()
+
+	scoreOf := func(kws []string) int {
+		n := 0
+		for _, kw := range kws {
+			if strings.Contains(hay, kw) {
+				n++
+			}
+		}
+		return n
+	}
+
+	crashKws := []string{"nabrak", "tabrak", "kecelakaan", "kelindes", "ketabrak", "kebalik", "meledak", "ledak", "nyangkut", "crash", "boom", "mental", "hancur"}
+	failKws := []string{"mati", "tewas", "kalah", "gagal", "wasted", "busted", "jatuh", "kecebur", "tamat", "riwayat", "ketangkap", "tangkap", "kepung", "tembak", "baku tembak", "polisi"}
+	victoryKws := []string{"menang", "clutch", "booyah", "juara", "berhasil", "lolos", "selamat", " gg ", "victory", "ez banget", "finish"}
+	twistKws := []string{"ternyata", "plot twist", "kok bisa", "apaan tuh", "tiba-tiba", "gak nyangka", "ga nyangka", "kaget", "bisa-bisanya", "no way"}
+	memeKws := []string{"wkwk", "kwkw", "ngakak", "kocak", "lucu", "badut", "alasan", "bruh", "lawak", "haha", "njir", "bjir"}
+
+	scores := []struct {
+		kind  string
+		score int
+	}{
+		{"crash", scoreOf(crashKws) * 3},
+		{"fail", scoreOf(failKws) * 3},
+		{"victory", scoreOf(victoryKws) * 3},
+		{"twist", scoreOf(twistKws) * 2},
+		{"meme", scoreOf(memeKws) * 2},
+	}
+
+	bestKind := "hype"
+	bestScore := 0
+	for _, s := range scores {
+		if s.score > bestScore {
+			bestScore = s.score
+			bestKind = s.kind
+		}
+	}
+	return bestKind
+}

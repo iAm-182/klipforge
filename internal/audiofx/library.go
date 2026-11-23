@@ -19,11 +19,13 @@ import (
 
 // Library manages built-in royalty-free CapCut-style SFX (36+) & BGM (15+) packs plus user-uploaded custom audio files.
 type Library struct {
-	mu       sync.RWMutex
-	AudioDir string
-	MetaPath string
-	Deps     *deps.Manager
-	assets   map[string]*model.AudioAsset
+	mu               sync.RWMutex
+	AudioDir         string
+	MetaPath         string
+	Deps             *deps.Manager
+	assets           map[string]*model.AudioAsset
+	momentMap        map[string]MomentEditRule
+	momentMapModTime time.Time
 }
 
 type synthSpec struct {

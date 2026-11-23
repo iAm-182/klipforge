@@ -530,6 +530,7 @@ func extractCandidates(
 		usedHooks[strings.ToUpper(hookText)] = true
 
 		vbCopy := vBreakdown
+		momentType := ClassifyMomentType(speech, arcReason, samples)
 		selected = append(selected, model.ClipCandidate{
 			ID:                fmt.Sprintf("clip-%d-%d", left, right),
 			Rank:              rank,
@@ -540,6 +541,7 @@ func extractCandidates(
 			ArcStartSec:       float64(left),
 			ArcEndSec:         float64(right),
 			ArcReason:         arcReason,
+			MomentType:        momentType,
 			DurationSec:       float64(right - left),
 			Score:             score100,
 			HeatmapScore:      math.Round(maxH * 100),
