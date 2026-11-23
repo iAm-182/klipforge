@@ -57,6 +57,16 @@ function Test-EngineHealth($Token) {
     }
 }
 
+function Test-TunnelHealth($TunnelUrl, $Token) {
+    if (-not $TunnelUrl) { return $false }
+    try {
+        $code = & curl.exe -sS -m 6 -o NUL -w "%{http_code}" -H "X-Engine-Token: $Token" "$TunnelUrl/api/status" 2>$null
+        return ($code -eq "200")
+    } catch {
+        return $false
+    }
+}
+
 function Start-GoEngine($Token) {
     Write-Host "[Engine] Menyalakan KlipForge Go Engine di $EngineUrl..." -ForegroundColor Yellow
     $p = Start-Process -FilePath $ExePath -ArgumentList "--port","8787","--no-open" -WorkingDirectory $Root -PassThru -WindowStyle Minimized
@@ -162,6 +172,7 @@ try {
 
     # 30-second self-healing watchdog loop!
     $failCount = 0
+    $tunnelFailCount = 0
     while ($true) {
         Start-Sleep -Seconds 30
 
@@ -186,12 +197,26 @@ try {
             $failCount = 0
         }
 
-        # 2. Check Cloudflare Tunnel health
-        if (-not $tunnelInfo -or -not $tunnelInfo.Proc -or $tunnelInfo.Proc.HasExited) {
-            Write-Host "[Watchdog] $(Get-Date -Format 'HH:mm:ss') Tunnel mati — membuka ulang & registrasi ke $EdgeUrl..." -ForegroundColor Red
+        # 2. Check Cloudflare Tunnel health (process + active DNS/HTTP reachability for zombie quick-tunnels)
+        $tunnelDead = (-not $tunnelInfo -or -not $tunnelInfo.Proc -or $tunnelInfo.Proc.HasExited)
+        if (-not $tunnelDead) {
+            if (Test-TunnelHealth $tunnelInfo.Url $engineToken) {
+                $tunnelFailCount = 0
+            } else {
+                $tunnelFailCount++
+                Write-Host "[Watchdog] $(Get-Date -Format 'HH:mm:ss') Tunnel tidak terjangkau ($tunnelFailCount/2)..." -ForegroundColor Yellow
+                if ($tunnelFailCount -ge 2) {
+                    $tunnelDead = $true
+                    try { Stop-Process -Id $tunnelInfo.Proc.Id -Force -ErrorAction SilentlyContinue } catch {}
+                }
+            }
+        }
+        if ($tunnelDead) {
+            Write-Host "[Watchdog] $(Get-Date -Format 'HH:mm:ss') Tunnel mati/expired — membuka ulang & registrasi ke $EdgeUrl..." -ForegroundColor Red
             Send-NotifyWebhook "tunnel_down" "⚠️ Cloudflare Tunnel Putus — Reconnecting" "Watchdog sedang membuka tunnel baru dan memperbarui bridge $EdgeUrl."
             try {
                 $tunnelInfo = Start-And-Register-Tunnel $bridgeSecret
+                $tunnelFailCount = 0
                 Write-Host "[Watchdog] Tunnel baru terhubung: $($tunnelInfo.Url)" -ForegroundColor Green
                 Send-NotifyWebhook "tunnel_recovered" "✅ Tunnel Terhubung Kembali" "Akses online $EdgeUrl kembali aktif."
             } catch {
