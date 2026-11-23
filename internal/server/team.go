@@ -153,11 +153,12 @@ func isRoleAllowed(p model.Principal, method, path string) bool {
 
 	if method == http.MethodPost {
 		allowedClipperExact := map[string]bool{
-			"/api/projects/analyze":     true,
-			"/api/jobs/render":          true,
-			"/api/jobs/batch":           true,
-			"/api/jobs/compile":         true,
-			"/api/audio/presets":        true,
+			"/api/projects/analyze":      true,
+			"/api/jobs/render":           true,
+			"/api/jobs/batch":            true,
+			"/api/jobs/compile":          true,
+			"/api/jobs/edit-script":      true,
+			"/api/audio/presets":         true,
 			"/api/audio/trending/import": true,
 		}
 		if allowedClipperExact[path] {

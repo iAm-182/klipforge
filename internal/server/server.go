@@ -220,6 +220,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/jobs/render", s.handleRenderSingle)
 	mux.HandleFunc("POST /api/jobs/batch", s.handleRenderBatch)
 	mux.HandleFunc("POST /api/jobs/compile", s.handleRenderCompile)
+	mux.HandleFunc("POST /api/jobs/edit-script", s.handleEditScript)
 	mux.HandleFunc("POST /api/jobs/{id}/post-edit", s.handlePostEditJob)
 	mux.HandleFunc("POST /api/jobs/{id}/review", s.handleReviewJob)
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.handleCancelJob)
@@ -312,6 +313,7 @@ func isAgentAllowed(method, path string) bool {
 		"/api/jobs/render":      true,
 		"/api/jobs/batch":       true,
 		"/api/jobs/compile":     true,
+		"/api/jobs/edit-script": true,
 	}
 	if allowedExact[path] {
 		return true

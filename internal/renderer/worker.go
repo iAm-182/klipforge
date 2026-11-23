@@ -815,7 +815,11 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 	}
 	outDir := filepath.Join(settings.OutputDir, campSlug)
 	_ = os.MkdirAll(outDir, 0o755)
-	fileName := fmt.Sprintf("TOP%d_%s_%s.mp4", total, sanitizeFilename(job.Title), job.ID[len(job.ID)-5:])
+	filePrefix := fmt.Sprintf("TOP%d", total)
+	if opts.Mode == "edit_script" {
+		filePrefix = "EDIT"
+	}
+	fileName := fmt.Sprintf("%s_%s_%s.mp4", filePrefix, sanitizeFilename(job.Title), job.ID[len(job.ID)-5:])
 	outPath := filepath.Join(outDir, fileName)
 
 	wp.Broker.Log("worker", "info", fmt.Sprintf("[W%d] Rendering Kompilasi %s (%d klip)", workerID, fileName, total))
