@@ -51,12 +51,19 @@ html, body {
 
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand-logo {
-  width: 36px; height: 36px;
-  border-radius: 10px;
-  background: linear-gradient(135deg, var(--primary), var(--cyan));
+  width: 38px; height: 38px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: #0b1224;
   display: grid; place-items: center;
-  font-size: 18px;
-  box-shadow: 0 0 20px rgba(99, 102, 241, 0.35);
+  box-shadow: 0 0 18px rgba(56, 189, 248, 0.35);
+  flex-shrink: 0;
+}
+.brand-logo-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 .brand-title { font-weight: 700; font-size: 16px; display: flex; align-items: center; gap: 8px; }
 .brand-sub { font-size: 11px; color: var(--muted); }
