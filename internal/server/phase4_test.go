@@ -237,3 +237,72 @@ func TestPhase4_4_CandidateVerdictStore(t *testing.T) {
 		t.Fatalf("expected 400 for invalid verdict value, got %d", recBad.Code)
 	}
 }
+
+func TestPhase4_5_ScopedAgentTrendingImportGuards(t *testing.T) {
+	srv, st, h := setupPhase4TestServer(t)
+
+	// 1. Agent trying arbitrary URL NOT in trending radar -> STRICT 403 Forbidden!
+	arbBody := bytes.NewBufferString(`{"url":"https://www.youtube.com/watch?v=arbitrary123","name":"Arbitrary","kind":"sfx"}`)
+	reqArb := httptest.NewRequest(http.MethodPost, "/api/audio/trending/import", arbBody)
+	reqArb.Header.Set("X-Agent-Key", srv.AgentKey)
+	recArb := httptest.NewRecorder()
+	h.ServeHTTP(recArb, reqArb)
+	if recArb.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for agent arbitrary URL import, got %d: %s", recArb.Code, recArb.Body.String())
+	}
+
+	// Register a radar URL (also verify canonical youtu.be normalization works!)
+	radarURL := "https://www.youtube.com/watch?v=RadarSound01"
+	srv.Audio.RecordRadarURL(radarURL)
+	if !srv.Audio.IsKnownRadarURL("https://youtu.be/RadarSound01") {
+		t.Fatalf("expected canonical YouTube URL normalization to match radar URL")
+	}
+
+	// 2. Owner disables agent trending import in settings -> even radar URL returns 403 Forbidden!
+	cfg := st.GetSettings()
+	cfg.DisableAgentTrendingImport = true
+	_ = st.SaveSettings(cfg)
+
+	reqDis := httptest.NewRequest(http.MethodPost, "/api/audio/trending/import",
+		bytes.NewBufferString(`{"url":"`+radarURL+`","name":"Radar SFX","kind":"sfx"}`))
+	reqDis.Header.Set("X-Agent-Key", srv.AgentKey)
+	recDis := httptest.NewRecorder()
+	h.ServeHTTP(recDis, reqDis)
+	if recDis.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 when DisableAgentTrendingImport=true, got %d: %s", recDis.Code, recDis.Body.String())
+	}
+
+	// Re-enable toggle
+	cfg.DisableAgentTrendingImport = false
+	_ = st.SaveSettings(cfg)
+
+	// 3. Daily quota cap: after 5 imports today for owner-agent, 6th request gets 429 Too Many Requests!
+	for i := 0; i < 5; i++ {
+		st.IncrementAgentTrendImportsToday("owner-agent")
+	}
+	reqCap := httptest.NewRequest(http.MethodPost, "/api/audio/trending/import",
+		bytes.NewBufferString(`{"url":"`+radarURL+`","name":"Radar SFX 6","kind":"sfx","maxDurationSec":60}`))
+	reqCap.Header.Set("X-Agent-Key", srv.AgentKey)
+	recCap := httptest.NewRecorder()
+	h.ServeHTTP(recCap, reqCap)
+	if recCap.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after 5 daily agent imports, got %d: %s", recCap.Code, recCap.Body.String())
+	}
+
+	// 4. Negative least-privilege regressions: agent STILL gets 403 on DELETE, review, team, settings!
+	negCases := [][2]string{
+		{http.MethodDelete, "/api/campaigns/windah-gtavi-motionklip"},
+		{http.MethodPost, "/api/jobs/job-123/review"},
+		{http.MethodGet, "/api/team"},
+		{http.MethodPut, "/api/settings"},
+	}
+	for _, tc := range negCases {
+		rNeg := httptest.NewRequest(tc[0], tc[1], bytes.NewBufferString(`{}`))
+		rNeg.Header.Set("X-Agent-Key", srv.AgentKey)
+		recNeg := httptest.NewRecorder()
+		h.ServeHTTP(recNeg, rNeg)
+		if recNeg.Code != http.StatusForbidden {
+			t.Fatalf("regression: expected 403 for agent %s %s, got %d", tc[0], tc[1], recNeg.Code)
+		}
+	}
+}

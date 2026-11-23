@@ -26,6 +26,7 @@ type Library struct {
 	assets           map[string]*model.AudioAsset
 	momentMap        map[string]MomentEditRule
 	momentMapModTime time.Time
+	radarURLs        map[string]time.Time
 }
 
 type synthSpec struct {
@@ -740,12 +741,14 @@ func NewLibrary(dataDir string, d *deps.Manager) *Library {
 	audioDir := filepath.Join(dataDir, "audio")
 	_ = os.MkdirAll(audioDir, 0o755)
 	lib := &Library{
-		AudioDir: audioDir,
-		MetaPath: filepath.Join(dataDir, "audio_library.json"),
-		Deps:     d,
-		assets:   make(map[string]*model.AudioAsset),
+		AudioDir:  audioDir,
+		MetaPath:  filepath.Join(dataDir, "audio_library.json"),
+		Deps:      d,
+		assets:    make(map[string]*model.AudioAsset),
+		radarURLs: make(map[string]time.Time),
 	}
 	lib.load()
+	lib.loadRadarURLs()
 	// Generate missing built-in royalty-free assets asynchronously with bounded concurrency!
 	go lib.EnsureBuiltIns()
 	return lib
@@ -950,6 +953,31 @@ func (l *Library) Delete(id string) error {
 	delete(l.assets, id)
 	l.saveLocked()
 	return nil
+}
+
+// SetAttribution updates importer attribution & optional probed duration on an existing audio asset and persists metadata.
+func (l *Library) SetAttribution(id, byID, byName, via string, duration float64) (*model.AudioAsset, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	a, ok := l.assets[id]
+	if !ok {
+		return nil, false
+	}
+	if byID != "" {
+		a.ImportedByID = byID
+	}
+	if byName != "" {
+		a.ImportedBy = byName
+	}
+	if via != "" {
+		a.ImportedVia = via
+	}
+	if duration > 0 {
+		a.Duration = duration
+	}
+	l.saveLocked()
+	cp := *a
+	return &cp, true
 }
 
 func fileExists(p string) bool {

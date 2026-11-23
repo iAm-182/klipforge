@@ -310,11 +310,12 @@ func isAgentAllowed(method, path string) bool {
 		return false
 	}
 	allowedExact := map[string]bool{
-		"/api/projects/analyze": true,
-		"/api/jobs/render":      true,
-		"/api/jobs/batch":       true,
-		"/api/jobs/compile":     true,
-		"/api/jobs/edit-script": true,
+		"/api/projects/analyze":      true,
+		"/api/jobs/render":           true,
+		"/api/jobs/batch":            true,
+		"/api/jobs/compile":          true,
+		"/api/jobs/edit-script":      true,
+		"/api/audio/trending/import": true,
 	}
 	if allowedExact[path] {
 		return true
@@ -1939,16 +1940,53 @@ func (s *Server) handleImportTrendingAudio(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusBadRequest, "Format JSON import sound tidak valid")
 		return
 	}
-	asset, err := s.Audio.ImportSoundFromURL(r.Context(), req.URL, req.Name, req.Kind, req.Category, req.MaxDurationSec, s.Store.GetSettings())
+
+	p := getPrincipal(r)
+	settings := s.Store.GetSettings()
+	const agentDailyImportLimit = 5
+	const agentMaxDurationSec = 30.0
+
+	if p.Role == "agent" {
+		if settings.DisableAgentTrendingImport {
+			writeErr(w, http.StatusForbidden, "Forbidden: Owner menonaktifkan import trending sound untuk Agent")
+			return
+		}
+		if !s.Audio.IsKnownRadarURL(req.URL) {
+			writeErr(w, http.StatusForbidden, "Forbidden: Agent hanya boleh mengimpor sound dari daftar radar GET /api/audio/trending (URL arbitrer khusus pengguna manusia)")
+			return
+		}
+		if used, _, allowed := s.Store.CheckAgentTrendQuota(p.ID, agentDailyImportLimit); !allowed {
+			writeErr(w, http.StatusTooManyRequests, fmt.Sprintf("Batas harian import sound untuk agent tercapai (%d/%d hari ini untuk %s)", used, agentDailyImportLimit, p.Name))
+			return
+		}
+		if req.MaxDurationSec <= 0 {
+			if strings.EqualFold(strings.TrimSpace(req.Kind), "sfx") {
+				req.MaxDurationSec = 12.0
+			} else {
+				req.MaxDurationSec = agentMaxDurationSec
+			}
+		} else if req.MaxDurationSec > agentMaxDurationSec {
+			req.MaxDurationSec = agentMaxDurationSec
+		}
+	}
+
+	asset, err := s.Audio.ImportSoundFromURL(r.Context(), req.URL, req.Name, req.Kind, req.Category, req.MaxDurationSec, settings)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	probedDur := 0.0
 	if info, err := renderer.ProbeMedia(r.Context(), s.Deps.GetStatus().FFprobePath, asset.FilePath); err == nil && info.Duration > 0 {
+		probedDur = info.Duration
 		asset.Duration = info.Duration
 	}
-	p := getPrincipal(r)
-	s.Broker.Log("audio", "success", fmt.Sprintf("🔥 Import Sound Trend (%s) oleh %s: %s (%.1fs)", strings.ToUpper(asset.Kind), p.Name, asset.Name, asset.Duration))
+	if updated, ok := s.Audio.SetAttribution(asset.ID, p.ID, p.Name, p.Via, probedDur); ok {
+		asset = updated
+	}
+	if p.Role == "agent" {
+		s.Store.IncrementAgentTrendImportsToday(p.ID)
+	}
+	s.Broker.Log("audio", "success", fmt.Sprintf("🔥 Import Sound Trend (%s) oleh %s (%s): %s (%.1fs)", strings.ToUpper(asset.Kind), p.Name, p.Via, asset.Name, asset.Duration))
 	writeJSON(w, http.StatusCreated, asset)
 }
 

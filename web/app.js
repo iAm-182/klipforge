@@ -1697,6 +1697,7 @@
       if ($('sMinFreeGb')) $('sMinFreeGb').value = s.minFreeDiskGb || 2.0;
       if ($('sRetentionDays')) $('sRetentionDays').value = s.outputRetentionDays || 0;
       if ($('sNotifyWebhook')) $('sNotifyWebhook').value = s.notifyWebhookUrl || '';
+      if ($('sDisableAgentTrendImport')) $('sDisableAgentTrendImport').checked = !!s.disableAgentTrendingImport;
     }
   }
 
@@ -2159,6 +2160,7 @@
       minFreeDiskGb: parseFloat($('sMinFreeGb')?.value || '2') || 2.0,
       outputRetentionDays: parseInt($('sRetentionDays')?.value || '0', 10) || 0,
       notifyWebhookUrl: ($('sNotifyWebhook')?.value || '').trim(),
+      disableAgentTrendingImport: Boolean($('sDisableAgentTrendImport')?.checked),
     };
     try {
       state.settings = await api('/api/settings', {
@@ -2439,10 +2441,11 @@
       const el = document.createElement('div');
       el.className = 'audio-item';
       const isPlaying = state.playingAudioId === a.id;
+      const impBy = a.importedBy ? ` · oleh ${escapeHtml(a.importedBy)}${a.importedVia === 'agent' ? ' (Muse)' : ''}` : '';
       el.innerHTML = `
         <div>
           <strong>${a.builtIn ? '✨' : '⭐'} ${escapeHtml(a.name)}</strong>
-          <div class="audio-item-meta">${escapeHtml(a.category || a.kind.toUpperCase())} · ${(a.duration || 0).toFixed(1)}s · ${a.builtIn ? 'Built-in DMCA-Free' : 'Custom Upload'}</div>
+          <div class="audio-item-meta">${escapeHtml(a.category || a.kind.toUpperCase())} · ${(a.duration || 0).toFixed(1)}s · ${a.builtIn ? 'Built-in DMCA-Free' : 'Custom / Import'}${impBy}</div>
         </div>
         <div class="audio-item-actions">
           <button class="btn btn-xs btn-secondary btn-play-aud">${isPlaying ? '⏹ Stop' : '▶ Play'}</button>

@@ -23,12 +23,13 @@ type Store struct {
 	AssetsDir string
 	OutputDir string
 
-	campaigns  map[string]*model.Campaign
-	projects   map[string]*model.Project
-	jobs       map[string]*model.RenderJob
-	autopilots map[string]*model.AutopilotRule
-	team       map[string]*model.TeamMember
-	settings   model.AppSettings
+	campaigns       map[string]*model.Campaign
+	projects        map[string]*model.Project
+	jobs            map[string]*model.RenderJob
+	autopilots      map[string]*model.AutopilotRule
+	team            map[string]*model.TeamMember
+	agentTrendQuota map[string]int
+	settings        model.AppSettings
 }
 
 func NewStore(baseDir string) (*Store, error) {
@@ -48,11 +49,12 @@ func NewStore(baseDir string) (*Store, error) {
 		DataDir:   dataDir,
 		AssetsDir: assetsDir,
 		OutputDir: outputDir,
-		campaigns:  make(map[string]*model.Campaign),
-		projects:   make(map[string]*model.Project),
-		jobs:       make(map[string]*model.RenderJob),
-		autopilots: make(map[string]*model.AutopilotRule),
-		team:       make(map[string]*model.TeamMember),
+		campaigns:       make(map[string]*model.Campaign),
+		projects:        make(map[string]*model.Project),
+		jobs:            make(map[string]*model.RenderJob),
+		autopilots:      make(map[string]*model.AutopilotRule),
+		team:            make(map[string]*model.TeamMember),
+		agentTrendQuota: make(map[string]int),
 		settings: model.AppSettings{
 			MaxWorkers:      2,
 			DefaultEncoder:  "libx264",
@@ -179,6 +181,16 @@ func (s *Store) loadAll() {
 					m.MaxActive = 3
 				}
 				s.team[m.ID] = m
+			}
+		}
+	}
+
+	// Load daily agent trending import quota
+	var quota map[string]int
+	if readJSONWithBackupFallback(filepath.Join(s.DataDir, "agent_trending_quota.json"), &quota) {
+		for k, v := range quota {
+			if k != "" && v > 0 {
+				s.agentTrendQuota[k] = v
 			}
 		}
 	}
@@ -853,4 +865,58 @@ func (s *Store) CountActiveJobsByMember(memberID string) int {
 		}
 	}
 	return n
+}
+
+func agentTrendQuotaKey(memberID string, now time.Time) string {
+	id := strings.TrimSpace(memberID)
+	if id == "" {
+		id = "owner-agent"
+	}
+	return id + "::" + now.Format("2006-01-02")
+}
+
+// GetAgentTrendImportsToday returns how many trending sounds an agent member has imported today.
+func (s *Store) GetAgentTrendImportsToday(memberID string) int {
+	key := agentTrendQuotaKey(memberID, time.Now())
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.agentTrendQuota[key]
+}
+
+// CheckAgentTrendQuota checks whether memberID is within the daily agent trending import cap.
+func (s *Store) CheckAgentTrendQuota(memberID string, dailyLimit int) (used int, remaining int, allowed bool) {
+	if dailyLimit <= 0 {
+		dailyLimit = 5
+	}
+	used = s.GetAgentTrendImportsToday(memberID)
+	remaining = dailyLimit - used
+	if remaining < 0 {
+		remaining = 0
+	}
+	return used, remaining, used < dailyLimit
+}
+
+// IncrementAgentTrendImportsToday increments today's trending import counter for memberID and persists it.
+func (s *Store) IncrementAgentTrendImportsToday(memberID string) int {
+	now := time.Now()
+	key := agentTrendQuotaKey(memberID, now)
+	todayPrefix := now.Format("2006-01-02")
+	yesterdayPrefix := now.AddDate(0, 0, -1).Format("2006-01-02")
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.agentTrendQuota == nil {
+		s.agentTrendQuota = make(map[string]int)
+	}
+	s.agentTrendQuota[key]++
+	count := s.agentTrendQuota[key]
+
+	// Prune old date buckets so quota file stays compact
+	for k := range s.agentTrendQuota {
+		if !strings.HasSuffix(k, "::"+todayPrefix) && !strings.HasSuffix(k, "::"+yesterdayPrefix) {
+			delete(s.agentTrendQuota, k)
+		}
+	}
+	_ = writeJSONAtomic(filepath.Join(s.DataDir, "agent_trending_quota.json"), s.agentTrendQuota)
+	return count
 }

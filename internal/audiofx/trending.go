@@ -41,6 +41,149 @@ var (
 	trendCache   = make(map[string]trendCacheEntry)
 )
 
+// NormalizeRadarURL canonicalizes YouTube/TikTok URLs so minor query/variant differences match reliably.
+func NormalizeRadarURL(rawURL string) string {
+	u := strings.TrimSpace(rawURL)
+	if u == "" {
+		return ""
+	}
+	parsed, err := url.Parse(u)
+	if err != nil || parsed.Hostname() == "" {
+		return strings.ToLower(u)
+	}
+	host := strings.ToLower(parsed.Hostname())
+	host = strings.TrimPrefix(host, "www.")
+	host = strings.TrimPrefix(host, "m.")
+	if host == "youtu.be" {
+		id := strings.Trim(parsed.Path, "/")
+		if id != "" {
+			return "https://www.youtube.com/watch?v=" + id
+		}
+	}
+	if host == "youtube.com" {
+		if v := strings.TrimSpace(parsed.Query().Get("v")); v != "" {
+			return "https://www.youtube.com/watch?v=" + v
+		}
+		if strings.HasPrefix(parsed.Path, "/shorts/") {
+			id := strings.Trim(strings.TrimPrefix(parsed.Path, "/shorts/"), "/")
+			if idx := strings.IndexByte(id, '/'); idx >= 0 {
+				id = id[:idx]
+			}
+			if id != "" {
+				return "https://www.youtube.com/watch?v=" + id
+			}
+		}
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme == "" {
+		scheme = "https"
+	}
+	cleanPath := strings.TrimRight(parsed.Path, "/")
+	if parsed.RawQuery != "" {
+		return fmt.Sprintf("%s://%s%s?%s", scheme, host, cleanPath, parsed.RawQuery)
+	}
+	return fmt.Sprintf("%s://%s%s", scheme, host, cleanPath)
+}
+
+func (l *Library) radarURLsPath() string {
+	return filepath.Join(l.AudioDir, "radar_urls.json")
+}
+
+func (l *Library) loadRadarURLs() {
+	raw, err := os.ReadFile(l.radarURLsPath())
+	if err != nil {
+		return
+	}
+	var loaded map[string]time.Time
+	if json.Unmarshal(raw, &loaded) != nil {
+		return
+	}
+	cutoff := time.Now().Add(-7 * 24 * time.Hour)
+	l.mu.Lock()
+	for k, ts := range loaded {
+		if ts.After(cutoff) {
+			l.radarURLs[k] = ts
+		}
+	}
+	l.mu.Unlock()
+}
+
+func (l *Library) saveRadarURLsLocked() {
+	cutoff := time.Now().Add(-7 * 24 * time.Hour)
+	for k, ts := range l.radarURLs {
+		if ts.Before(cutoff) {
+			delete(l.radarURLs, k)
+		}
+	}
+	// Cap to 500 most recent entries so file never grows unbounded
+	if len(l.radarURLs) > 500 {
+		type kv struct {
+			k string
+			t time.Time
+		}
+		all := make([]kv, 0, len(l.radarURLs))
+		for k, t := range l.radarURLs {
+			all = append(all, kv{k: k, t: t})
+		}
+		sort.Slice(all, func(i, j int) bool { return all[i].t.After(all[j].t) })
+		trimmed := make(map[string]time.Time, 500)
+		for _, item := range all[:500] {
+			trimmed[item.k] = item.t
+		}
+		l.radarURLs = trimmed
+	}
+	if b, err := json.MarshalIndent(l.radarURLs, "", "  "); err == nil {
+		_ = os.WriteFile(l.radarURLsPath(), b, 0o644)
+	}
+}
+
+// RecordRadarURL registers a URL discovered by the trending radar so scoped agent imports are permitted for it.
+func (l *Library) RecordRadarURL(rawURL string) {
+	norm := NormalizeRadarURL(rawURL)
+	if norm == "" {
+		return
+	}
+	l.mu.Lock()
+	if l.radarURLs == nil {
+		l.radarURLs = make(map[string]time.Time)
+	}
+	l.radarURLs[norm] = time.Now()
+	l.saveRadarURLsLocked()
+	l.mu.Unlock()
+}
+
+// RecordRadarItems batch-registers all URLs returned by the trending radar.
+func (l *Library) RecordRadarItems(items []TrendingSound) {
+	if len(items) == 0 {
+		return
+	}
+	now := time.Now()
+	l.mu.Lock()
+	if l.radarURLs == nil {
+		l.radarURLs = make(map[string]time.Time)
+	}
+	for _, it := range items {
+		if norm := NormalizeRadarURL(it.SourceURL); norm != "" {
+			l.radarURLs[norm] = now
+		}
+	}
+	l.saveRadarURLsLocked()
+	l.mu.Unlock()
+}
+
+// IsKnownRadarURL returns true ONLY if rawURL was previously returned by GET /api/audio/trending (within 7 days).
+func (l *Library) IsKnownRadarURL(rawURL string) bool {
+	norm := NormalizeRadarURL(rawURL)
+	if norm == "" {
+		return false
+	}
+	cutoff := time.Now().Add(-7 * 24 * time.Hour)
+	l.mu.RLock()
+	ts, ok := l.radarURLs[norm]
+	l.mu.RUnlock()
+	return ok && ts.After(cutoff)
+}
+
 // TrendingCategorySpec maps curated TikTok trend categories to clean search queries & duration caps
 // (automatically filtering out 1-hour compilation mixes so only real clippable sounds appear!).
 type trendingQuerySpec struct {
@@ -153,6 +296,7 @@ func (l *Library) FetchTrendingSounds(ctx context.Context, category, customQuery
 		if ent, ok := trendCache[cacheKey]; ok && time.Since(ent.FetchedAt) < 30*time.Minute && len(ent.Items) > 0 {
 			cp := append([]TrendingSound(nil), ent.Items...)
 			trendCacheMu.RUnlock()
+			l.RecordRadarItems(cp)
 			return cp, nil
 		}
 		trendCacheMu.RUnlock()
@@ -238,6 +382,7 @@ func (l *Library) FetchTrendingSounds(ctx context.Context, category, customQuery
 	trendCacheMu.Lock()
 	trendCache[cacheKey] = trendCacheEntry{FetchedAt: time.Now(), Items: items}
 	trendCacheMu.Unlock()
+	l.RecordRadarItems(items)
 	return items, nil
 }
 
