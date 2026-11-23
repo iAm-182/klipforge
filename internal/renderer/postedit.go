@@ -1,43 +1,216 @@
 package renderer
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"klipforge/internal/model"
 )
 
-// PostEditInput bundles everything needed to trim and/or layer additional SFX & BGM
-// directly onto an already-rendered local MP4 clip (zero YouTube re-download!).
+// PostEditInput bundles everything needed for CapCut-Pro-grade local editing on a rendered clip:
+// trim, middle jump-cuts (silence removal), freeze-frame meme, partial slow-mo, pop-up meme text,
+// manual drag-and-drop watermark, custom BGM fades + Auto-Ducking, and unlimited SFX cues!
 type PostEditInput struct {
-	FFmpegPath         string
-	FFprobePath        string
-	SourceMP4          string
-	OutputPath         string
-	WorkDir            string
-	TrimStartSec       float64
-	TrimEndSec         float64
-	PreserveOutro      bool
-	SourceHadOutro     bool
-	Outro              *model.ClipAssetVideo
-	SFXCues            []ResolvedSFX // Timestamps are on the SOURCE MP4 timeline (auto-shifted by TrimStartSec)
-	BGMPath            string
-	BGMVolume          float64
-	BGMAutoDuck        bool
-	Speed              float64
-	Watermark          *model.WatermarkConfig // Optional manual drag-and-drop watermark overlay (ONLY on main clip, NEVER Outro!)
-	Encoder            string
-	Preset             string
-	CRF                int
-	OnProgress         func(pct float64, speed string)
+	FFmpegPath     string
+	FFprobePath    string
+	SourceMP4      string
+	OutputPath     string
+	WorkDir        string
+	TrimStartSec   float64
+	TrimEndSec     float64
+	PreserveOutro  bool
+	SourceHadOutro bool
+	Outro          *model.ClipAssetVideo
+	CutRanges      []model.TimeRange      // Middle spans to remove (Jump-Cut / Dead-Air Cut)
+	TextOverlays   []model.TextOverlay    // Timed pop-up meme text overlays
+	FreezeAtSec    float64                // Optional Freeze-Frame Meme timestamp (source timeline)
+	FreezeDurSec   float64                // Freeze hold duration (0.4 - 4.0s)
+	FreezeGray     bool                   // Dramatic B&W + vignette during freeze
+	SlowMoStart    float64                // Optional partial Slow-Mo start
+	SlowMoEnd      float64                // Optional partial Slow-Mo end
+	SlowMoFactor   float64                // e.g. 0.5 (half speed)
+	SFXCues        []ResolvedSFX          // Timestamps are on the SOURCE MP4 timeline (auto-mapped!)
+	BGMPath        string
+	BGMVolume      float64
+	BGMFadeInSec   float64
+	BGMFadeOutSec  float64
+	BGMAutoDuck    bool
+	Speed          float64
+	Watermark      *model.WatermarkConfig // Optional manual drag-and-drop watermark (ONLY on main clip, NEVER Outro!)
+	Encoder        string
+	Preset         string
+	CRF            int
+	OnProgress     func(pct float64, speed string)
 }
 
-// RenderPostEdit performs fast local trimming and/or multi-SFX + BGM audio layering on a finished clip.
-// When no trim/speed change is requested, it uses `-c:v copy` (bit-exact video, ~1-2 second render!)
+var (
+	reSilStart = regexp.MustCompile(`silence_start:\s*([0-9.]+)`)
+	reSilEnd   = regexp.MustCompile(`silence_end:\s*([0-9.]+)`)
+)
+
+// DetectSilence runs FFmpeg silencedetect to find dead-air spans >= minDur seconds (ReaCut-style silence removal).
+func DetectSilence(ctx context.Context, ffmpegPath, videoPath string, minDur float64) ([]model.TimeRange, error) {
+	if ffmpegPath == "" || !fileExists(videoPath) {
+		return nil, fmt.Errorf("ffmpeg atau file video tidak ditemukan")
+	}
+	if minDur < 0.5 {
+		minDur = 1.2
+	}
+	cmd := exec.CommandContext(ctx, ffmpegPath,
+		"-hide_banner", "-i", videoPath,
+		"-af", fmt.Sprintf("silencedetect=noise=-32dB:d=%.2f", minDur),
+		"-f", "null", "-",
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+
+	var ranges []model.TimeRange
+	curStart := -1.0
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if m := reSilStart.FindStringSubmatch(line); m != nil {
+			if v, err := strconv.ParseFloat(m[1], 64); err == nil {
+				curStart = v
+			}
+		} else if m := reSilEnd.FindStringSubmatch(line); m != nil && curStart >= 0 {
+			if v, err := strconv.ParseFloat(m[1], 64); err == nil && v-curStart >= minDur {
+				// Leave 0.15s breathing room on both edges so speech is never clipped harshly
+				s := curStart + 0.15
+				e := v - 0.15
+				if e-s >= 0.4 {
+					ranges = append(ranges, model.TimeRange{
+						StartSec: math.Round(s*10) / 10,
+						EndSec:   math.Round(e*10) / 10,
+					})
+				}
+			}
+			curStart = -1
+		}
+	}
+	return ranges, nil
+}
+
+type timelinePiece struct {
+	start    float64
+	end      float64
+	speedMul float64 // 1.0 normal, 0.5 slow-mo
+	isFreeze bool
+	freezeD  float64
+}
+
+// buildKeptPieces computes the ordered kept pieces inside [trimStart, trimEnd] after subtracting CutRanges,
+// splitting for SlowMoRange, and inserting an optional FreezeFrame hold.
+func buildKeptPieces(trimStart, trimEnd float64, cuts []model.TimeRange, slowStart, slowEnd, slowFactor, freezeAt, freezeDur float64) []timelinePiece {
+	// 1. Normalize & merge cut ranges inside [trimStart, trimEnd]
+	var cleanCuts []model.TimeRange
+	for _, c := range cuts {
+		s := math.Max(trimStart, c.StartSec)
+		e := math.Min(trimEnd, c.EndSec)
+		if e-s >= 0.25 {
+			cleanCuts = append(cleanCuts, model.TimeRange{StartSec: s, EndSec: e})
+		}
+	}
+	sort.Slice(cleanCuts, func(i, j int) bool { return cleanCuts[i].StartSec < cleanCuts[j].StartSec })
+	var merged []model.TimeRange
+	for _, c := range cleanCuts {
+		if len(merged) == 0 || c.StartSec > merged[len(merged)-1].EndSec {
+			merged = append(merged, c)
+		} else if c.EndSec > merged[len(merged)-1].EndSec {
+			merged[len(merged)-1].EndSec = c.EndSec
+		}
+	}
+
+	// 2. Complement cuts to get kept spans
+	var base []timelinePiece
+	cur := trimStart
+	for _, c := range merged {
+		if c.StartSec-cur >= 0.15 {
+			base = append(base, timelinePiece{start: cur, end: c.StartSec, speedMul: 1.0})
+		}
+		cur = math.Max(cur, c.EndSec)
+	}
+	if trimEnd-cur >= 0.15 {
+		base = append(base, timelinePiece{start: cur, end: trimEnd, speedMul: 1.0})
+	}
+	if len(base) == 0 {
+		base = []timelinePiece{{start: trimStart, end: trimEnd, speedMul: 1.0}}
+	}
+
+	// 3. Apply optional partial Slow-Mo split
+	if slowFactor >= 0.35 && slowFactor <= 0.85 && slowEnd > slowStart+0.3 {
+		var split []timelinePiece
+		for _, p := range base {
+			if slowEnd <= p.start || slowStart >= p.end {
+				split = append(split, p)
+				continue
+			}
+			if slowStart > p.start+0.1 {
+				split = append(split, timelinePiece{start: p.start, end: slowStart, speedMul: 1.0})
+			}
+			sA := math.Max(p.start, slowStart)
+			sB := math.Min(p.end, slowEnd)
+			if sB > sA+0.1 {
+				split = append(split, timelinePiece{start: sA, end: sB, speedMul: slowFactor})
+			}
+			if p.end > slowEnd+0.1 {
+				split = append(split, timelinePiece{start: slowEnd, end: p.end, speedMul: 1.0})
+			}
+		}
+		base = split
+	}
+
+	// 4. Insert optional Freeze-Frame hold at freezeAt
+	if freezeDur >= 0.3 && freezeDur <= 5.0 && freezeAt > trimStart+0.15 && freezeAt < trimEnd-0.15 {
+		var withFreeze []timelinePiece
+		inserted := false
+		for _, p := range base {
+			if !inserted && freezeAt > p.start+0.05 && freezeAt < p.end-0.05 {
+				withFreeze = append(withFreeze, timelinePiece{start: p.start, end: freezeAt, speedMul: p.speedMul})
+				withFreeze = append(withFreeze, timelinePiece{start: freezeAt, end: freezeAt, speedMul: 1.0, isFreeze: true, freezeD: freezeDur})
+				withFreeze = append(withFreeze, timelinePiece{start: freezeAt, end: p.end, speedMul: p.speedMul})
+				inserted = true
+			} else {
+				withFreeze = append(withFreeze, p)
+			}
+		}
+		if inserted {
+			base = withFreeze
+		}
+	}
+	return base
+}
+
+// mapSourceTimeToOutput maps a source timestamp onto the edited output timeline (accounting for trim, cuts, slow-mo, freeze, and global speed).
+func mapSourceTimeToOutput(srcT float64, pieces []timelinePiece, globalSpeed float64) (float64, bool) {
+	outPos := 0.0
+	for _, p := range pieces {
+		if p.isFreeze {
+			if math.Abs(srcT-p.start) <= 0.25 {
+				return outPos / globalSpeed, true
+			}
+			outPos += p.freezeD
+			continue
+		}
+		if srcT >= p.start-0.2 && srcT <= p.end+0.05 {
+			local := math.Max(0, srcT-p.start)
+			return (outPos + local/p.speedMul) / globalSpeed, true
+		}
+		outPos += (p.end - p.start) / p.speedMul
+	}
+	return 0, false
+}
+
+// RenderPostEdit performs fast local CapCut-Pro editing on a finished clip.
+// When no trim/cuts/text/freeze/slowmo/watermark/speed change is requested, it uses `-c:v copy` (~1-2s render!)
 // while keeping any campaign Outro strictly clean and untouched!
 func RenderPostEdit(ctx context.Context, in PostEditInput) (MediaInfo, error) {
 	if in.FFmpegPath == "" {
@@ -108,27 +281,55 @@ func RenderPostEdit(ctx context.Context, in PostEditInput) (MediaInfo, error) {
 	hasBGM := in.BGMPath != "" && fileExists(in.BGMPath)
 	hasWM := in.Watermark != nil && in.Watermark.Enabled && in.Watermark.FilePath != "" && fileExists(in.Watermark.FilePath)
 
-	// Check if we can take the ULTRA-FAST `-c:v copy` path (no trim, no speed change, AND no new watermark!)
+	// Build timeline pieces (handling cuts, partial slow-mo, and freeze-frame!)
+	pieces := buildKeptPieces(trimStart, trimEnd, in.CutRanges, in.SlowMoStart, in.SlowMoEnd, in.SlowMoFactor, in.FreezeAtSec, in.FreezeDurSec)
+	hasTimelineMods := len(pieces) > 1 || (len(pieces) == 1 && (pieces[0].isFreeze || math.Abs(pieces[0].speedMul-1.0) > 0.01))
+	hasMemeText := len(in.TextOverlays) > 0
+
+	// Check if we can take the ULTRA-FAST `-c:v copy` path (pure audio SFX/BGM edit with zero video mods!)
 	noTrim := trimStart <= 0.05 && ((sourceHasProtectedTail && trimEnd >= bodyLimit-0.15) || (!sourceHasProtectedTail && trimEnd >= srcInfo.Duration-0.15))
 	noSpeed := math.Abs(speed-1.0) <= 0.005
 
-	if noTrim && noSpeed && !hasWM && !(!in.SourceHadOutro && hasOutroFile) {
+	if noTrim && noSpeed && !hasWM && !hasTimelineMods && !hasMemeText && !(!in.SourceHadOutro && hasOutroFile) {
 		return renderPostEditStreamCopy(ctx, in, srcInfo, bodyLimit, validSFX, hasBGM)
 	}
 
-	// Full local trim + optional manual watermark + audio SFX/BGM mix + optional clean Outro re-attach
-	mainDurRaw := trimEnd - trimStart
-	effectiveMainDur := mainDurRaw / speed
+	// Calculate total expected main duration after cuts / slow-mo / freeze / global speed
+	rawMainDur := 0.0
+	for _, p := range pieces {
+		if p.isFreeze {
+			rawMainDur += p.freezeD
+		} else {
+			rawMainDur += (p.end - p.start) / p.speedMul
+		}
+	}
+	if rawMainDur < 0.4 {
+		return MediaInfo{}, fmt.Errorf("hasil potongan terlalu pendek (< 0.4 detik)")
+	}
+	effectiveMainDur := rawMainDur / speed
 	reattachOutro := hasOutroFile
 	totalExpected := effectiveMainDur
 	if reattachOutro {
 		totalExpected += outroDur
 	}
 
+	// Generate optional ASS file for Timed Meme Pop-Up Text Overlays (mapped onto edited output timeline!)
+	memeASSPath := ""
+	if hasMemeText {
+		p := filepath.Join(in.WorkDir, "meme_overlays.ass")
+		if cnt, err := generateMemeTextOverlaysASS(in.TextOverlays, pieces, speed, effectiveMainDur, outW, outH, p); err == nil && cnt > 0 {
+			memeASSPath = p
+		}
+	}
+
 	var args []string
 	args = append(args, "-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats")
-	// Input 0: Local source MP4 trimmed accurately
-	args = append(args, "-ss", fmt.Sprintf("%.3f", trimStart), "-t", fmt.Sprintf("%.3f", mainDurRaw), "-i", in.SourceMP4)
+	// Input 0: Local source MP4 (when no complex middle pieces, fast seek; with multiple pieces, read whole file for accurate trim filters)
+	if !hasTimelineMods {
+		args = append(args, "-ss", fmt.Sprintf("%.3f", trimStart), "-t", fmt.Sprintf("%.3f", trimEnd-trimStart), "-i", in.SourceMP4)
+	} else {
+		args = append(args, "-i", in.SourceMP4)
+	}
 
 	nextIdx := 1
 	wmIdx := -1
@@ -161,33 +362,98 @@ func RenderPostEdit(ctx context.Context, in PostEditInput) (MediaInfo, error) {
 	}
 
 	var filters []string
-	// Video stream of trimmed main clip
-	if !noSpeed {
-		filters = append(filters, fmt.Sprintf("[0:v]setpts=(PTS-STARTPTS)/%.4f,fps=30,setsar=1,format=yuv420p[main_v0]", speed))
+
+	// Build video + voice base streams ([main_v0] and [voice_raw])
+	if !hasTimelineMods {
+		if !noSpeed {
+			filters = append(filters, fmt.Sprintf("[0:v]setpts=(PTS-STARTPTS)/%.4f,fps=30,setsar=1,format=yuv420p[main_v0]", speed))
+		} else {
+			filters = append(filters, "[0:v]setpts=PTS-STARTPTS,fps=30,setsar=1,format=yuv420p[main_v0]")
+		}
+		if srcInfo.HasAudio {
+			voiceChain := "[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
+			if !noSpeed {
+				voiceChain += fmt.Sprintf(",atempo=%.4f", speed)
+			}
+			voiceChain += fmt.Sprintf(",atrim=0:%.3f,asetpts=PTS-STARTPTS[voice_raw]", effectiveMainDur)
+			filters = append(filters, voiceChain)
+		} else {
+			filters = append(filters, fmt.Sprintf("anullsrc=r=48000:cl=stereo:d=%.3f[voice_raw]", effectiveMainDur))
+		}
 	} else {
-		filters = append(filters, "[0:v]setpts=PTS-STARTPTS,fps=30,setsar=1,format=yuv420p[main_v0]")
+		// Multi-piece CapCut timeline assembly: Cut-Middle + Partial Slow-Mo + Freeze-Frame Meme!
+		var pieceCats []string
+		for idx, pc := range pieces {
+			vLbl := fmt.Sprintf("[pv_%d]", idx)
+			aLbl := fmt.Sprintf("[pa_%d]", idx)
+			if pc.isFreeze {
+				// Grab 1 frame at freeze timestamp, hold for freezeD seconds (optional dramatic grayscale + slight zoom!)
+				fx := ""
+				if in.FreezeGray {
+					fx = ",hue=s=0,eq=contrast=1.18,vignette=PI/4"
+				}
+				filters = append(filters, fmt.Sprintf(
+					"[0:v]trim=start=%.3f:duration=0.08,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=%.3f,trim=0:%.3f,fps=30,setsar=1,format=yuv420p%s,setpts=PTS-STARTPTS%s",
+					pc.start, pc.freezeD, pc.freezeD, fx, vLbl,
+				))
+				filters = append(filters, fmt.Sprintf("anullsrc=r=48000:cl=stereo:d=%.3f%s", pc.freezeD, aLbl))
+			} else {
+				vChain := fmt.Sprintf("[0:v]trim=start=%.3f:end=%.3f,setpts=(PTS-STARTPTS)/%.4f,fps=30,setsar=1,format=yuv420p%s",
+					pc.start, pc.end, pc.speedMul, vLbl)
+				filters = append(filters, vChain)
+				if srcInfo.HasAudio {
+					aChain := fmt.Sprintf("[0:a]atrim=start=%.3f:end=%.3f,asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo", pc.start, pc.end)
+					if math.Abs(pc.speedMul-1.0) > 0.01 {
+						aChain += fmt.Sprintf(",atempo=%.4f", math.Max(0.5, pc.speedMul))
+					}
+					aChain += aLbl
+					filters = append(filters, aChain)
+				} else {
+					filters = append(filters, fmt.Sprintf("anullsrc=r=48000:cl=stereo:d=%.3f%s", (pc.end-pc.start)/pc.speedMul, aLbl))
+				}
+			}
+			pieceCats = append(pieceCats, vLbl+aLbl)
+		}
+		filters = append(filters, fmt.Sprintf("%sconcat=n=%d:v=1:a=1[pc_v][pc_a]", strings.Join(pieceCats, ""), len(pieces)))
+		if !noSpeed {
+			filters = append(filters, fmt.Sprintf("[pc_v]setpts=(PTS-STARTPTS)/%.4f,fps=30[main_v0]", speed))
+			filters = append(filters, fmt.Sprintf("[pc_a]atempo=%.4f,atrim=0:%.3f,asetpts=PTS-STARTPTS[voice_raw]", speed, effectiveMainDur))
+		} else {
+			filters = append(filters, "[pc_v]copy[main_v0]")
+			filters = append(filters, fmt.Sprintf("[pc_a]atrim=0:%.3f,asetpts=PTS-STARTPTS[voice_raw]", effectiveMainDur))
+		}
+	}
+
+	curV := "[main_v0]"
+	if memeASSPath != "" {
+		filters = append(filters, fmt.Sprintf("%sass='%s'[main_vtxt]", curV, EscapeFFmpegFilterPath(memeASSPath)))
+		curV = "[main_vtxt]"
 	}
 	if hasWM {
-		wmFilter, _ := buildWatermarkFilter("[main_v0]", wmIdx, outW, outH, *in.Watermark, "[main_v]")
+		wmFilter, _ := buildWatermarkFilter(curV, wmIdx, outW, outH, *in.Watermark, "[main_v]")
 		filters = append(filters, wmFilter)
 	} else {
-		filters = append(filters, "[main_v0]copy[main_v]")
+		filters = append(filters, fmt.Sprintf("%scopy[main_v]", curV))
 	}
 
-	// Audio stream of trimmed main clip
-	if srcInfo.HasAudio {
-		voiceChain := "[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
-		if !noSpeed {
-			voiceChain += fmt.Sprintf(",atempo=%.4f", speed)
+	// Map SFX timestamps through our pieces map so SFX stay perfectly aligned even after Cut-Middle / Freeze / Slow-Mo!
+	mappedSFX := make([]ResolvedSFX, 0, len(validSFX))
+	mappedIndices := make([]int, 0, len(validSFX))
+	for i, s := range validSFX {
+		if tOut, ok := mapSourceTimeToOutput(s.AtSec, pieces, speed); ok {
+			cp := s
+			cp.AtSec = tOut
+			mappedSFX = append(mappedSFX, cp)
+			mappedIndices = append(mappedIndices, sfxIndices[i])
 		}
-		voiceChain += fmt.Sprintf(",atrim=0:%.3f,asetpts=PTS-STARTPTS[voice_raw]", effectiveMainDur)
-		filters = append(filters, voiceChain)
-	} else {
-		filters = append(filters, fmt.Sprintf("anullsrc=r=48000:cl=stereo:d=%.3f[voice_raw]", effectiveMainDur))
 	}
 
-	// Mix optional BGM + additional SFX cues (shifted cleanly by trimStart & clamped strictly inside main body!)
-	filters = append(filters, buildPostAudioMix(srcInfo.HasAudio, effectiveMainDur, trimStart, speed, hasBGM, bgmIdx, in.BGMVolume, in.BGMAutoDuck, validSFX, sfxIndices)...)
+	// Mix optional BGM (with custom fade-in/out & Auto-Ducking) + mapped SFX strictly inside main body!
+	filters = append(filters, buildPostAudioMix(
+		srcInfo.HasAudio, effectiveMainDur, 0, 1.0,
+		hasBGM, bgmIdx, in.BGMVolume, in.BGMFadeInSec, in.BGMFadeOutSec, in.BGMAutoDuck,
+		mappedSFX, mappedIndices,
+	)...)
 
 	finalV := "[main_v]"
 	finalA := "[main_a]"
@@ -259,7 +525,11 @@ func renderPostEditStreamCopy(ctx context.Context, in PostEditInput, srcInfo Med
 	}
 
 	// Clamp SFX & BGM strictly inside [0, bodyLimit] so ZERO SFX/BGM ever bleeds into Outro tail!
-	filters = append(filters, buildPostAudioMix(srcInfo.HasAudio, bodyLimit, 0, 1.0, hasBGM, bgmIdx, in.BGMVolume, in.BGMAutoDuck, validSFX, sfxIndices)...)
+	filters = append(filters, buildPostAudioMix(
+		srcInfo.HasAudio, bodyLimit, 0, 1.0,
+		hasBGM, bgmIdx, in.BGMVolume, in.BGMFadeInSec, in.BGMFadeOutSec, in.BGMAutoDuck,
+		validSFX, sfxIndices,
+	)...)
 
 	filterGraph := strings.Join(filters, ";")
 	fullArgs := append(args,
@@ -278,12 +548,17 @@ func renderPostEditStreamCopy(ctx context.Context, in PostEditInput, srcInfo Med
 	return ProbeMedia(ctx, in.FFprobePath, in.OutputPath)
 }
 
-func buildPostAudioMix(hasVoice bool, activeDur, trimStart, speed float64, hasBGM bool, bgmIdx int, bgmVol float64, autoDuck bool, validSFX []ResolvedSFX, sfxIndices []int) []string {
+func buildPostAudioMix(
+	hasVoice bool,
+	activeDur, trimStart, speed float64,
+	hasBGM bool, bgmIdx int, bgmVol, fadeInSec, fadeOutSec float64, autoDuck bool,
+	validSFX []ResolvedSFX, sfxIndices []int,
+) []string {
 	var filters []string
 	var activeSFX []struct {
-		idx     int
-		atSec   float64
-		vol     float64
+		idx   int
+		atSec float64
+		vol   float64
 	}
 	for i, sfx := range validSFX {
 		shifted := (sfx.AtSec - trimStart) / speed
@@ -313,11 +588,21 @@ func buildPostAudioMix(hasVoice bool, activeDur, trimStart, speed float64, hasBG
 		if bgmVol <= 0.01 || bgmVol > 1.0 {
 			bgmVol = 0.16
 		}
-		fadeOutStart := math.Max(0, activeDur-0.85)
-		fadeOutDur := math.Min(0.85, activeDur*0.3)
+		fi := fadeInSec
+		if fi <= 0 {
+			fi = 0.35
+		}
+		fi = math.Min(fi, activeDur*0.3)
+		fo := fadeOutSec
+		if fo <= 0 {
+			fo = 0.85
+		}
+		fo = math.Min(fo, activeDur*0.35)
+		fadeOutStart := math.Max(0, activeDur-fo)
+
 		filters = append(filters, fmt.Sprintf(
-			"[%d:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,atrim=0:%.3f,asetpts=PTS-STARTPTS,volume=%.3f,afade=t=in:st=0:d=0.35,afade=t=out:st=%.3f:d=%.3f[bgm_bed]",
-			bgmIdx, activeDur, bgmVol, fadeOutStart, fadeOutDur,
+			"[%d:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,atrim=0:%.3f,asetpts=PTS-STARTPTS,volume=%.3f,afade=t=in:st=0:d=%.3f,afade=t=out:st=%.3f:d=%.3f[bgm_bed]",
+			bgmIdx, activeDur, bgmVol, fi, fadeOutStart, fo,
 		))
 		if autoDuck && hasVoice {
 			filters = append(filters, "[voice_raw]asplit=2[voice_mix][voice_sc]")
@@ -345,4 +630,75 @@ func buildPostAudioMix(hasVoice bool, activeDur, trimStart, speed float64, hasBG
 		strings.Join(mixInputs, ""), len(mixInputs),
 	))
 	return filters
+}
+
+func hexToASSColor(hex string) string {
+	h := strings.TrimPrefix(strings.TrimSpace(hex), "#")
+	if len(h) != 6 {
+		return "&H0000E6FF" // Viral Yellow default (ASS is BBGGRR!)
+	}
+	return fmt.Sprintf("&H00%s%s%s", strings.ToUpper(h[4:6]), strings.ToUpper(h[2:4]), strings.ToUpper(h[0:2]))
+}
+
+func generateMemeTextOverlaysASS(overlays []model.TextOverlay, pieces []timelinePiece, speed, maxDur float64, outW, outH int, destASS string) (int, error) {
+	var b strings.Builder
+	b.WriteString("[Script Info]\nScriptType: v4.00+\n")
+	b.WriteString(fmt.Sprintf("PlayResX: %d\nPlayResY: %d\nScaledBorderAndShadow: yes\n\n", outW, outH))
+	b.WriteString("[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
+	b.WriteString("Style: Meme,Impact,68,&H0000E6FF,&H00FFFFFF,&H00000000,&H80000000,1,0,0,0,100,100,1,0,1,6,2,5,30,30,30,1\n\n")
+	b.WriteString("[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+
+	count := 0
+	for _, ov := range overlays {
+		txt := StripUnsupportedEmojis(strings.TrimSpace(ov.Text))
+		if txt == "" {
+			continue
+		}
+		st, ok1 := mapSourceTimeToOutput(ov.StartSec, pieces, speed)
+		en, ok2 := mapSourceTimeToOutput(ov.EndSec, pieces, speed)
+		if !ok1 && !ok2 {
+			continue
+		}
+		if !ok1 {
+			st = 0
+		}
+		if !ok2 || en <= st+0.2 {
+			en = math.Min(maxDur, st+2.5)
+		}
+		if en > maxDur {
+			en = maxDur
+		}
+		if en <= st+0.15 {
+			continue
+		}
+		x := ov.X
+		if x <= 0 || x >= 1 {
+			x = 0.5
+		}
+		y := ov.Y
+		if y <= 0 || y >= 1 {
+			y = 0.25
+		}
+		fs := ov.FontSize
+		if fs < 28 || fs > 140 {
+			fs = 68
+		}
+		px := int(math.Round(x * float64(outW)))
+		py := int(math.Round(y * float64(outH)))
+		col := hexToASSColor(ov.Color)
+		safeTxt := strings.ReplaceAll(sanitizeASSText(strings.ToUpper(txt)), "\n", "\\N")
+		// Crisp CapCut pop-in animation right at exact (px, py)
+		b.WriteString(fmt.Sprintf(
+			"Dialogue: 2,%s,%s,Meme,,0,0,0,,{\\an5\\pos(%d,%d)\\fs%d\\c%s\\fscx78\\fscy78\\t(0,130,\\fscx106\\fscy106)\\t(130,230,\\fscx100\\fscy100)}%s\n",
+			formatASSTime(st), formatASSTime(en), px, py, fs, col, safeTxt,
+		))
+		count++
+	}
+	if count == 0 {
+		return 0, nil
+	}
+	if err := os.WriteFile(destASS, []byte(b.String()), 0o644); err != nil {
+		return 0, err
+	}
+	return count, nil
 }

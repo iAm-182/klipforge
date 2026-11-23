@@ -206,6 +206,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/jobs/batch", s.handleRenderBatch)
 	mux.HandleFunc("POST /api/jobs/compile", s.handleRenderCompile)
 	mux.HandleFunc("POST /api/jobs/{id}/post-edit", s.handlePostEditJob)
+	mux.HandleFunc("POST /api/jobs/{id}/detect-silence", s.handleDetectJobSilence)
 	mux.HandleFunc("POST /api/jobs/{id}/review", s.handleReviewJob)
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.handleCancelJob)
 	mux.HandleFunc("POST /api/jobs/{id}/retry", s.handleRetryJob)
@@ -219,12 +220,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/autopilot/{id}", s.handleDeleteAutopilot)
 	mux.HandleFunc("POST /api/autopilot/{id}/run", s.handleRunAutopilot)
 
-	// Audio Library (BGM & SFX starter pack + custom uploads)
+	// Audio Library (12+ BGM & 33+ SFX starter pack + custom uploads + smart presets)
 	mux.HandleFunc("GET /api/audio", s.handleListAudio)
 	mux.HandleFunc("POST /api/audio/upload/{kind}", s.handleUploadAudio)
 	mux.HandleFunc("DELETE /api/audio/{id}", s.handleDeleteAudio)
 	mux.HandleFunc("GET /api/audio/file/{filename}", s.handleServeAudio)
 	mux.HandleFunc("POST /api/audio/regenerate", s.handleRegenerateAudio)
+	mux.HandleFunc("GET /api/audio/presets", s.handleListAudioPresets)
+	mux.HandleFunc("POST /api/audio/presets", s.handleSaveAudioPreset)
+	mux.HandleFunc("DELETE /api/audio/presets/{id}", s.handleDeleteAudioPreset)
 
 	// Embedded Web Dashboard UI
 	subFS, _ := fs.Sub(web.FS, ".")
@@ -304,6 +308,7 @@ func isAgentAllowed(method, path string) bool {
 	}
 	if strings.HasPrefix(path, "/api/jobs/") {
 		if strings.HasSuffix(path, "/post-edit") ||
+			strings.HasSuffix(path, "/detect-silence") ||
 			strings.HasSuffix(path, "/retry") {
 			return true
 		}
@@ -1455,6 +1460,56 @@ func (s *Server) handleServeAudio(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRegenerateAudio(w http.ResponseWriter, r *http.Request) {
 	s.Audio.EnsureBuiltIns()
 	writeJSON(w, http.StatusOK, s.Audio.List())
+}
+
+func (s *Server) handleListAudioPresets(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.Audio.ListPresets())
+}
+
+func (s *Server) handleSaveAudioPreset(w http.ResponseWriter, r *http.Request) {
+	var p model.AudioPreset
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		writeErr(w, http.StatusBadRequest, "Format JSON preset audio tidak valid")
+		return
+	}
+	saved, err := s.Audio.SavePreset(p)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, saved)
+}
+
+func (s *Server) handleDeleteAudioPreset(w http.ResponseWriter, r *http.Request) {
+	if err := s.Audio.DeletePreset(r.PathValue("id")); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
+}
+
+func (s *Server) handleDetectJobSilence(w http.ResponseWriter, r *http.Request) {
+	job, ok := s.Store.GetJob(r.PathValue("id"))
+	if !ok || job.OutputPath == "" {
+		writeErr(w, http.StatusNotFound, "File klip tidak ditemukan")
+		return
+	}
+	var req struct {
+		MinDuration float64 `json:"minDuration"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.MinDuration <= 0 {
+		req.MinDuration = 1.2
+	}
+	ranges, err := renderer.DetectSilence(r.Context(), s.Deps.GetStatus().FFmpegPath, job.OutputPath, req.MinDuration)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"count":  len(ranges),
+		"ranges": ranges,
+	})
 }
 
 // --- Human-in-the-Loop (HITL) Review & Autopilot Scheduler ---
