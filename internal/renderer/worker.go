@@ -251,16 +251,20 @@ func (wp *WorkerPool) EnqueueCompilation(opts model.CompileOptions) (*model.Rend
 	// Build compliance evaluation
 	comp := model.ComplianceCheck{HasValueAdd: true}
 	if camp != nil {
-		if opts.UseWatermark && camp.Watermark.Enabled && camp.Watermark.FilePath != "" && fileExists(camp.Watermark.FilePath) {
-			comp.WatermarkApplied = true
-		} else if camp.Watermark.Enabled {
-			comp.Warnings = append(comp.Warnings, "Watermark campaign belum di-upload!")
+		if opts.UseWatermark && camp.Watermark.Enabled {
+			if camp.Watermark.FilePath != "" && fileExists(camp.Watermark.FilePath) {
+				comp.WatermarkApplied = true
+			} else {
+				comp.Warnings = append(comp.Warnings, "Watermark campaign belum di-upload!")
+			}
 		}
-		if opts.UseOutro && camp.Outro.Enabled && camp.Outro.FilePath != "" && fileExists(camp.Outro.FilePath) {
-			comp.OutroApplied = true
-			comp.OutroClean = !camp.Watermark.OnOutro
-		} else if camp.Outro.Enabled {
-			comp.Warnings = append(comp.Warnings, "Video Outro 3 detik belum di-upload!")
+		if opts.UseOutro && camp.Outro.Enabled {
+			if camp.Outro.FilePath != "" && fileExists(camp.Outro.FilePath) {
+				comp.OutroApplied = true
+				comp.OutroClean = !camp.Watermark.OnOutro
+			} else {
+				comp.Warnings = append(comp.Warnings, "Video Outro 3 detik belum di-upload!")
+			}
 		}
 		comp.HashtagsReady = len(camp.Hashtags) > 0
 	}
@@ -1028,17 +1032,21 @@ func evaluateCompliance(opts model.RenderOptions, camp *model.Campaign) model.Co
 		return c
 	}
 
-	if opts.UseWatermark && camp.Watermark.Enabled && camp.Watermark.FilePath != "" && fileExists(camp.Watermark.FilePath) {
-		c.WatermarkApplied = true
-	} else if camp.Watermark.Enabled {
-		c.Warnings = append(c.Warnings, "Watermark campaign belum di-upload!")
+	if opts.UseWatermark && camp.Watermark.Enabled {
+		if camp.Watermark.FilePath != "" && fileExists(camp.Watermark.FilePath) {
+			c.WatermarkApplied = true
+		} else {
+			c.Warnings = append(c.Warnings, "Watermark campaign belum di-upload!")
+		}
 	}
 
-	if opts.UseOutro && camp.Outro.Enabled && camp.Outro.FilePath != "" && fileExists(camp.Outro.FilePath) {
-		c.OutroApplied = true
-		c.OutroClean = !camp.Watermark.OnOutro
-	} else if camp.Outro.Enabled {
-		c.Warnings = append(c.Warnings, "Video template Outro (3 detik) belum di-upload!")
+	if opts.UseOutro && camp.Outro.Enabled {
+		if camp.Outro.FilePath != "" && fileExists(camp.Outro.FilePath) {
+			c.OutroApplied = true
+			c.OutroClean = !camp.Watermark.OnOutro
+		} else {
+			c.Warnings = append(c.Warnings, "Video template Outro (3 detik) belum di-upload!")
+		}
 	}
 
 	if len(camp.Hashtags) > 0 {

@@ -52,7 +52,15 @@ func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, 
 	outline := 7
 	shadow := 3
 
+	isKaraoke := style.Preset == "karaoke"
+	keyPunchColor := "&H002A85FF" // Fiery Vice Orange/Pink punch accent for viral keywords in karaoke mode!
+
 	switch style.Preset {
+	case "karaoke":
+		baseColor = "&H00FFFFFF"
+		highlightColor = "&H0000EAFF" // Electric viral yellow active word
+		outline = 8
+		shadow = 4
 	case "clean-white":
 		baseColor = "&H00E8E8E8"
 		highlightColor = "&H00FFFFFF"
@@ -282,8 +290,16 @@ func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, 
 				for k, gw := range group {
 					wordSafe := sanitizeASSText(gw.Text)
 					if k == activeIdx {
-						// Active spoken word pops in bright highlight color + slight scale pulse!
-						lineParts = append(lineParts, fmt.Sprintf("{\\c%s\\fscx114\\fscy114\\t(0,95,\\fscx104\\fscy104)}%s{\\r}", highlightColor, wordSafe))
+						if isKaraoke && isPunchKeyWord(gw.Text) {
+							// Karaoke Punch-In Zoom on key viral words (hook / laugh / crash / hype words)!
+							lineParts = append(lineParts, fmt.Sprintf("{\\c%s\\fscx132\\fscy132\\t(0,90,\\fscx118\\fscy118)\\t(90,210,\\fscx112\\fscy112)}%s{\\r}", keyPunchColor, wordSafe))
+						} else if isKaraoke {
+							// Enlarged vibrant active spoken word (reelsaw / CapCut karaoke feel)
+							lineParts = append(lineParts, fmt.Sprintf("{\\c%s\\fscx122\\fscy122\\t(0,85,\\fscx112\\fscy112)}%s{\\r}", highlightColor, wordSafe))
+						} else {
+							// Active spoken word pops in bright highlight color + slight scale pulse!
+							lineParts = append(lineParts, fmt.Sprintf("{\\c%s\\fscx114\\fscy114\\t(0,95,\\fscx104\\fscy104)}%s{\\r}", highlightColor, wordSafe))
+						}
 					} else {
 						lineParts = append(lineParts, fmt.Sprintf("{\\c%s}%s", baseColor, wordSafe))
 					}
@@ -309,6 +325,26 @@ func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, 
 		return 0, err
 	}
 	return written, nil
+}
+
+var karaokePunchWords = map[string]bool{
+	"jago": true, "nyetir": true, "nabrak": true, "tabrak": true, "polisi": true,
+	"wkwk": true, "wkwkwk": true, "ngakak": true, "haha": true, "hahaha": true,
+	"anjir": true, "njir": true, "anjay": true, "gila": true, "parah": true,
+	"kaget": true, "panik": true, "meledak": true, "mati": true, "kabur": true,
+	"clutch": true, "epic": true, "wasted": true, "busted": true, "tamat": true,
+	"astaga": true, "waduh": true, "buset": true, "kocak": true, "bohong": true,
+	"tembak": true, "hancur": true, "kebalik": true, "terbang": true, "sumpah": true,
+}
+
+func isPunchKeyWord(word string) bool {
+	clean := strings.TrimFunc(strings.ToLower(word), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	if karaokePunchWords[clean] {
+		return true
+	}
+	return strings.HasPrefix(clean, "wkwk") || strings.HasPrefix(clean, "haha")
 }
 
 // StripUnsupportedEmojis removes non-BMP emoji glyphs (> 0xFFFF) that render as empty tofu boxes (□) in Windows Impact/Arial fonts.

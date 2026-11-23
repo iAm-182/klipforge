@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -208,11 +209,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/projects/{id}/scan-audio", s.handleScanAudioOnly)
 	mux.HandleFunc("POST /api/projects/{id}/download-full", s.handleDownloadFull)
 	mux.HandleFunc("POST /api/projects/{id}/grab-frame", s.handleGrabFrame)
+	mux.HandleFunc("POST /api/projects/{id}/verify-frames", s.handleVerifyCandidateFrames)
+	mux.HandleFunc("GET /api/projects/{id}/candidate-frame/{candId}/{kind}", s.handleServeCandidateFrame)
 	mux.HandleFunc("GET /api/projects/{id}/preview-frame", s.handleServePreviewFrame)
 	mux.HandleFunc("GET /api/projects/{id}/video", s.handleServeProjectVideo)
 
 	// Render Jobs, Clips & Human-in-the-Loop Review
 	mux.HandleFunc("GET /api/jobs", s.handleListJobs)
+	mux.HandleFunc("GET /api/jobs/{id}", s.handleGetJob)
 	mux.HandleFunc("POST /api/jobs/render", s.handleRenderSingle)
 	mux.HandleFunc("POST /api/jobs/batch", s.handleRenderBatch)
 	mux.HandleFunc("POST /api/jobs/compile", s.handleRenderCompile)
@@ -312,6 +316,7 @@ func isAgentAllowed(method, path string) bool {
 	if strings.HasPrefix(path, "/api/projects/") {
 		if strings.HasSuffix(path, "/reanalyze") ||
 			strings.HasSuffix(path, "/scan-audio") ||
+			strings.HasSuffix(path, "/verify-frames") ||
 			strings.HasSuffix(path, "/grab-frame") {
 			return true
 		}
@@ -746,12 +751,13 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAnalyzeProject(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		URL           string                   `json:"url"`
-		CampaignID    string                   `json:"campaignId"`
-		DownloadFull  bool                     `json:"downloadFull"`
-		IncludeChat   *bool                    `json:"includeChat"`
-		IncludeAudio  bool                     `json:"includeAudio"`
-		DetectConfig  *model.DetectionSettings `json:"detectConfig"`
+		URL          string                   `json:"url"`
+		CampaignID   string                   `json:"campaignId"`
+		DownloadFull bool                     `json:"downloadFull"`
+		AudioFirst   bool                     `json:"audioFirst"`
+		IncludeChat  *bool                    `json:"includeChat"`
+		IncludeAudio bool                     `json:"includeAudio"`
+		DetectConfig *model.DetectionSettings `json:"detectConfig"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "Body JSON tidak valid")
@@ -783,6 +789,13 @@ func (s *Server) handleAnalyzeProject(w http.ResponseWriter, r *http.Request) {
 		includeChat = *req.IncludeChat
 	}
 
+	mode := "quick"
+	if req.DownloadFull {
+		mode = "full"
+	} else if req.AudioFirst {
+		mode = "audio_first"
+	}
+
 	p := getPrincipal(r)
 	proj := &model.Project{
 		ID:            projID,
@@ -797,6 +810,7 @@ func (s *Server) handleAnalyzeProject(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:     time.Now(),
 		CreatedByID:   p.ID,
 		CreatedBy:     p.Name,
+		AnalysisMode:  mode,
 	}
 	if err := s.Store.SaveProject(proj); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -805,7 +819,7 @@ func (s *Server) handleAnalyzeProject(w http.ResponseWriter, r *http.Request) {
 	s.Broker.Publish("project_update", proj)
 
 	// Run multi-signal ingestion concurrently in background so HTTP responds immediately
-	go s.runAnalysisPipeline(proj.ID, req.DownloadFull, includeChat, req.IncludeAudio)
+	go s.runAnalysisPipeline(proj.ID, req.DownloadFull, includeChat, req.IncludeAudio || req.AudioFirst, req.AudioFirst)
 
 	writeJSON(w, http.StatusAccepted, proj)
 }
@@ -828,12 +842,13 @@ func (s *Server) analyzeSyncFast(ctx context.Context, videoURL, campaignID strin
 		DetectConfig:  model.DefaultDetectionSettings(),
 		CreatedAt:     time.Now(),
 		UpdatedAt:     time.Now(),
+		AnalysisMode:  "audio_first",
 	}
 	if err := s.Store.SaveProject(proj); err != nil {
 		return nil, err
 	}
 	s.Broker.Publish("project_update", proj)
-	s.runAnalysisPipeline(proj.ID, false, false, false)
+	s.runAnalysisPipeline(proj.ID, false, false, false, false)
 
 	res, ok := s.Store.GetProject(proj.ID)
 	if !ok || res.Status == "error" {
@@ -846,7 +861,7 @@ func (s *Server) analyzeSyncFast(ctx context.Context, videoURL, campaignID strin
 	return res, nil
 }
 
-func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat, includeAudio bool) {
+func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat, includeAudio, audioFirst bool) {
 	ctx := context.Background()
 	proj, ok := s.Store.GetProject(projectID)
 	if !ok {
@@ -956,9 +971,24 @@ func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat
 		} else {
 			s.Broker.Log("analyzer", "warn", "Download full gagal, lanjut mode Quick Scan: "+err.Error())
 		}
-	} else if includeAudio || (len(meta.Heatmap) == 0 && len(subCues) == 0) {
-		update("scanning", "Menganalisis puncak audio untuk deteksi teriakan/momen seru...")
+	} else if audioFirst || includeAudio || (len(meta.Heatmap) == 0 && len(subCues) == 0) {
+		if audioFirst {
+			update("scanning", "🎧 Audio-First Mode: Mengunduh audio ringan (<=64kbps) tanpa video full agar hemat disk ~95%...")
+		} else {
+			update("scanning", "Menganalisis puncak audio untuk deteksi teriakan/momen seru...")
+		}
 		if audioPath, err := s.YT.DownloadAudioOnly(ctx, proj.SourceURL, filepath.Join(projDir, "audio.m4a"), settings); err == nil {
+			if fi, err := os.Stat(audioPath); err == nil {
+				proj.AudioBytesUsed = fi.Size()
+				// Estimate 1080p full VOD size (~3.5 Mbps ≈ 437 KB/sec) so disk savings are measurable!
+				if meta.Duration > 0 {
+					proj.EstFullBytes = int64(meta.Duration * 437500)
+				}
+				s.Broker.Log("analyzer", "success", fmt.Sprintf("🎧 Audio-First: pakai %.1f MB audio vs estimasi %.0f MB full video (hemat ~%.0f%% disk!)",
+					float64(proj.AudioBytesUsed)/(1024*1024),
+					float64(proj.EstFullBytes)/(1024*1024),
+					100.0*(1.0-float64(proj.AudioBytesUsed)/float64(maxInt64(proj.EstFullBytes, 1)))))
+			}
 			if energy, err := analyzer.AnalyzeAudioEnergy(ctx, s.Deps.GetStatus().FFmpegPath, audioPath, meta.Duration); err == nil {
 				audioEnergy = energy
 				saveAudioCache(projDir, energy)
@@ -992,10 +1022,13 @@ func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat
 	proj.Candidates = res.Candidates
 	proj.Signals = res.Signals
 	proj.Status = "ready"
-	proj.StatusMessage = fmt.Sprintf("Siap! Ditemukan %d momen hits.", len(res.Candidates))
+	proj.StatusMessage = fmt.Sprintf("Siap! Ditemukan %d momen arc hits.", len(res.Candidates))
 	_ = s.Store.SaveProject(proj)
 	s.Broker.Publish("project_update", proj)
-	s.Broker.Log("analyzer", "success", fmt.Sprintf("Fase 1 selesai cepat: '%s' -> %d kandidat klip siap preview!", proj.Title, len(res.Candidates)))
+	s.Broker.Log("analyzer", "success", fmt.Sprintf("Fase 1 selesai cepat: '%s' -> %d kandidat arc siap review!", proj.Title, len(res.Candidates)))
+
+	// Capture Start + Peak verification frames for top 5 candidates in background (for human visual review BEFORE rendering!)
+	go s.captureCandidateFrames(proj.ID, 5)
 
 	// ============ PHASE 2: NON-BLOCKING BACKGROUND LIVE CHAT (Smart Guard!) ============
 	// Live chat replay on viral 4-hour streams (14M+ views) has 10,000+ fragments & takes 20+ mins.
@@ -1335,6 +1368,135 @@ func (s *Server) handleGrabFrame(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// captureCandidateFrames grabs 1 verification frame at ArcStartSec and 1 at PeakSec for the top N candidates
+// so human reviewers can verify visual context on frames BEFORE rendering (never auto-renders!).
+func (s *Server) captureCandidateFrames(projectID string, topN int) {
+	proj, ok := s.Store.GetProject(projectID)
+	if !ok || len(proj.Candidates) == 0 {
+		return
+	}
+	if topN <= 0 || topN > len(proj.Candidates) {
+		topN = len(proj.Candidates)
+	}
+	if topN > 8 {
+		topN = 8
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	cs := s.loadCachedSignals(proj)
+	streamURL := cs.StreamURL
+	if proj.LocalVideoPath == "" && streamURL == "" {
+		if meta, err := s.YT.FetchMetadata(ctx, proj.SourceURL, s.Store.GetSettings()); err == nil {
+			streamURL = meta.StreamURL
+			cs.StreamURL = streamURL
+		}
+	}
+
+	framesDir := filepath.Join(s.Store.ProjectDir(proj.ID), "frames")
+	_ = os.MkdirAll(framesDir, 0o755)
+	changed := false
+
+	grabAt := func(sec float64, dest string) bool {
+		if proj.LocalVideoPath != "" {
+			return s.YT.GrabFrameFromLocalFile(ctx, proj.LocalVideoPath, sec, dest) == nil
+		}
+		if streamURL != "" {
+			return s.YT.GrabPreviewFrame(ctx, streamURL, "", sec, dest) == nil
+		}
+		return false
+	}
+
+	for i := 0; i < topN; i++ {
+		c := &proj.Candidates[i]
+		startSec := c.ArcStartSec
+		if startSec <= 0 {
+			startSec = c.StartSec
+		}
+		peakSec := c.PeakSec
+		if peakSec <= 0 {
+			peakSec = (c.StartSec + c.EndSec) / 2
+		}
+
+		startPath := filepath.Join(framesDir, c.ID+"_start.jpg")
+		peakPath := filepath.Join(framesDir, c.ID+"_peak.jpg")
+
+		if grabAt(startSec, startPath) {
+			c.StartFramePath = startPath
+			c.StartFrameURL = fmt.Sprintf("/api/projects/%s/candidate-frame/%s/start", proj.ID, c.ID)
+			changed = true
+		}
+		if grabAt(peakSec, peakPath) {
+			c.PeakFramePath = peakPath
+			c.PeakFrameURL = fmt.Sprintf("/api/projects/%s/candidate-frame/%s/peak", proj.ID, c.ID)
+			changed = true
+		}
+	}
+
+	if changed {
+		// Re-fetch latest project to avoid clobbering concurrent updates, then copy frame URLs/paths
+		if latest, ok := s.Store.GetProject(projectID); ok {
+			frameByID := make(map[string]model.ClipCandidate, topN)
+			for i := 0; i < topN; i++ {
+				frameByID[proj.Candidates[i].ID] = proj.Candidates[i]
+			}
+			for i := range latest.Candidates {
+				if fc, ok := frameByID[latest.Candidates[i].ID]; ok {
+					latest.Candidates[i].StartFramePath = fc.StartFramePath
+					latest.Candidates[i].StartFrameURL = fc.StartFrameURL
+					latest.Candidates[i].PeakFramePath = fc.PeakFramePath
+					latest.Candidates[i].PeakFrameURL = fc.PeakFrameURL
+				}
+			}
+			_ = s.Store.SaveProject(latest)
+			s.Broker.Publish("project_update", latest)
+			s.Broker.Log("analyzer", "success", fmt.Sprintf("Frame verifikasi (Start + Peak) siap untuk Top %d kandidat!", topN))
+		}
+	}
+}
+
+func (s *Server) handleVerifyCandidateFrames(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	proj, ok := s.Store.GetProject(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "Project tidak ditemukan")
+		return
+	}
+	var req struct {
+		TopN int `json:"topN"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.TopN <= 0 {
+		req.TopN = 5
+	}
+	go s.captureCandidateFrames(proj.ID, req.TopN)
+	writeJSON(w, http.StatusAccepted, map[string]interface{}{"ok": true, "projectId": proj.ID, "topN": req.TopN})
+}
+
+func (s *Server) handleServeCandidateFrame(w http.ResponseWriter, r *http.Request) {
+	projID := r.PathValue("id")
+	candID := filepath.Base(r.PathValue("candId"))
+	kind := r.PathValue("kind")
+	if kind != "start" && kind != "peak" {
+		http.NotFound(w, r)
+		return
+	}
+	p := filepath.Join(s.Store.ProjectDir(projID), "frames", candID+"_"+kind+".jpg")
+	if _, err := os.Stat(p); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	http.ServeFile(w, r, p)
+}
+
 func (s *Server) handleServePreviewFrame(w http.ResponseWriter, r *http.Request) {
 	proj, ok := s.Store.GetProject(r.PathValue("id"))
 	if !ok || proj.PreviewFrame == "" {
@@ -1357,7 +1519,108 @@ func (s *Server) handleServeProjectVideo(w http.ResponseWriter, r *http.Request)
 // --- Render Jobs ---
 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.Store.ListJobs())
+	all := s.Store.ListJobs()
+	q := r.URL.Query()
+
+	// Optional ?status=done or ?status=queued,rendering filter
+	statusFilter := make(map[string]bool)
+	if rawStatus := strings.TrimSpace(q.Get("status")); rawStatus != "" {
+		for _, part := range strings.Split(rawStatus, ",") {
+			if t := strings.TrimSpace(strings.ToLower(part)); t != "" {
+				statusFilter[t] = true
+			}
+		}
+	}
+	memberFilter := strings.TrimSpace(q.Get("member"))
+
+	filtered := make([]*model.RenderJob, 0, len(all))
+	for _, j := range all {
+		if len(statusFilter) > 0 && !statusFilter[strings.ToLower(j.Status)] {
+			continue
+		}
+		if memberFilter != "" {
+			cid := j.CreatedByID
+			if cid == "" {
+				cid = "owner"
+			}
+			if cid != memberFilter {
+				continue
+			}
+		}
+		filtered = append(filtered, j)
+	}
+
+	total := len(filtered)
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
+
+	// Pagination: ?offset=0 & ?limit=50 (default 50, max 200 to prevent truncated multi-MB responses!)
+	offset := 0
+	if rawOff := strings.TrimSpace(q.Get("offset")); rawOff != "" {
+		if v, err := strconv.Atoi(rawOff); err == nil && v > 0 {
+			offset = v
+		}
+	}
+	limit := 50
+	if rawLim := strings.TrimSpace(q.Get("limit")); rawLim != "" {
+		if v, err := strconv.Atoi(rawLim); err == nil {
+			if v <= 0 {
+				limit = 200
+			} else if v > 200 {
+				limit = 200
+			} else {
+				limit = v
+			}
+		}
+	}
+	if offset > len(filtered) {
+		offset = len(filtered)
+	}
+	end := offset + limit
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	page := filtered[offset:end]
+
+	// Compact truncation-proof ?summary=1 mode (ideal for Muse polling & fast mobile loads!)
+	if q.Get("summary") == "1" || strings.EqualFold(q.Get("summary"), "true") {
+		summaries := make([]model.JobSummary, 0, len(page))
+		for _, j := range page {
+			summaries = append(summaries, model.JobSummary{
+				ID:            j.ID,
+				JobType:       j.JobType,
+				ProjectID:     j.ProjectID,
+				CampaignName:  j.CampaignName,
+				Title:         j.Title,
+				Status:        j.Status,
+				Stage:         j.Stage,
+				Progress:      j.Progress,
+				Speed:         j.Speed,
+				OutputFile:    j.OutputFile,
+				FileSizeBytes: j.FileSizeBytes,
+				FinalDuration: j.FinalDuration,
+				ReviewStatus:  j.ReviewStatus,
+				CreatedByID:   j.CreatedByID,
+				CreatedBy:     j.CreatedBy,
+				CreatedVia:    j.CreatedVia,
+				Error:         j.Error,
+				CreatedAt:     j.CreatedAt,
+				CompletedAt:   j.CompletedAt,
+			})
+		}
+		writeJSON(w, http.StatusOK, summaries)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, page)
+}
+
+func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
+	job, ok := s.Store.GetJob(r.PathValue("id"))
+	if !ok {
+		writeErr(w, http.StatusNotFound, "Job tidak ditemukan")
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
 }
 
 func (s *Server) handleRenderSingle(w http.ResponseWriter, r *http.Request) {

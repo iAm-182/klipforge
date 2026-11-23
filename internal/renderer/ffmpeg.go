@@ -266,8 +266,21 @@ func RenderClip(ctx context.Context, in RenderInput) (MediaInfo, error) {
 	// ================= VIDEO FILTERGRAPH (Main Clip Only) =================
 	var filters []string
 
-	// 1. Frame/Crop main video [0:v] -> [main_v0]
-	filters = append(filters, buildLayoutFilter(in.Layout, outW, outH, "[0:v]", "[main_v0]"))
+	// 1. Frame/Crop main video [0:v] -> [main_v0] (supports dynamic AI face_track 9:16 reframing!)
+	if in.Layout.CropMode == "face_track" {
+		dets := DetectFacesInVideo(ctx, in.SourcePath, in.SeekStart, rawMainDur)
+		if len(dets) > 0 {
+			track := SmoothFaceTrack(dets, rawMainDur, 4.0)
+			filters = append(filters, BuildFaceTrackFilter(track, srcInfo.Width, srcInfo.Height, outW, outH, "[0:v]", "[main_v0]"))
+		} else {
+			// Graceful fallback to center 9:16 crop when no face is found or OpenCV is unavailable
+			fallbackLayout := in.Layout
+			fallbackLayout.CropMode = "center"
+			filters = append(filters, buildLayoutFilter(fallbackLayout, outW, outH, "[0:v]", "[main_v0]"))
+		}
+	} else {
+		filters = append(filters, buildLayoutFilter(in.Layout, outW, outH, "[0:v]", "[main_v0]"))
+	}
 	curV := "[main_v0]"
 
 	// 2. Speed adjustment + normalize timestamps BEFORE time-based FX

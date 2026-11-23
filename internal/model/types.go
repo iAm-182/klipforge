@@ -163,24 +163,41 @@ type TranscriptCue struct {
 	Words []WordTiming `json:"words,omitempty"`
 }
 
+// ViralityBreakdown stores rule-based offline virality dimensions (0-100 each, no LLM required).
+type ViralityBreakdown struct {
+	Hook     float64 `json:"hook"`
+	Emotion  float64 `json:"emotion"`
+	Conflict float64 `json:"conflict"`
+	Quotable float64 `json:"quotable"`
+}
+
 // ClipCandidate is a detected viral/hype moment candidate ready to be clipped.
 type ClipCandidate struct {
-	ID            string   `json:"id"`
-	Rank          int      `json:"rank"`
-	Title         string   `json:"title"`
-	StartSec      float64  `json:"startSec"`
-	EndSec        float64  `json:"endSec"`
-	PeakSec       float64  `json:"peakSec"`
-	DurationSec   float64  `json:"durationSec"`
-	Score         float64  `json:"score"`         // 0 - 100
-	HeatmapScore  float64  `json:"heatmapScore"`  // 0 - 100
-	ChatScore     float64  `json:"chatScore"`     // 0 - 100
-	AudioScore    float64  `json:"audioScore"`    // 0 - 100
-	Reasons       []string `json:"reasons"`       // e.g. ["Most Replayed", "Chat Meledak"]
-	SampleChats   []string `json:"sampleChats"`   // Top hype chat lines around peak
-	Transcript    string   `json:"transcript"`    // Snippet of speech during segment
-	HookText      string   `json:"hookText"`      // Optional editable top headline
-	Selected      bool     `json:"selected"`
+	ID                string             `json:"id"`
+	Rank              int                `json:"rank"`
+	Title             string             `json:"title"`
+	StartSec          float64            `json:"startSec"`
+	EndSec            float64            `json:"endSec"`
+	PeakSec           float64            `json:"peakSec"`
+	ArcStartSec       float64            `json:"arcStartSec,omitempty"`
+	ArcEndSec         float64            `json:"arcEndSec,omitempty"`
+	ArcReason         string             `json:"arcReason,omitempty"`
+	DurationSec       float64            `json:"durationSec"`
+	Score             float64            `json:"score"`         // 0 - 100
+	HeatmapScore      float64            `json:"heatmapScore"`  // 0 - 100
+	ChatScore         float64            `json:"chatScore"`     // 0 - 100
+	AudioScore        float64            `json:"audioScore"`    // 0 - 100
+	ViralityScore     float64            `json:"viralityScore,omitempty"`
+	ViralityBreakdown *ViralityBreakdown `json:"viralityBreakdown,omitempty"`
+	Reasons           []string           `json:"reasons"`       // e.g. ["Most Replayed", "Chat Meledak"]
+	SampleChats       []string           `json:"sampleChats"`   // Top hype chat lines around peak
+	Transcript        string             `json:"transcript"`    // Snippet of speech during segment
+	HookText          string             `json:"hookText"`      // Optional editable top headline
+	StartFrameURL     string             `json:"startFrameUrl,omitempty"`
+	PeakFrameURL      string             `json:"peakFrameUrl,omitempty"`
+	StartFramePath    string             `json:"-"`
+	PeakFramePath     string             `json:"-"`
+	Selected          bool               `json:"selected"`
 }
 
 // DetectionSettings configures how multi-signal hype detection scores moments.
@@ -238,6 +255,9 @@ type Project struct {
 	UpdatedAt       time.Time          `json:"updatedAt"`
 	CreatedByID     string             `json:"createdById,omitempty"`
 	CreatedBy       string             `json:"createdBy,omitempty"`
+	AnalysisMode    string             `json:"analysisMode,omitempty"` // "", "quick", "audio_first", "full"
+	AudioBytesUsed  int64              `json:"audioBytesUsed,omitempty"`
+	EstFullBytes    int64              `json:"estFullBytes,omitempty"`
 }
 
 // ComplianceCheck reports whether a rendered clip satisfies campaign rules.
@@ -368,6 +388,29 @@ type RenderJob struct {
 	Error         string          `json:"error,omitempty"`
 	CreatedAt     time.Time       `json:"createdAt"`
 	CompletedAt   *time.Time      `json:"completedAt,omitempty"`
+}
+
+// JobSummary is a compact, truncation-proof representation returned by GET /api/jobs?summary=1.
+type JobSummary struct {
+	ID            string     `json:"id"`
+	JobType       string     `json:"jobType,omitempty"`
+	ProjectID     string     `json:"projectId,omitempty"`
+	CampaignName  string     `json:"campaignName,omitempty"`
+	Title         string     `json:"title"`
+	Status        string     `json:"status"`
+	Stage         string     `json:"stage"`
+	Progress      float64    `json:"progress"`
+	Speed         string     `json:"speed,omitempty"`
+	OutputFile    string     `json:"outputFile,omitempty"`
+	FileSizeBytes int64      `json:"fileSizeBytes,omitempty"`
+	FinalDuration float64    `json:"finalDuration,omitempty"`
+	ReviewStatus  string     `json:"reviewStatus,omitempty"`
+	CreatedByID   string     `json:"createdById,omitempty"`
+	CreatedBy     string     `json:"createdBy,omitempty"`
+	CreatedVia    string     `json:"createdVia,omitempty"`
+	Error         string     `json:"error,omitempty"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	CompletedAt   *time.Time `json:"completedAt,omitempty"`
 }
 
 // TeamMember represents a team user with their own personal web Access Key AND personal Muse Agent Key.

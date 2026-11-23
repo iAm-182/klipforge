@@ -304,3 +304,58 @@ func TestServerTeamMode_AccessKey_AgentKey_RBAC_And_Quota(t *testing.T) {
 		}
 	}
 }
+
+func TestJobsPaginationSummaryAndSingleGet(t *testing.T) {
+	tmp := newTestDir(t)
+	st, err := store.NewStore(tmp)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+	srv := New(st, deps.NewManager(tmp), events.NewBroker())
+	h := srv.Handler()
+
+	now := time.Now()
+	_ = st.SaveJob(&model.RenderJob{ID: "j1", Title: "Clip 1", Status: "done", Progress: 100, PostCaption: "giant caption payload", CreatedAt: now.Add(-3 * time.Minute)})
+	_ = st.SaveJob(&model.RenderJob{ID: "j2", Title: "Clip 2", Status: "rendering", Progress: 45, Stage: "Encoding", CreatedAt: now.Add(-2 * time.Minute)})
+	_ = st.SaveJob(&model.RenderJob{ID: "j3", Title: "Clip 3", Status: "error", Error: "timeout", CreatedAt: now.Add(-1 * time.Minute)})
+
+	// 1. ?status=done&summary=1
+	req1 := httptest.NewRequest(http.MethodGet, "/api/jobs?status=done&summary=1&limit=10", nil)
+	req1.Header.Set("X-Agent-Key", srv.AgentKey)
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec1.Code)
+	}
+	if rec1.Header().Get("X-Total-Count") != "1" {
+		t.Fatalf("expected X-Total-Count=1, got %q", rec1.Header().Get("X-Total-Count"))
+	}
+	if bytes.Contains(rec1.Body.Bytes(), []byte("giant caption payload")) {
+		t.Fatalf("summary=1 should strip heavy postCaption/options fields!")
+	}
+
+	// 2. ?limit=2&offset=1
+	req2 := httptest.NewRequest(http.MethodGet, "/api/jobs?limit=2&offset=1", nil)
+	req2.Header.Set("X-Engine-Token", srv.EngineToken)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	var page []model.RenderJob
+	_ = json.Unmarshal(rec2.Body.Bytes(), &page)
+	if len(page) != 2 || rec2.Header().Get("X-Total-Count") != "3" {
+		t.Fatalf("expected 2 jobs with X-Total-Count=3, got len=%d total=%q", len(page), rec2.Header().Get("X-Total-Count"))
+	}
+
+	// 3. Single job GET /api/jobs/j2
+	req3 := httptest.NewRequest(http.MethodGet, "/api/jobs/j2", nil)
+	req3.Header.Set("X-Agent-Key", srv.AgentKey)
+	rec3 := httptest.NewRecorder()
+	h.ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("expected 200 on GET /api/jobs/j2, got %d", rec3.Code)
+	}
+	var got model.RenderJob
+	_ = json.Unmarshal(rec3.Body.Bytes(), &got)
+	if got.ID != "j2" || got.Progress != 45 {
+		t.Fatalf("unexpected single job response: %+v", got)
+	}
+}

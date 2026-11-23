@@ -107,7 +107,15 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 	hasHeatmap := len(in.Heatmap) > 0
 	hasChat := len(in.Chats) > 20
 	hasAudio := len(in.AudioEnergy) > 5
-	hasTranscript := len(in.Transcript) > 15
+	hasTranscript := len(in.Transcript) > 0
+	viralityGrid := buildViralityGrid(dur, in.Transcript)
+	hasVirality := false
+	for _, v := range viralityGrid {
+		if v > 0.25 {
+			hasVirality = true
+			break
+		}
+	}
 
 	// 1. Populate Heatmap grid
 	if hasHeatmap {
@@ -226,9 +234,8 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 		}
 	}
 
-	// 5. Dynamic Multi-Signal Weight Redistribution
-	// Works fast & accurately even on 4-hour VODs that have NO YouTube heatmap yet!
-	wH, wC, wA, wT := 0.0, 0.0, 0.0, 0.0
+	// 5. Dynamic Multi-Signal Weight Redistribution (Audio is ONE signal among four, never dominating alone!)
+	wH, wC, wA, wT, wV := 0.0, 0.0, 0.0, 0.0, 0.0
 	if hasHeatmap {
 		wH = cfg.HeatmapWeight
 	}
@@ -239,18 +246,25 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 		wA = cfg.AudioWeight
 	}
 	if hasTranscript {
-		// Give transcript full weight only if alone; when paired with Audio Scream peaks, let Audio lead (0.62 Audio + 0.38 Transcript)
-		// so calm cutscenes are outranked by actual loud laughing/screaming/explosive gameplay!
 		if !hasHeatmap && !hasChat && !hasAudio {
-			wT = 1.0
+			wT = 0.45
+			wV = 0.55
 		} else if !hasHeatmap && !hasChat && hasAudio {
-			wA = 0.62
-			wT = 0.38
-		} else {
+			// Balance audio energy with transcript hype & rule-based virality rubric so quiet crashes/boasts rank properly!
+			wA = 0.35
 			wT = 0.25
+			wV = 0.40
+		} else {
+			wT = 0.18
+			if hasVirality {
+				wV = 0.28
+			}
 		}
 	}
-	wTotal := wH + wC + wA + wT
+	if !hasVirality {
+		wV = 0
+	}
+	wTotal := wH + wC + wA + wT + wV
 	if wTotal <= 0 {
 		wTotal = 1.0
 	} else {
@@ -258,12 +272,13 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 		wC /= wTotal
 		wA /= wTotal
 		wT /= wTotal
+		wV /= wTotal
 	}
 
 	combined := make([]float64, dur)
 	skipIntro := int(cfg.SkipIntroSec)
 	for i := 0; i < dur; i++ {
-		score := wH*heatGrid[i] + wC*chatGrid[i] + wA*audioGrid[i] + wT*transcriptGrid[i]
+		score := wH*heatGrid[i] + wC*chatGrid[i] + wA*audioGrid[i] + wT*transcriptGrid[i] + wV*viralityGrid[i]
 
 		activeHigh := 0
 		if hasHeatmap && heatGrid[i] >= 0.55 {
@@ -278,6 +293,9 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 		if hasTranscript && transcriptGrid[i] >= 0.65 {
 			activeHigh++
 		}
+		if hasVirality && viralityGrid[i] >= 0.55 {
+			activeHigh++
+		}
 		if activeHigh >= 2 {
 			score = math.Min(1.0, score*1.16)
 		}
@@ -289,8 +307,8 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 		combined[i] = score
 	}
 
-	// If no live chat exists yet, mirror transcript hype into chatGrid only when displaying or keep separate via Reasons
-	candidates := extractCandidates(dur, combined, heatGrid, chatGrid, audioGrid, transcriptGrid, chatBucketSamples, in.Transcript, in.Chapters, cfg, hasHeatmap, hasChat, hasAudio, hasTranscript, in.ForbiddenWords)
+	// Extract arc-aware candidates with setup->payoff expansion & 15s peak merging
+	candidates := extractCandidates(dur, combined, heatGrid, chatGrid, audioGrid, transcriptGrid, viralityGrid, chatBucketSamples, in.Transcript, in.Chapters, cfg, hasHeatmap, hasChat, hasAudio, hasTranscript, in.ForbiddenWords)
 
 	// 6. Downsample timeline to max ~360 chart points for buttery-smooth Canvas rendering
 	step := 1
@@ -352,7 +370,7 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 
 func extractCandidates(
 	dur int,
-	combined, heat, chat, audio, transcriptGrid []float64,
+	combined, heat, chat, audio, transcriptGrid, viralityGrid []float64,
 	chatSamples [][]string,
 	transcript []model.TranscriptCue,
 	chapters []model.Chapter,
@@ -361,8 +379,9 @@ func extractCandidates(
 	forbiddenWords []string,
 ) []model.ClipCandidate {
 	type peak struct {
-		sec   int
-		score float64
+		sec               int
+		earliestSetupHint int
+		score             float64
 	}
 
 	// Smooth combined slightly (5s) for peak localization
@@ -383,7 +402,7 @@ func extractCandidates(
 		minThreshold = 0.25
 	}
 
-	var peaks []peak
+	var rawPeaks []peak
 	minPeakDist := int(math.Max(15, cfg.MinDurationSec*0.8))
 
 	// Find all local maxima above threshold
@@ -400,12 +419,12 @@ func extractCandidates(
 			}
 		}
 		if isLocalMax {
-			peaks = append(peaks, peak{sec: i, score: combined[i]})
+			rawPeaks = append(rawPeaks, peak{sec: i, earliestSetupHint: i, score: combined[i]})
 		}
 	}
 
 	// If very strict threshold yielded too few clips on a flat video, relax gracefully
-	if len(peaks) == 0 && dur > 30 {
+	if len(rawPeaks) == 0 && dur > 30 {
 		bestSec := 0
 		bestVal := -1.0
 		for i := int(cfg.SkipIntroSec); i < dur; i++ {
@@ -415,16 +434,37 @@ func extractCandidates(
 			}
 		}
 		if bestVal > 0 {
-			peaks = append(peaks, peak{sec: bestSec, score: bestVal})
+			rawPeaks = append(rawPeaks, peak{sec: bestSec, earliestSetupHint: bestSec, score: bestVal})
 		}
 	}
 
-	// Sort peaks descending by score
+	// Merge peaks closer than 15 seconds apart into ONE unified arc:
+	// keep the strongest peak as arc peak, and preserve the earliest setup start!
+	sort.Slice(rawPeaks, func(i, j int) bool {
+		return rawPeaks[i].sec < rawPeaks[j].sec
+	})
+	var peaks []peak
+	for _, rp := range rawPeaks {
+		if len(peaks) > 0 && rp.sec-peaks[len(peaks)-1].sec < 15 {
+			prev := &peaks[len(peaks)-1]
+			if rp.earliestSetupHint < prev.earliestSetupHint {
+				prev.earliestSetupHint = rp.earliestSetupHint
+			}
+			if rp.score > prev.score {
+				prev.sec = rp.sec
+				prev.score = rp.score
+			}
+		} else {
+			peaks = append(peaks, rp)
+		}
+	}
+
+	// Sort merged peaks descending by score
 	sort.Slice(peaks, func(i, j int) bool {
 		return peaks[i].score > peaks[j].score
 	})
 
-	// Non-Maximum Suppression & smart clip boundary expansion
+	// Non-Maximum Suppression & Arc-Aware Setup->Payoff Boundary Expansion
 	var selected []model.ClipCandidate
 	usedHooks := make(map[string]bool)
 	for _, pk := range peaks {
@@ -432,47 +472,15 @@ func extractCandidates(
 			break
 		}
 
-		// Expand around peak while signal stays elevated, respecting pre/post padding & min/max duration
-		left := pk.sec - int(cfg.PrePaddingSec)
-		right := pk.sec + int(cfg.PostPaddingSec)
+		// Expand into setup->payoff arc clamped to 20-45s!
+		left, right, arcReason := expandSetupPayoffArc(pk.sec, pk.earliestSetupHint, dur, transcript, chat, audio, smooth)
 
-		// Extend slightly if adjacent seconds are still very hot (> 65% of peak)
-		hotCut := smooth[pk.sec] * 0.65
-		for left > 0 && smooth[left] >= hotCut && float64(right-left) < cfg.MaxDurationSec {
-			left--
-		}
-		for right < dur-1 && smooth[right] >= hotCut && float64(right-left) < cfg.MaxDurationSec {
-			right++
+		// Respect user-configured MaxDurationSec if explicitly tighter/wider than 45s while preserving arc bounds
+		if cfg.MaxDurationSec >= 20 && cfg.MaxDurationSec <= 45 && float64(right-left) > cfg.MaxDurationSec {
+			right = clampInt(left+int(cfg.MaxDurationSec), pk.sec+6, dur)
 		}
 
-		// Enforce min and max duration
-		if left < 0 {
-			left = 0
-		}
-		if right > dur {
-			right = dur
-		}
-		segDur := float64(right - left)
-		if segDur > cfg.MaxDurationSec {
-			// Center around peak with 35% lead-in, 65% aftermath (ideal for streamer reactions!)
-			lead := int(cfg.MaxDurationSec * 0.35)
-			left = pk.sec - lead
-			right = left + int(cfg.MaxDurationSec)
-			if left < 0 {
-				left = 0
-				right = clampInt(int(cfg.MaxDurationSec), 1, dur)
-			}
-			if right > dur {
-				right = dur
-				left = clampInt(dur-int(cfg.MaxDurationSec), 0, dur-1)
-			}
-		} else if segDur < cfg.MinDurationSec && float64(dur) >= cfg.MinDurationSec {
-			need := int(cfg.MinDurationSec) - (right - left)
-			left = clampInt(left-need/2, 0, dur-1)
-			right = clampInt(left+int(cfg.MinDurationSec), 1, dur)
-		}
-
-		// Check overlap against already selected clips
+		// Check overlap against already selected arcs
 		overlaps := false
 		for _, ex := range selected {
 			interStart := math.Max(float64(left), ex.StartSec)
@@ -490,16 +498,26 @@ func extractCandidates(
 			continue
 		}
 
-		// Gather window peak stats
+		// Gather window stats + rule-based Virality Rubric (Hook, Emotion, Conflict, Quotable)
 		maxH := windowMax(heat, left, right)
 		maxC := windowMax(chat, left, right)
 		maxA := windowMax(audio, left, right)
 		maxT := windowMax(transcriptGrid, left, right)
-		score100 := math.Round(math.Min(100, pk.score*100))
+		vScore, vBreakdown := ScoreViralityWindow(transcript, float64(left), float64(right))
+
+		// Blend peak score with arc virality so strong boast->crash->reaction arcs outrank empty loud noise!
+		blended := pk.score * 100
+		if vScore > 0 {
+			blended = 0.65*(pk.score*100) + 0.35*vScore
+		}
+		score100 := math.Round(math.Min(100, blended))
 
 		reasons := buildReasons(maxH, maxC, maxA, maxT, hasHeatmap, hasChat, hasAudio, hasTranscript)
+		if vScore >= 55 {
+			reasons = append(reasons, fmt.Sprintf("Virality %.0f", vScore))
+		}
 		samples := collectChatSamples(chatSamples, pk.sec-5, pk.sec+12, 5)
-		speech := collectTranscriptSnippet(transcript, float64(left), float64(right), 180)
+		speech := collectTranscriptSnippet(transcript, float64(left), float64(right), 220)
 		chapTitle := findChapterTitle(chapters, float64(pk.sec))
 
 		rank := len(selected) + 1
@@ -511,24 +529,39 @@ func extractCandidates(
 		hookText := suggestHookText(rank, reasons, samples, transcript, float64(pk.sec), speech, chapTitle, forbiddenWords, usedHooks)
 		usedHooks[strings.ToUpper(hookText)] = true
 
+		vbCopy := vBreakdown
 		selected = append(selected, model.ClipCandidate{
-			ID:           fmt.Sprintf("clip-%d-%d", left, right),
-			Rank:         rank,
-			Title:        title,
-			StartSec:     float64(left),
-			EndSec:       float64(right),
-			PeakSec:      float64(pk.sec),
-			DurationSec:  float64(right - left),
-			Score:        score100,
-			HeatmapScore: math.Round(maxH * 100),
-			ChatScore:    math.Round(maxC * 100),
-			AudioScore:   math.Round(maxA * 100),
-			Reasons:      reasons,
-			SampleChats:  samples,
-			Transcript:   speech,
-			HookText:     hookText,
-			Selected:     rank <= 5, // Pre-select Top 5 hottest moments!
+			ID:                fmt.Sprintf("clip-%d-%d", left, right),
+			Rank:              rank,
+			Title:             title,
+			StartSec:          float64(left),
+			EndSec:            float64(right),
+			PeakSec:           float64(pk.sec),
+			ArcStartSec:       float64(left),
+			ArcEndSec:         float64(right),
+			ArcReason:         arcReason,
+			DurationSec:       float64(right - left),
+			Score:             score100,
+			HeatmapScore:      math.Round(maxH * 100),
+			ChatScore:         math.Round(maxC * 100),
+			AudioScore:        math.Round(maxA * 100),
+			ViralityScore:     vScore,
+			ViralityBreakdown: &vbCopy,
+			Reasons:           reasons,
+			SampleChats:       samples,
+			Transcript:        speech,
+			HookText:          hookText,
+			Selected:          rank <= 5,
 		})
+	}
+
+	// Re-rank descending by final blended score
+	sort.SliceStable(selected, func(i, j int) bool {
+		return selected[i].Score > selected[j].Score
+	})
+	for i := range selected {
+		selected[i].Rank = i + 1
+		selected[i].Selected = i < 5
 	}
 
 	return selected

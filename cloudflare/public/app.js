@@ -310,18 +310,20 @@
       renderTopNBuilder();
       renderHomeDashboard();
     } catch (e) {
+      const msg = String(e && e.message ? e.message : 'Engine sedang offline');
+      const isCooling = msg.includes('pendinginan') || msg.includes('dibangunkan') || msg.includes('InstaBox');
       const badge = $('depBadge');
       if (badge) {
-        badge.textContent = 'Engine Offline';
+        badge.textContent = isCooling ? 'Server Jeda / Bangun' : 'Engine Offline';
         badge.className = 'dep-pill err';
       }
       const banner = $('projectStatusBanner');
       if (banner) {
         banner.classList.remove('hidden');
-        $('statusBannerTitle').textContent = 'Go Engine (FFmpeg + yt-dlp) Sedang Offline';
-        $('statusBannerMsg').textContent = 'Dashboard sudah online di Cloudflare Edge! Untuk mulai scan & render video, jalankan start-online.bat di PC kamu (atau Docker di VPS), lalu refresh halaman ini.';
+        $('statusBannerTitle').textContent = isCooling ? '⏳ Status Server Cloud (InstaBox)' : 'Go Engine (FFmpeg + yt-dlp) Sedang Offline';
+        $('statusBannerMsg').textContent = isCooling ? msg : 'Dashboard sudah online di Cloudflare Edge! Untuk mulai scan & render video, jalankan start-online.bat di PC kamu (atau Docker di VPS), lalu refresh halaman ini.';
       }
-      toast('Engine offline — jalankan start-online.bat di PC kamu.', 'err');
+      toast(isCooling ? msg : 'Engine offline — jalankan start-online.bat di PC kamu.', 'err');
     }
   }
 
@@ -909,8 +911,20 @@
       if (sig.hasHeatmap) sigParts.push(`🔥 Heat ${Math.round(c.heatmapScore)}%`);
       if (sig.hasLiveChat) sigParts.push(`💬 Chat ${Math.round(c.chatScore)}%`);
       if (sig.hasAudio) sigParts.push(`🔊 Audio ${Math.round(c.audioScore)}%`);
-      if (sig.hasTranscriptHype) sigParts.push(`🎙️ Transkrip Indo`);
+      if (c.viralityScore > 0) sigParts.push(`🧠 Virality ${Math.round(c.viralityScore)}%`);
+      else if (sig.hasTranscriptHype) sigParts.push(`🎙️ Transkrip Indo`);
       const sigLine = sigParts.length > 0 ? sigParts.join(' · ') : `⚡ Skor ${Math.round(c.score)}%`;
+
+      const arcHtml = c.arcReason
+        ? `<div class="text-xs" style="color:#a5f3fc;margin:3px 0;">🎬 <strong>Arc:</strong> ${escapeHtml(c.arcReason)}${c.viralityBreakdown ? ` <span class="muted">(Hook ${Math.round(c.viralityBreakdown.hook)} · Emosi ${Math.round(c.viralityBreakdown.emotion)} · Konflik ${Math.round(c.viralityBreakdown.conflict)})</span>` : ''}</div>`
+        : '';
+
+      const framesHtml = (c.startFrameUrl || c.peakFrameUrl)
+        ? `<div class="cand-frames-row">
+            ${c.startFrameUrl ? `<figure class="cand-frame"><img src="${escapeAttr(c.startFrameUrl)}" loading="lazy" alt="Start" /><figcaption>Start ${fmtTime(c.arcStartSec || c.startSec)}</figcaption></figure>` : ''}
+            ${c.peakFrameUrl ? `<figure class="cand-frame"><img src="${escapeAttr(c.peakFrameUrl)}" loading="lazy" alt="Peak" /><figcaption>Peak ${fmtTime(c.peakSec)}</figcaption></figure>` : ''}
+           </div>`
+        : '';
 
       el.innerHTML = `
         <div class="cand-top">
@@ -921,7 +935,9 @@
           <span class="${scoreCls}">⚡ ${Math.round(c.score)}</span>
         </div>
         <div class="cand-reasons">${reasonsHtml}</div>
+        ${arcHtml}
         <div class="text-xs muted">${sigLine}</div>
+        ${framesHtml}
         ${chatsHtml}
         ${transHtml}
         <div class="cand-times">
@@ -1692,6 +1708,7 @@
           url,
           campaignId: state.activeCampaignId,
           downloadFull: $('optDownloadFull').checked,
+          audioFirst: Boolean($('optAudioFirst')?.checked),
           includeChat: $('optIncludeChat').checked,
           includeAudio: $('optIncludeAudio').checked,
         }),
