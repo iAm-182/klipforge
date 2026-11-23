@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -14,8 +15,21 @@ import (
 	"klipforge/internal/store"
 )
 
+func newTestDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "klipforge-srv-test-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() {
+		// Background audio synthesis may briefly hold a wav handle on Windows; best-effort cleanup.
+		_ = os.RemoveAll(dir)
+	})
+	return dir
+}
+
 func TestServerSecurity_AuthAndCORS(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := newTestDir(t)
 	st, err := store.NewStore(tmp)
 	if err != nil {
 		t.Fatalf("NewStore failed: %v", err)
@@ -144,7 +158,7 @@ func TestServerSecurity_AuthAndCORS(t *testing.T) {
 }
 
 func TestServerTeamMode_AccessKey_AgentKey_RBAC_And_Quota(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := newTestDir(t)
 	st, err := store.NewStore(tmp)
 	if err != nil {
 		t.Fatalf("NewStore failed: %v", err)
