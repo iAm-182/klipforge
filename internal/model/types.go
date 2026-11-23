@@ -56,14 +56,17 @@ type LayoutConfig struct {
 
 // AudioAsset represents a BGM or SFX file stored in KlipForge's audio library.
 type AudioAsset struct {
-	ID       string  `json:"id"`
-	Name     string  `json:"name"`
-	Kind     string  `json:"kind"`     // "bgm" or "sfx"
-	Category string  `json:"category"` // e.g. "Meme", "Transition", "Hype", "Gaming", "Custom"
-	FilePath string  `json:"filePath"`
-	FileName string  `json:"fileName"`
-	Duration float64 `json:"duration"`
-	BuiltIn  bool    `json:"builtIn"`
+	ID           string  `json:"id"`
+	Name         string  `json:"name"`
+	Kind         string  `json:"kind"`     // "bgm" or "sfx"
+	Category     string  `json:"category"` // e.g. "Meme", "Transition", "Hype", "Gaming", "Custom"
+	FilePath     string  `json:"filePath"`
+	FileName     string  `json:"fileName"`
+	Duration     float64 `json:"duration"`
+	BuiltIn      bool    `json:"builtIn"`
+	ImportedByID string  `json:"importedById,omitempty"`
+	ImportedBy   string  `json:"importedBy,omitempty"`
+	ImportedVia  string  `json:"importedVia,omitempty"`
 }
 
 // SFXCue triggers a specific sound effect at a clip-relative timestamp.
@@ -197,6 +200,9 @@ type ClipCandidate struct {
 	PeakFrameURL      string             `json:"peakFrameUrl,omitempty"`
 	StartFramePath    string             `json:"-"`
 	PeakFramePath     string             `json:"-"`
+	MomentType        string             `json:"momentType,omitempty"`
+	AutoEdit          *AutoEditDecision  `json:"autoEdit,omitempty"`
+	Verdict           *CandidateVerdict  `json:"verdict,omitempty"`
 	Selected          bool               `json:"selected"`
 }
 
@@ -292,14 +298,88 @@ type RenderOptions struct {
 	CRF          int             `json:"crf"`     // default 20
 }
 
-// CompileSegment is one clip slot inside a Top-N Countdown or Rapid Compilation video.
+// SpeedRamp defines a per-segment speed transition (e.g. normal 1.0x ramping into 0.5x slow-mo).
+type SpeedRamp struct {
+	AtSec     float64 `json:"atSec"`
+	FromSpeed float64 `json:"fromSpeed"`
+	ToSpeed   float64 `json:"toSpeed"`
+}
+
+// ZoomPunch defines a per-segment zoom punch-in window (e.g. 1.25x zoom on reaction for 1.5s).
+type ZoomPunch struct {
+	Scale       float64 `json:"scale"`       // 1.02 - 1.60
+	AtSec       float64 `json:"atSec"`       // Seconds from segment start
+	DurationSec float64 `json:"durationSec"` // Duration of punch window
+}
+
+// SegmentTextOverlay burns a single hook/text line onto a specific segment (must pass campaign forbidden words!).
+type SegmentTextOverlay struct {
+	Text     string `json:"text"`
+	Position string `json:"position,omitempty"` // top (default), center, bottom
+	Style    string `json:"style,omitempty"`    // bold_yellow (default), clean_white, neon_pink, pill_dark
+}
+
+// AutoEditDecision records what offline momentType -> SFX/BGM mapping picked and why.
+type AutoEditDecision struct {
+	MomentType string `json:"momentType"`
+	SFXID      string `json:"sfxId,omitempty"`
+	BGMID      string `json:"bgmId,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+// SegmentEditReport echoes back applied, clamped, or skipped per-segment controls to callers/agents.
+type SegmentEditReport struct {
+	Index      int               `json:"index"`
+	Label      string            `json:"label,omitempty"`
+	MomentType string            `json:"momentType,omitempty"`
+	Speed      float64           `json:"speed,omitempty"`
+	SpeedRamp  *SpeedRamp        `json:"speedRamp,omitempty"`
+	Zoom       *ZoomPunch        `json:"zoom,omitempty"`
+	Filter     string            `json:"filter,omitempty"`
+	Transition string            `json:"transition,omitempty"`
+	EndSFXID   string            `json:"endSfxId,omitempty"`
+	BGMAssetID string            `json:"bgmAssetId,omitempty"`
+	AutoEdit   *AutoEditDecision `json:"autoEdit,omitempty"`
+	Clamped    []string          `json:"clamped,omitempty"`
+	Skipped    []string          `json:"skipped,omitempty"`
+}
+
+// AppliedEditPlan summarizes the exact resolved edit decisions applied to an edit-script or compile job.
+type AppliedEditPlan struct {
+	BGMAssetID string              `json:"bgmAssetId,omitempty"`
+	AutoEdit   *AutoEditDecision   `json:"autoEdit,omitempty"`
+	Segments   []SegmentEditReport `json:"segments"`
+	Warnings   []string            `json:"warnings,omitempty"`
+}
+
+// CandidateVerdict stores a human or agent (Muse) judgment directly on a ClipCandidate.
+type CandidateVerdict struct {
+	Verdict    string    `json:"verdict"`              // "keep", "drop", "maybe"
+	Funny      int       `json:"funny"`                // 0 - 5
+	Note       string    `json:"note,omitempty"`
+	MomentType string    `json:"momentType,omitempty"` // crash, fail, hype, twist, victory, meme, custom
+	VerdictBy  string    `json:"verdictBy"`            // e.g. "Budi (agent)" or "Owner (web)"
+	MemberID   string    `json:"memberId,omitempty"`
+	Via        string    `json:"via,omitempty"`        // web, agent, token
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+// CompileSegment is one clip slot inside a Top-N Countdown, Rapid Compilation, or CapCut-Pro Edit Script video.
 type CompileSegment struct {
-	ProjectID   string  `json:"projectId"`
-	StartSec    float64 `json:"startSec"`
-	EndSec      float64 `json:"endSec"`
-	Label       string  `json:"label"`       // e.g. "ngetrail", "el alasan", "paling jago"
-	EndSFXID    string  `json:"endSfxId"`    // Optional punchline SFX near end (e.g. "sfx-metal-pipe", "sfx-boom")
-	EndSFXOffset float64 `json:"endSfxOffset"` // Seconds before segment end (default 1.0s)
+	ProjectID    string              `json:"projectId"`
+	StartSec     float64             `json:"startSec"`
+	EndSec       float64             `json:"endSec"`
+	Label        string              `json:"label"`                  // e.g. "ngetrail", "el alasan", "paling jago"
+	MomentType   string              `json:"momentType,omitempty"`   // crash, fail, hype, twist, victory, meme, custom
+	EndSFXID     string              `json:"endSfxId"`               // Optional punchline SFX near end (e.g. "sfx-metal-pipe", "sfx-boom")
+	EndSFXOffset float64             `json:"endSfxOffset"`           // Seconds before segment end (default 1.0s)
+	BGMAssetID   string              `json:"bgmAssetId,omitempty"`   // Optional per-segment BGM override
+	Speed        float64             `json:"speed,omitempty"`        // Optional per-segment speed (0.5..2.0, 0 = inherit global)
+	SpeedRamp    *SpeedRamp          `json:"speedRamp,omitempty"`    // Optional slow-mo/fast ramp window inside segment
+	Zoom         *ZoomPunch          `json:"zoom,omitempty"`         // Optional zoom punch-in window
+	TextOverlay  *SegmentTextOverlay `json:"textOverlay,omitempty"`  // Optional per-segment hook text line
+	Filter       string              `json:"filter,omitempty"`       // Optional color preset override
+	Transition   string              `json:"transition,omitempty"`   // cut (default), fade, zoom
 }
 
 // CompileOptions configures an Auto Top-N Countdown (5->1) or Rapid Compilation render.
@@ -367,6 +447,8 @@ type RenderJob struct {
 	Options       RenderOptions    `json:"options"`
 	CompileOpts   *CompileOptions  `json:"compileOpts,omitempty"`
 	PostEditOpts  *PostEditOptions `json:"postEditOpts,omitempty"`
+	AppliedPlan   *AppliedEditPlan `json:"appliedPlan,omitempty"`
+	AutoEdit      *AutoEditDecision `json:"autoEdit,omitempty"`
 	Status        string          `json:"status"`        // queued, downloading, rendering, done, error, canceled
 	Stage         string          `json:"stage"`         // human readable stage
 	Progress      float64         `json:"progress"`      // 0 - 100
@@ -477,8 +559,9 @@ type AppSettings struct {
 	DownloadQuality     string  `json:"downloadQuality"`     // 1080p, 720p, best
 	OutputDir           string  `json:"outputDir"`           // Default E:\klipforge\outputs
 	NotifyWebhookURL    string  `json:"notifyWebhookUrl"`    // Optional Discord/n8n webhook for render done/fail & engine up/down
-	MinFreeDiskGB       float64 `json:"minFreeDiskGb"`       // Block new renders below this free GB threshold (default 2.0)
-	OutputRetentionDays int     `json:"outputRetentionDays"` // Optional cleanup threshold in days (0 = manual)
+	MinFreeDiskGB              float64 `json:"minFreeDiskGb"`                        // Block new renders below this free GB threshold (default 2.0)
+	OutputRetentionDays        int     `json:"outputRetentionDays"`                  // Optional cleanup threshold in days (0 = manual)
+	DisableAgentTrendingImport bool    `json:"disableAgentTrendingImport,omitempty"` // Owner toggle to block agent trending audio imports (default false = enabled)
 }
 
 // DiskStats summarizes available storage & KlipForge disk usage.

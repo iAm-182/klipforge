@@ -741,6 +741,11 @@ var defaultBannedHookWords = []string{
 	"goblok", "tolol", "bajingan", "brengsek", "fuck", "shit", "bitch", "nigger", "nigga",
 }
 
+// ContainsForbiddenWord returns true if text matches any built-in profanity or campaign forbidden word.
+func ContainsForbiddenWord(text string, forbidden []string) bool {
+	return containsForbiddenWord(text, forbidden)
+}
+
 func containsForbiddenWord(text string, forbidden []string) bool {
 	low := " " + strings.ToLower(text) + " "
 	for _, bw := range defaultBannedHookWords {

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"klipforge/internal/analyzer"
 	"klipforge/internal/audiofx"
 	"klipforge/internal/deps"
 	"klipforge/internal/events"
@@ -214,6 +215,17 @@ func (wp *WorkerPool) EnqueueCompilation(opts model.CompileOptions) (*model.Rend
 		}
 	}
 	camp, _ := wp.Store.GetCampaign(opts.CampaignID)
+	var forbidden []string
+	if camp != nil {
+		forbidden = camp.ForbiddenWords
+	}
+	for i, seg := range opts.Segments {
+		if seg.TextOverlay != nil && strings.TrimSpace(seg.TextOverlay.Text) != "" {
+			if analyzer.ContainsForbiddenWord(seg.TextOverlay.Text, forbidden) {
+				return nil, fmt.Errorf("segmen #%d textOverlay mengandung kata terlarang campaign: %q", i+1, seg.TextOverlay.Text)
+			}
+		}
+	}
 	settings := wp.Store.GetSettings()
 	if opts.Encoder == "" {
 		opts.Encoder = settings.DefaultEncoder
@@ -685,6 +697,12 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 				endSfxPath = a.FilePath
 			}
 		}
+		segBGMPath := ""
+		if wp.Audio != nil && seg.BGMAssetID != "" {
+			if a, ok := wp.Audio.Get(seg.BGMAssetID); ok && fileExists(a.FilePath) {
+				segBGMPath = a.FilePath
+			}
+		}
 
 		resolved = append(resolved, ResolvedCompileSegment{
 			SourcePath:   srcPath,
@@ -697,7 +715,21 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 			OrigEnd:      seg.EndSec,
 			EndSFXPath:   endSfxPath,
 			EndSFXOffset: seg.EndSFXOffset,
+			Speed:        seg.Speed,
+			SpeedRamp:    seg.SpeedRamp,
+			Zoom:         seg.Zoom,
+			TextOverlay:  seg.TextOverlay,
+			Filter:       seg.Filter,
+			Transition:   seg.Transition,
+			BGMPath:      segBGMPath,
 		})
+	}
+
+	globalBGMPath := ""
+	if wp.Audio != nil && opts.AudioFX.BGMAssetID != "" {
+		if a, ok := wp.Audio.Get(opts.AudioFX.BGMAssetID); ok && fileExists(a.FilePath) {
+			globalBGMPath = a.FilePath
+		}
 	}
 
 	bumperSfxPath := ""
@@ -744,6 +776,9 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 		Subtitles:      opts.Subtitles,
 		AudioNorm:      opts.AudioNorm,
 		VideoFX:        opts.VideoFX,
+		BGMPath:        globalBGMPath,
+		BGMVolume:      opts.AudioFX.BGMVolume,
+		BGMAutoDuck:    opts.AudioFX.AutoDuck,
 		BumperDuration: opts.BumperDuration,
 		BumperSFXPath:  bumperSfxPath,
 		Watermark:      wmCfg,

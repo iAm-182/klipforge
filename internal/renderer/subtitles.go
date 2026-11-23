@@ -204,118 +204,9 @@ func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, 
 
 	// 2. Word-by-Word Viral Karaoke Subtitles
 	if style.Enabled && len(cues) > 0 {
-		// Flatten all words inside [clipStart, clipEnd] with exact or interpolated timings
-		var allWords []model.WordTiming
-		for _, cue := range cues {
-			if cue.End <= clipStart || cue.Start >= clipEnd {
-				continue
-			}
-			if len(cue.Words) > 0 {
-				for _, w := range cue.Words {
-					if w.End <= clipStart || w.Start >= clipEnd {
-						continue
-					}
-					ws := (w.Start - clipStart) / speed
-					we := (w.End - clipStart) / speed
-					if ws < 0 {
-						ws = 0
-					}
-					if we > clipDur {
-						we = clipDur
-					}
-					txt := StripUnsupportedEmojis(strings.TrimSpace(w.Text))
-					if txt != "" && we > ws+0.03 {
-						if style.Uppercase {
-							txt = strings.ToUpper(txt)
-						}
-						allWords = append(allWords, model.WordTiming{Start: ws, End: we, Text: txt})
-					}
-				}
-			} else {
-				// Interpolate word timings evenly across the cue
-				cs := (cue.Start - clipStart) / speed
-				ce := (cue.End - clipStart) / speed
-				if cs < 0 {
-					cs = 0
-				}
-				if ce > clipDur {
-					ce = clipDur
-				}
-				txt := StripUnsupportedEmojis(strings.TrimSpace(cue.Text))
-				if style.Uppercase {
-					txt = strings.ToUpper(txt)
-				}
-				toks := strings.Fields(txt)
-				if len(toks) == 0 || ce <= cs+0.05 {
-					continue
-				}
-				step := (ce - cs) / float64(len(toks))
-				for idx, tok := range toks {
-					allWords = append(allWords, model.WordTiming{
-						Start: cs + float64(idx)*step,
-						End:   cs + float64(idx+1)*step,
-						Text:  tok,
-					})
-				}
-			}
-		}
-
-		// Group into punchy 2-3 word bursts and emit word-by-word active-color karaoke dialogues!
-		for i := 0; i < len(allWords); {
-			endIdx := i + maxWords
-			if endIdx > len(allWords) {
-				endIdx = len(allWords)
-			}
-			// Break early if there is a natural pause > 0.65s between words
-			for j := i + 1; j < endIdx; j++ {
-				if allWords[j].Start-allWords[j-1].End > 0.65 {
-					endIdx = j
-					break
-				}
-			}
-			group := allWords[i:endIdx]
-			i = endIdx
-
-			for activeIdx, aw := range group {
-				s := aw.Start
-				e := aw.End
-				if activeIdx+1 < len(group) && group[activeIdx+1].Start > s {
-					e = group[activeIdx+1].Start
-				}
-				if e-s < 0.04 {
-					continue
-				}
-
-				var lineParts []string
-				for k, gw := range group {
-					wordSafe := sanitizeASSText(gw.Text)
-					if k == activeIdx {
-						if isKaraoke && isPunchKeyWord(gw.Text) {
-							// Karaoke Punch-In Zoom on key viral words (hook / laugh / crash / hype words)!
-							lineParts = append(lineParts, fmt.Sprintf("{\\c%s\\fscx132\\fscy132\\t(0,90,\\fscx118\\fscy118)\\t(90,210,\\fscx112\\fscy112)}%s{\\r}", keyPunchColor, wordSafe))
-						} else if isKaraoke {
-							// Enlarged vibrant active spoken word (reelsaw / CapCut karaoke feel)
-							lineParts = append(lineParts, fmt.Sprintf("{\\c%s\\fscx122\\fscy122\\t(0,85,\\fscx112\\fscy112)}%s{\\r}", highlightColor, wordSafe))
-						} else {
-							// Active spoken word pops in bright highlight color + slight scale pulse!
-							lineParts = append(lineParts, fmt.Sprintf("{\\c%s\\fscx114\\fscy114\\t(0,95,\\fscx104\\fscy104)}%s{\\r}", highlightColor, wordSafe))
-						}
-					} else {
-						lineParts = append(lineParts, fmt.Sprintf("{\\c%s}%s", baseColor, wordSafe))
-					}
-				}
-				popAnim := ""
-				if activeIdx == 0 {
-					// Snappy pop entrance for each new 3-word burst
-					popAnim = `{\fscx92\fscy92\t(0,70,\fscx100\fscy100)}`
-				}
-				sb.WriteString(fmt.Sprintf(
-					"Dialogue: 1,%s,%s,Viral,,0,0,0,,%s%s\n",
-					formatASSTime(s), formatASSTime(e), popAnim, strings.Join(lineParts, " "),
-				))
-				written++
-			}
-		}
+		subLines, cnt := buildSubtitleEventLines(cues, clipStart, clipEnd, speed, nil, style, baseColor, highlightColor, keyPunchColor, isKaraoke)
+		sb.WriteString(subLines)
+		written += cnt
 	}
 
 	if written == 0 {
@@ -325,6 +216,140 @@ func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, 
 		return 0, err
 	}
 	return written, nil
+}
+
+// buildSubtitleEventLines emits word-by-word ASS Dialogue events for [clipStart, clipEnd],
+// supporting karaoke active-word highlight + viral keyword punch-in zoom AND optional SpeedRamp time mapping!
+func buildSubtitleEventLines(
+	cues []model.TranscriptCue,
+	clipStart, clipEnd, speed float64,
+	ramp *model.SpeedRamp,
+	style model.SubtitleStyle,
+	baseColor, highlightColor, keyPunchColor string,
+	isKaraoke bool,
+) (string, int) {
+	if !style.Enabled || len(cues) == 0 {
+		return "", 0
+	}
+	if speed < 0.50 || speed > 2.00 {
+		speed = 1.0
+	}
+	rawDur := clipEnd - clipStart
+	if rawDur <= 0 {
+		return "", 0
+	}
+	clipDur := MapTimeWithRamp(rawDur, speed, ramp)
+	maxWords := style.MaxWordsPerRow
+	if maxWords <= 0 || maxWords > 4 {
+		maxWords = 3
+	}
+
+	var allWords []model.WordTiming
+	for _, cue := range cues {
+		if cue.End <= clipStart || cue.Start >= clipEnd {
+			continue
+		}
+		if len(cue.Words) > 0 {
+			for _, w := range cue.Words {
+				if w.End <= clipStart || w.Start >= clipEnd {
+					continue
+				}
+				ws := MapTimeWithRamp(w.Start-clipStart, speed, ramp)
+				we := MapTimeWithRamp(w.End-clipStart, speed, ramp)
+				if ws < 0 {
+					ws = 0
+				}
+				if we > clipDur {
+					we = clipDur
+				}
+				txt := StripUnsupportedEmojis(strings.TrimSpace(w.Text))
+				if txt != "" && we > ws+0.03 {
+					if style.Uppercase {
+						txt = strings.ToUpper(txt)
+					}
+					allWords = append(allWords, model.WordTiming{Start: ws, End: we, Text: txt})
+				}
+			}
+		} else {
+			cs := MapTimeWithRamp(cue.Start-clipStart, speed, ramp)
+			ce := MapTimeWithRamp(cue.End-clipStart, speed, ramp)
+			if cs < 0 {
+				cs = 0
+			}
+			if ce > clipDur {
+				ce = clipDur
+			}
+			txt := StripUnsupportedEmojis(strings.TrimSpace(cue.Text))
+			if style.Uppercase {
+				txt = strings.ToUpper(txt)
+			}
+			toks := strings.Fields(txt)
+			if len(toks) == 0 || ce <= cs+0.05 {
+				continue
+			}
+			step := (ce - cs) / float64(len(toks))
+			for idx, tok := range toks {
+				allWords = append(allWords, model.WordTiming{
+					Start: cs + float64(idx)*step,
+					End:   cs + float64(idx+1)*step,
+					Text:  tok,
+				})
+			}
+		}
+	}
+
+	var sb strings.Builder
+	written := 0
+	for i := 0; i < len(allWords); {
+		endIdx := i + maxWords
+		if endIdx > len(allWords) {
+			endIdx = len(allWords)
+		}
+		for j := i + 1; j < endIdx; j++ {
+			if allWords[j].Start-allWords[j-1].End > 0.65 {
+				endIdx = j
+				break
+			}
+		}
+		group := allWords[i:endIdx]
+		i = endIdx
+
+		for activeIdx, aw := range group {
+			s := aw.Start
+			e := aw.End
+			if activeIdx+1 < len(group) && group[activeIdx+1].Start > s {
+				e = group[activeIdx+1].Start
+			}
+			if e-s < 0.04 {
+				continue
+			}
+			var lineParts []string
+			for k, gw := range group {
+				wordSafe := sanitizeASSText(gw.Text)
+				if k == activeIdx {
+					if isKaraoke && isPunchKeyWord(gw.Text) {
+						lineParts = append(lineParts, fmt.Sprintf("{\\c%s\\fscx132\\fscy132\\t(0,90,\\fscx118\\fscy118)\\t(90,210,\\fscx112\\fscy112)}%s{\\r}", keyPunchColor, wordSafe))
+					} else if isKaraoke {
+						lineParts = append(lineParts, fmt.Sprintf("{\\c%s\\fscx122\\fscy122\\t(0,85,\\fscx112\\fscy112)}%s{\\r}", highlightColor, wordSafe))
+					} else {
+						lineParts = append(lineParts, fmt.Sprintf("{\\c%s\\fscx114\\fscy114\\t(0,95,\\fscx104\\fscy104)}%s{\\r}", highlightColor, wordSafe))
+					}
+				} else {
+					lineParts = append(lineParts, fmt.Sprintf("{\\c%s}%s", baseColor, wordSafe))
+				}
+			}
+			popAnim := ""
+			if activeIdx == 0 {
+				popAnim = `{\fscx92\fscy92\t(0,70,\fscx100\fscy100)}`
+			}
+			sb.WriteString(fmt.Sprintf(
+				"Dialogue: 1,%s,%s,Viral,,0,0,0,,%s%s\n",
+				formatASSTime(s), formatASSTime(e), popAnim, strings.Join(lineParts, " "),
+			))
+			written++
+		}
+	}
+	return sb.String(), written
 }
 
 var karaokePunchWords = map[string]bool{

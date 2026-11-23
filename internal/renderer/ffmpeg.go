@@ -99,9 +99,12 @@ type RenderInput struct {
 	Subtitles    model.SubtitleStyle
 	SubtitleFile string // Generated .ass path (empty if none)
 	HookText     string
-	AudioNorm    bool
-	VideoFX      model.VideoFXConfig
-	BGMPath      string        // Optional BGM file path (looped & trimmed to main clip only)
+	AudioNorm       bool
+	VideoFX         model.VideoFXConfig
+	SpeedRamp       *model.SpeedRamp // Optional per-segment speed ramp (e.g. 1.0x -> 0.5x slow-mo!)
+	ZoomPunch       *model.ZoomPunch // Optional per-segment zoom punch-in
+	EntryTransition string           // "", "cut", "fade", "zoom"
+	BGMPath         string           // Optional BGM file path (looped & trimmed to main clip only)
 	BGMVolume    float64       // 0.05 - 0.80
 	BGMAutoDuck  bool          // ReaCut-style sidechaincompress ducking under voice
 	SFXCues      []ResolvedSFX // Optional SFX triggers (mixed into main clip only, NEVER outro!)
@@ -165,7 +168,7 @@ func RenderClip(ctx context.Context, in RenderInput) (MediaInfo, error) {
 	outW, outH := ResolveOutputDimensions(in.Layout, srcInfo.Width, srcInfo.Height)
 
 	speed := in.VideoFX.Speed
-	if speed < 0.75 || speed > 1.50 {
+	if speed < 0.50 || speed > 2.00 {
 		speed = 1.0
 	}
 
@@ -196,7 +199,7 @@ func RenderClip(ctx context.Context, in RenderInput) (MediaInfo, error) {
 		}
 	}
 
-	// Calculate effective main clip duration after speed adjustment
+	// Calculate effective main clip duration after speed / speedRamp adjustment
 	rawMainDur := in.ClipDuration
 	if rawMainDur <= 0 || (in.SeekStart == 0 && srcInfo.Duration > 0 && srcInfo.Duration < rawMainDur+2) {
 		rawMainDur = srcInfo.Duration
@@ -204,7 +207,17 @@ func RenderClip(ctx context.Context, in RenderInput) (MediaInfo, error) {
 	if rawMainDur <= 0 {
 		rawMainDur = 30
 	}
+	var activeRamp *model.SpeedRamp
+	if in.SpeedRamp != nil && rawMainDur >= 1.5 {
+		r := ClampSpeedRamp(*in.SpeedRamp, rawMainDur)
+		if math.Abs(r.FromSpeed-r.ToSpeed) > 0.02 || math.Abs(r.FromSpeed-1.0) > 0.02 {
+			activeRamp = &r
+		}
+	}
 	effectiveMainDur := rawMainDur / speed
+	if activeRamp != nil {
+		effectiveMainDur = activeRamp.AtSec/activeRamp.FromSpeed + (rawMainDur-activeRamp.AtSec)/activeRamp.ToSpeed
+	}
 
 	totalExpected := effectiveMainDur
 	if hasIntro {
@@ -283,17 +296,31 @@ func RenderClip(ctx context.Context, in RenderInput) (MediaInfo, error) {
 	}
 	curV := "[main_v0]"
 
-	// 2. Speed adjustment + normalize timestamps BEFORE time-based FX
-	if math.Abs(speed-1.0) > 0.005 {
+	// 2. Speed / SpeedRamp adjustment + normalize timestamps BEFORE time-based FX
+	if activeRamp != nil {
+		filters = append(filters, fmt.Sprintf(
+			"%ssetpts=PTS-STARTPTS,split=2[vr_a][vr_b];"+
+				"[vr_a]trim=start=0:end=%.3f,setpts=(PTS-STARTPTS)/%.4f[vr_1];"+
+				"[vr_b]trim=start=%.3f:end=%.3f,setpts=(PTS-STARTPTS)/%.4f[vr_2];"+
+				"[vr_1][vr_2]concat=n=2:v=1:a=0,fps=30[main_vspd]",
+			curV,
+			activeRamp.AtSec, activeRamp.FromSpeed,
+			activeRamp.AtSec, rawMainDur, activeRamp.ToSpeed,
+		))
+	} else if math.Abs(speed-1.0) > 0.005 {
 		filters = append(filters, fmt.Sprintf("%ssetpts=(PTS-STARTPTS)/%.4f,fps=30[main_vspd]", curV, speed))
 	} else {
 		filters = append(filters, fmt.Sprintf("%ssetpts=PTS-STARTPTS,fps=30[main_vspd]", curV))
 	}
 	curV = "[main_vspd]"
 
-	// 3. Video FX: Color Grade, Sharpen, Dynamic Motion (Slow Zoom / Peak Punch / Jedag-Jedug), Fade-In
+	// 3. Video FX: Color Grade, Sharpen, Dynamic Motion, Per-Segment Zoom Punch & Entry Transition
 	if fxFilter, outLabel := buildVideoFXFilter(curV, outW, outH, effectiveMainDur, speed, in.VideoFX); fxFilter != "" {
 		filters = append(filters, fxFilter)
+		curV = outLabel
+	}
+	if segFXFilter, outLabel := buildSegmentOverlayFXFilter(curV, outW, outH, effectiveMainDur, activeRamp, speed, in.ZoomPunch, in.EntryTransition); segFXFilter != "" {
+		filters = append(filters, segFXFilter)
 		curV = outLabel
 	}
 
@@ -339,17 +366,33 @@ func RenderClip(ctx context.Context, in RenderInput) (MediaInfo, error) {
 	filters = append(filters, fmt.Sprintf("%sfps=30,setsar=1,format=yuv420p,setpts=PTS-STARTPTS[main_v]", curV))
 
 	// ================= AUDIO FILTERGRAPH (Voice + Auto-Ducked BGM + SFX) =================
-	// Main voice track
+	// Main voice track (supports smooth speed ramp with 100% A/V sync!)
 	if srcInfo.HasAudio {
-		voiceChain := "[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
-		if math.Abs(speed-1.0) > 0.005 {
-			voiceChain += fmt.Sprintf(",atempo=%.4f", speed)
+		if activeRamp != nil {
+			aChain := fmt.Sprintf(
+				"[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS,asplit=2[ar_a][ar_b];"+
+					"[ar_a]atrim=start=0:end=%.3f,asetpts=PTS-STARTPTS,atempo=%.4f[ar_1];"+
+					"[ar_b]atrim=start=%.3f:end=%.3f,asetpts=PTS-STARTPTS,atempo=%.4f[ar_2];"+
+					"[ar_1][ar_2]concat=n=2:v=0:a=1",
+				activeRamp.AtSec, activeRamp.FromSpeed,
+				activeRamp.AtSec, rawMainDur, activeRamp.ToSpeed,
+			)
+			if in.AudioNorm {
+				aChain += ",loudnorm=I=-14:TP=-1.5:LRA=11"
+			}
+			aChain += fmt.Sprintf(",atrim=0:%.3f,asetpts=PTS-STARTPTS[voice_raw]", effectiveMainDur)
+			filters = append(filters, aChain)
+		} else {
+			voiceChain := "[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
+			if math.Abs(speed-1.0) > 0.005 {
+				voiceChain += fmt.Sprintf(",atempo=%.4f", speed)
+			}
+			if in.AudioNorm {
+				voiceChain += ",loudnorm=I=-14:TP=-1.5:LRA=11"
+			}
+			voiceChain += fmt.Sprintf(",atrim=0:%.3f,asetpts=PTS-STARTPTS[voice_raw]", effectiveMainDur)
+			filters = append(filters, voiceChain)
 		}
-		if in.AudioNorm {
-			voiceChain += ",loudnorm=I=-14:TP=-1.5:LRA=11"
-		}
-		voiceChain += fmt.Sprintf(",atrim=0:%.3f,asetpts=PTS-STARTPTS[voice_raw]", effectiveMainDur)
-		filters = append(filters, voiceChain)
 	} else {
 		filters = append(filters, fmt.Sprintf("anullsrc=r=48000:cl=stereo:d=%.3f[voice_raw]", effectiveMainDur))
 	}
@@ -538,6 +581,124 @@ func buildVideoFXFilter(inLabel string, outW, outH int, dur, speed float64, fx m
 		return "", inLabel
 	}
 	return fmt.Sprintf("%s%s[main_vfx]", inLabel, strings.Join(chain, ",")), "[main_vfx]"
+}
+
+// ClampSpeedRamp clamps a per-segment SpeedRamp safely to valid FFmpeg atempo/trim bounds.
+func ClampSpeedRamp(r model.SpeedRamp, rawDur float64) model.SpeedRamp {
+	out := r
+	if out.FromSpeed < 0.50 {
+		out.FromSpeed = 0.50
+	} else if out.FromSpeed > 2.00 {
+		out.FromSpeed = 2.00
+	}
+	if out.ToSpeed < 0.50 {
+		out.ToSpeed = 0.50
+	} else if out.ToSpeed > 2.00 {
+		out.ToSpeed = 2.00
+	}
+	if rawDur < 1.0 {
+		rawDur = 1.0
+	}
+	if out.AtSec < 0.4 {
+		out.AtSec = 0.4
+	}
+	if out.AtSec > rawDur-0.4 {
+		out.AtSec = math.Max(0.4, rawDur-0.4)
+	}
+	return out
+}
+
+// MapTimeWithRamp maps a segment-relative raw timestamp (seconds) into effective playback time after speed/speedRamp.
+func MapTimeWithRamp(rawT, speed float64, ramp *model.SpeedRamp) float64 {
+	if rawT < 0 {
+		rawT = 0
+	}
+	if ramp != nil {
+		if rawT <= ramp.AtSec {
+			return rawT / ramp.FromSpeed
+		}
+		return ramp.AtSec/ramp.FromSpeed + (rawT-ramp.AtSec)/ramp.ToSpeed
+	}
+	if speed < 0.50 || speed > 2.00 {
+		speed = 1.0
+	}
+	return rawT / speed
+}
+
+// ClampZoomPunch clamps a per-segment ZoomPunch safely inside [0, effDur] and returns any clamp notes.
+func ClampZoomPunch(z model.ZoomPunch, effDur float64) (model.ZoomPunch, []string) {
+	var notes []string
+	out := z
+	if out.Scale < 1.02 {
+		out.Scale = 1.02
+		notes = append(notes, "zoom.scale clamped to 1.02")
+	} else if out.Scale > 1.60 {
+		out.Scale = 1.60
+		notes = append(notes, "zoom.scale clamped to 1.60")
+	}
+	if out.DurationSec <= 0.15 {
+		out.DurationSec = 0.5
+		notes = append(notes, "zoom.durationSec clamped to 0.5s")
+	}
+	if effDur <= 0.3 {
+		out.AtSec = 0
+		out.DurationSec = math.Max(0.1, effDur)
+		return out, append(notes, "zoom clamped to tiny segment")
+	}
+	if out.AtSec < 0 {
+		out.AtSec = 0
+		notes = append(notes, "zoom.atSec clamped to 0")
+	}
+	if out.AtSec >= effDur-0.2 {
+		out.AtSec = math.Max(0, effDur-math.Min(out.DurationSec, effDur*0.5))
+		notes = append(notes, fmt.Sprintf("zoom.atSec clamped to %.2fs", out.AtSec))
+	}
+	if out.AtSec+out.DurationSec > effDur {
+		out.DurationSec = math.Max(0.2, effDur-out.AtSec)
+		notes = append(notes, fmt.Sprintf("zoom.durationSec clamped to %.2fs", out.DurationSec))
+	}
+	return out, notes
+}
+
+func buildSegmentOverlayFXFilter(inLabel string, outW, outH int, effDur float64, ramp *model.SpeedRamp, speed float64, zoom *model.ZoomPunch, transition string) (string, string) {
+	var chain []string
+
+	switch strings.ToLower(strings.TrimSpace(transition)) {
+	case "fade":
+		d := math.Min(0.35, effDur*0.4)
+		if d > 0.05 {
+			chain = append(chain, fmt.Sprintf("fade=t=in:st=0:d=%.2f", d))
+		}
+	case "zoom":
+		d := math.Min(0.35, effDur*0.4)
+		if d > 0.05 {
+			chain = append(chain, fmt.Sprintf(
+				"scale=w='trunc(%d*(1+0.18*max(0,1-t/%.2f))/2)*2':h='trunc(%d*(1+0.18*max(0,1-t/%.2f))/2)*2':eval=frame,"+
+					"crop=w=%d:h=%d:x='(iw-%d)/2':y='(ih-%d)/2'",
+				outW, d, outH, d, outW, outH, outW, outH,
+			))
+		}
+	}
+
+	if zoom != nil && zoom.Scale > 1.01 {
+		mapped := *zoom
+		mapped.AtSec = MapTimeWithRamp(zoom.AtSec, speed, ramp)
+		cz, _ := ClampZoomPunch(mapped, effDur)
+		delta := cz.Scale - 1.0
+		t0 := cz.AtSec
+		t1 := cz.AtSec + cz.DurationSec
+		chain = append(chain, fmt.Sprintf(
+			"scale=w='trunc(%d*(1+%.3f*between(t,%.2f,%.2f))/2)*2':h='trunc(%d*(1+%.3f*between(t,%.2f,%.2f))/2)*2':eval=frame,"+
+				"crop=w=%d:h=%d:x='(iw-%d)/2':y='(ih-%d)/2'",
+			outW, delta, t0, t1, outH, delta, t0, t1,
+			outW, outH, outW, outH,
+		))
+	}
+
+	if len(chain) == 0 {
+		return "", inLabel
+	}
+	return fmt.Sprintf("%s%s[main_segfx]", inLabel, strings.Join(chain, ",")), "[main_segfx]"
 }
 
 func runFFmpegEncode(
