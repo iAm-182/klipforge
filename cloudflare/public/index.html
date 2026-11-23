@@ -716,7 +716,7 @@
           <div class="card-head">
             <div>
               <h2>💥 Sound Effects (SFX) Library</h2>
-              <div class="muted text-xs">Termasuk <strong id="sfxBuiltInCount">33</strong> SFX viral CapCut-style (Oof/Ahh Roblox, Bruh, Metal Pipe, Vine Boom, Bonk, Sad Trombone, Bleep, dll.) bebas copyright + upload SFX MP3/WAV manual!</div>
+              <div class="muted text-xs">Sudah termasuk <strong id="sfxBuiltInCount">10</strong> SFX starter bebas copyright + upload SFX meme favorit lo (Vine Boom, Metal Pipe, Scratch, Kaget, dll.)</div>
             </div>
             <button class="btn btn-xs btn-secondary" id="btnRegenAudio">🔄 Restore Starter Pack</button>
           </div>
@@ -743,7 +743,7 @@
           <div class="card-head">
             <div>
               <h2>🎶 Backsound (BGM) Library</h2>
-              <div class="muted text-xs">Termasuk <strong id="bgmBuiltInCount">12</strong> BGM per mood (Hype, Funny, Chill, Suspense, Victory, Fail, Horror, Retro) + upload BGM MP3/WAV manual! Otomatis di-loop, dipotong bersih sebelum Outro, dan mendukung Auto-Ducking!</div>
+              <div class="muted text-xs">Otomatis di-loop, dipotong tepat sebelum Outro 3 detik, dan mendukung ReaCut Auto-Ducking saat streamer ngomong!</div>
             </div>
           </div>
 
@@ -1027,26 +1027,19 @@
     </main>
   </div>
 
-  <!-- ==================== CAPCUT PRO MULTI-TRACK POST-EDITOR MODAL ==================== -->
+  <!-- ==================== POST-CLIP MANUAL EDITOR MODAL (Trim + +SFX + Drag-Drop Watermark + Safe-Zone) ==================== -->
   <div id="postEditModal" class="modal-backdrop hidden">
-    <div class="modal-card modal-card-pro">
+    <div class="modal-card">
       <div class="modal-head">
         <div>
-          <h2>🎞️ CapCut Pro Studio — Multi-Track Timeline, Mega SFX/BGM &amp; Watermark</h2>
-          <div class="muted text-xs" id="peSourceSubtitle">Edit lokal instan tanpa download ulang YouTube — Outro MotionKlip tetap 100% bersih!</div>
+          <h2>✂️ Edit Manual Hasil Klip (Potong Menit, +SFX &amp; Geser Watermark)</h2>
+          <div class="muted text-xs" id="peSourceSubtitle">Edit langsung dari file MP4 lokal — cepat tanpa download ulang YouTube!</div>
         </div>
         <button class="btn btn-xs btn-ghost" id="btnClosePostEdit">✕ Tutup</button>
       </div>
 
-      <!-- Smart Audio Presets Bar (1-Click per Jenis Momen + Simpan Preset Sendiri!) -->
-      <div class="pe-preset-bar">
-        <span class="text-xs" style="font-weight:700;color:#67e8f9;white-space:nowrap;">⚡ Preset Pintar:</span>
-        <div id="pePresetsList" class="pe-presets-pills"></div>
-        <button class="btn btn-2xs btn-secondary ml-auto" id="btnPeSavePreset" title="Simpan kombinasi BGM + SFX sekarang sebagai preset baru">💾 Simpan Preset</button>
-      </div>
-
-      <div class="modal-body-grid mt-8">
-        <!-- Left: Interactive Video Stage + Safe-Zone + Draggable Watermark + Meme Text Preview -->
+      <div class="modal-body-grid">
+        <!-- Left: Interactive Video Preview + Safe-Zone + Draggable Watermark + Precision Controls -->
         <div class="pe-left">
           <div class="pe-video-wrap" id="peStage">
             <video id="peVideo" controls playsinline></video>
@@ -1055,14 +1048,15 @@
               <div class="sz-right">Ikon<br/>Like<br/>Komen<br/>Share</div>
               <div class="sz-bottom">Area Username, Caption &amp; Musik TikTok / Shorts</div>
             </div>
-            <div id="peTextPreviewLayer" class="pe-text-layer"></div>
             <div id="peWmDrag" class="pe-wm-drag hidden" title="Geser posisi watermark dengan mouse / jari!">
               <img id="peWmImg" src="" alt="WM" />
             </div>
           </div>
           <div class="pe-time-bar">
             <span class="pe-clock" id="peClock">00:00.0 / 00:00.0</span>
-            <label class="check-inline text-xs"><input type="checkbox" id="peSafeZoneToggle" /> 📱 Safe Zone</label>
+            <div class="head-actions">
+              <label class="check-inline text-xs"><input type="checkbox" id="peSafeZoneToggle" /> 📱 Safe Zone</label>
+            </div>
           </div>
           <div class="pe-time-bar">
             <div class="pe-nudge-group">
@@ -1075,229 +1069,159 @@
             </div>
           </div>
           <div class="pe-capture-row">
-            <button class="btn btn-xs btn-secondary" id="btnPeSetStart">⬅ Set Start</button>
-            <button class="btn btn-xs btn-secondary" id="btnPeSetEnd">Set End ➡</button>
-            <button class="btn btn-xs btn-secondary" id="btnPeQuickCut">✂️ Potong Tengah</button>
-            <button class="btn btn-xs btn-secondary" id="btnPeQuickFreeze">🧊 Freeze di Sini</button>
-            <button class="btn btn-xs btn-accent" id="btnPeAddSfxNow">💥 +SFX di Detik Video Ini</button>
+            <button class="btn btn-xs btn-secondary" id="btnPeSetStart">⬅ Set Start di Waktu Ini</button>
+            <button class="btn btn-xs btn-secondary" id="btnPeSetEnd">Set End di Waktu Ini ➡</button>
+            <button class="btn btn-xs btn-accent" id="btnPeAddSfxNow">💥 +SFX di Detik Ini</button>
+          </div>
+
+          <!-- CapCut-Style Visual Multi-Track Timeline (Scrub Playhead + Draggable SFX Blocks + BGM Bar) -->
+          <div class="pe-timeline-wrap" id="peTimelineWrap">
+            <div class="pe-tl-ruler">
+              <span id="peTlRulerStart">0:00</span>
+              <span class="text-xs muted">Klik timeline untuk geser video · Drag blok SFX kiri/kanan!</span>
+              <span id="peTlRulerEnd">0:00</span>
+            </div>
+            <div class="pe-tl-tracks" id="peTlTracks">
+              <div class="pe-tl-track" id="peTlVideoTrack">
+                <span class="pe-tl-track-label">🎬 VIDEO</span>
+                <div class="pe-tl-trim" id="peTlTrim"></div>
+                <div class="pe-tl-outro hidden" id="peTlOutro" title="Outro MotionKlip Bersih"></div>
+              </div>
+              <div class="pe-tl-track" id="peTlSfxTrack">
+                <span class="pe-tl-track-label">💥 SFX</span>
+              </div>
+              <div class="pe-tl-track" id="peTlBgmTrack">
+                <span class="pe-tl-track-label">🎵 BGM</span>
+                <div class="pe-tl-bgm-bar hidden" id="peTlBgmBar"></div>
+              </div>
+              <div class="pe-tl-playhead" id="peTlPlayhead" style="left:0%;"></div>
+            </div>
           </div>
         </div>
 
-        <!-- Right: Organized CapCut Pro Inspector Tabs -->
+        <!-- Right: Trim Controls + Manual Watermark + SFX Timeline + Optional BGM -->
         <div class="pe-right">
-          <label>Judul Hasil Edit (file asli tetap aman)
+          <label>Judul Hasil Edit (otomatis disimpan sebagai file baru — file asli tetap aman)
             <input type="text" id="peTitle" class="input input-sm" />
           </label>
 
-          <div class="pe-subtabs mt-8">
-            <button class="btn btn-xs btn-secondary pe-subtab active" data-pesub="sfx">💥 SFX (33+ &amp; Upload)</button>
-            <button class="btn btn-xs btn-ghost pe-subtab" data-pesub="bgm">🎵 BGM Track (12+)</button>
-            <button class="btn btn-xs btn-ghost pe-subtab" data-pesub="cutfx">✂️ Cut, Text &amp; FX</button>
-            <button class="btn btn-xs btn-ghost pe-subtab" data-pesub="wm">🎯 Watermark</button>
-          </div>
-
-          <!-- SUBTAB 1: SFX TIMELINE & MANUAL UPLOAD -->
-          <div id="peSub-sfx" class="pe-subpanel active mt-8">
-            <div class="pe-section">
-              <div class="card-head" style="margin-bottom:6px;">
-                <div class="fx-section-title" style="margin:0;">💥 Tempel SFX Viral di Waktu Player (Drag blok di timeline bawah untuk geser!)</div>
-                <button class="btn btn-2xs btn-secondary" id="btnPeAddSfxRow">+ Baris SFX</button>
-              </div>
-              <div class="pe-cat-pills" id="peSfxCatPills">
-                <button class="topic-pill active" data-sfxcat="all">Semua</button>
-                <button class="topic-pill" data-sfxcat="Meme">😂 Meme</button>
-                <button class="topic-pill" data-sfxcat="Impact">💥 Impact</button>
-                <button class="topic-pill" data-sfxcat="Fail">💀 Fail</button>
-                <button class="topic-pill" data-sfxcat="Transition">⚡ Transisi</button>
-                <button class="topic-pill" data-sfxcat="Alert">🚨 Alert</button>
-                <button class="topic-pill" data-sfxcat="Crowd">👏 Crowd</button>
-                <button class="topic-pill" data-sfxcat="custom">⭐ Upload</button>
-              </div>
-              <div class="pe-quick-sfx mt-6" id="peQuickSfxGrid"></div>
-              <div id="peSfxList" class="pe-sfx-list mt-8"></div>
-            </div>
-
-            <!-- Inline Manual SFX Upload right inside Pro Editor! -->
-            <div class="pe-section mt-8">
-              <div class="fx-section-title">⬆️ Tambah SFX Manual Sendiri (MP3 / WAV — misal: Ahh Roblox asli, Windah, Bruh, dll.)</div>
-              <div class="pe-inline-upload">
-                <input type="text" id="peUpSfxName" class="input input-sm" placeholder="Nama SFX (cth: Ahh Roblox Ori)" />
-                <input type="file" id="peUpSfxFile" accept="audio/*,.mp3,.wav,.m4a,.ogg" class="file-input" />
-                <button class="btn btn-xs btn-primary" id="btnPeUpSfx">⬆️ Upload &amp; Tempel</button>
-              </div>
-            </div>
-          </div>
-
-          <!-- SUBTAB 2: BGM TRACK (12+ MOODS + FADE IN/OUT + AUTO-DUCK + MANUAL UPLOAD) -->
-          <div id="peSub-bgm" class="pe-subpanel mt-8">
-            <div class="pe-section">
-              <div class="fx-section-title">🎵 Track BGM (12+ Mood Bebas Copyright + Upload Manual)</div>
-              <div class="pe-cat-pills" id="peBgmMoodPills">
-                <button class="topic-pill active" data-mood="all">Semua</button>
-                <button class="topic-pill" data-mood="Funny">😂 Funny</button>
-                <button class="topic-pill" data-mood="Hype">🔥 Hype</button>
-                <button class="topic-pill" data-mood="Chill">☕ Chill</button>
-                <button class="topic-pill" data-mood="Suspense">😰 Suspense</button>
-                <button class="topic-pill" data-mood="Victory">🏆 Victory</button>
-                <button class="topic-pill" data-mood="Fail">💀 Fail</button>
-                <button class="topic-pill" data-mood="Horror">👻 Horror</button>
-                <button class="topic-pill" data-mood="Retro">🕹️ Retro</button>
-                <button class="topic-pill" data-mood="custom">⭐ Upload</button>
-              </div>
-              <div class="bgm-row mt-8">
-                <select id="peBgm" class="input input-sm">
-                  <option value="">— Tanpa BGM Tambahan —</option>
+          <div class="pe-section mt-12">
+            <div class="fx-section-title">⏱️ Sesuaikan Menit / Detik Potongan (Format <code>mm:ss</code> atau detik)</div>
+            <div class="pe-trim-grid">
+              <label class="text-xs">Start (mm:ss.s / dtk)
+                <input type="text" id="peStart" class="input input-sm" value="0:00.0" placeholder="cth: 0:05 atau 5.5" />
+              </label>
+              <label class="text-xs">End (mm:ss.s / dtk)
+                <input type="text" id="peEnd" class="input input-sm" value="0:30.0" placeholder="cth: 0:45 atau 45" />
+              </label>
+              <label class="text-xs">Kecepatan
+                <select id="peSpeed" class="input input-sm">
+                  <option value="1.0">1.0x (Normal)</option>
+                  <option value="1.05">1.05x</option>
+                  <option value="1.10">1.10x</option>
+                  <option value="1.15">1.15x</option>
                 </select>
-                <button class="btn btn-xs btn-secondary" id="btnPePreviewBgm">▶ Preview</button>
-              </div>
-              <div class="pe-trim-grid mt-8">
-                <label class="text-xs">Volume BGM (<span id="lblPeBgmVol">15%</span>)
-                  <input type="range" id="peBgmVol" min="5" max="60" value="15" />
-                </label>
-                <label class="text-xs">Fade-In (dtk)
-                  <input type="number" step="0.1" min="0" max="5" id="peBgmFadeIn" class="input input-sm" value="0.4" />
-                </label>
-                <label class="text-xs">Fade-Out (dtk)
-                  <input type="number" step="0.1" min="0" max="5" id="peBgmFadeOut" class="input input-sm" value="0.9" />
-                </label>
-              </div>
-              <label class="check-box mt-8">
-                <input type="checkbox" id="peBgmDuck" checked />
-                <span>🎙️ Auto-Ducking (Volume BGM otomatis mengecil saat streamer ngomong!)</span>
               </label>
             </div>
-
-            <!-- Inline Manual BGM Upload -->
-            <div class="pe-section mt-8">
-              <div class="fx-section-title">⬆️ Tambah Backsound (BGM) Manual Sendiri (MP3 / WAV)</div>
-              <div class="pe-inline-upload">
-                <input type="text" id="peUpBgmName" class="input input-sm" placeholder="Nama BGM (cth: Phonk Favorit)" />
-                <input type="file" id="peUpBgmFile" accept="audio/*,.mp3,.wav,.m4a,.ogg" class="file-input" />
-                <button class="btn btn-xs btn-accent" id="btnPeUpBgm">⬆️ Upload &amp; Pakai</button>
-              </div>
+            <div class="pe-trim-meta mt-8">
+              <label class="check-box">
+                <input type="checkbox" id="pePreserveOutro" checked />
+                <span>🛡️ Pertahankan Outro MotionKlip utuh &amp; bersih di akhir</span>
+              </label>
+              <div class="text-xs muted" id="peDurInfo">Durasi hasil: —</div>
             </div>
           </div>
 
-          <!-- SUBTAB 3: TRIM, SPLIT/CUT DEAD AIR, MEME TEXT OVERLAY, FREEZE-FRAME & SLOW-MO -->
-          <div id="peSub-cutfx" class="pe-subpanel mt-8">
-            <div class="pe-section">
-              <div class="fx-section-title">⏱️ Trim Awal / Akhir &amp; Kecepatan (<code>mm:ss</code> atau detik)</div>
-              <div class="pe-trim-grid">
-                <label class="text-xs">Start (mm:ss.s)
-                  <input type="text" id="peStart" class="input input-sm" value="0:00.0" />
-                </label>
-                <label class="text-xs">End (mm:ss.s)
-                  <input type="text" id="peEnd" class="input input-sm" value="0:30.0" />
-                </label>
-                <label class="text-xs">Speed
-                  <select id="peSpeed" class="input input-sm">
-                    <option value="1.0">1.0x</option>
-                    <option value="1.05">1.05x</option>
-                    <option value="1.10">1.10x</option>
-                    <option value="1.15">1.15x</option>
-                  </select>
-                </label>
-              </div>
-              <div class="pe-trim-meta mt-6">
-                <label class="check-box">
-                  <input type="checkbox" id="pePreserveOutro" checked />
-                  <span>🛡️ Pertahankan Outro MotionKlip utuh &amp; bersih</span>
-                </label>
-                <div class="text-xs muted" id="peDurInfo">Durasi hasil: —</div>
-              </div>
+          <div class="pe-section mt-12">
+            <div class="card-head" style="margin-bottom:4px;">
+              <label class="check-inline" style="font-weight:700;font-size:12px;">
+                <input type="checkbox" id="peWmEnabled" /> 🎯 Pasang / Geser Watermark Manual di Video
+              </label>
+              <label class="check-inline text-xs"><input type="checkbox" id="peWmFullFrame" /> Full-Frame 1:1</label>
             </div>
-
-            <div class="pe-section mt-8">
-              <div class="card-head" style="margin-bottom:4px;">
-                <div class="fx-section-title" style="margin:0;">✂️ Potong Tengah / Buang Bagian Hening (Jump-Cut)</div>
-                <div class="head-actions">
-                  <button class="btn btn-2xs btn-accent" id="btnPeAutoSilence">⚡ Auto-Deteksi Hening</button>
-                  <button class="btn btn-2xs btn-secondary" id="btnPeAddCut">+ Potong</button>
-                </div>
+            <div id="peWmBody" class="hidden">
+              <div class="text-xs muted">Seret kotak watermark langsung di atas preview video di sebelah kiri! (Otomatis hilang saat Outro 4s)</div>
+              <div class="pe-wm-controls">
+                <label class="text-xs">Ukuran (<span id="lblPeWmScale">22%</span>)
+                  <input type="range" id="peWmScale" min="8" max="75" value="22" />
+                </label>
+                <label class="text-xs">Opacity (<span id="lblPeWmOpacity">95%</span>)
+                  <input type="range" id="peWmOpacity" min="20" max="100" value="95" />
+                </label>
               </div>
-              <div id="peCutsList" class="pe-mini-list"></div>
-            </div>
-
-            <div class="pe-section mt-8">
-              <div class="card-head" style="margin-bottom:4px;">
-                <div class="fx-section-title" style="margin:0;">💬 Teks Meme Pop-Up (Muncul di Detik Tertentu)</div>
-                <button class="btn btn-2xs btn-secondary" id="btnPeAddText">+ Teks di Waktu Ini</button>
-              </div>
-              <div id="peTextsList" class="pe-mini-list"></div>
-            </div>
-
-            <div class="pe-section mt-8">
-              <div class="form-grid-2">
-                <div>
-                  <div class="fx-section-title">🧊 Freeze-Frame Meme</div>
-                  <div class="pe-fx-inline">
-                    <input type="text" id="peFreezeAt" class="input input-sm" placeholder="Detik (kosong=off)" />
-                    <input type="number" step="0.2" min="0.4" max="4" id="peFreezeDur" class="input input-sm" value="1.2" title="Lama freeze (dtk)" />
-                    <label class="check-inline text-xs"><input type="checkbox" id="peFreezeGray" checked /> B&amp;W</label>
-                  </div>
-                </div>
-                <div>
-                  <div class="fx-section-title">🐢 Slow-Mo Parsial</div>
-                  <div class="pe-fx-inline">
-                    <input type="text" id="peSlowStart" class="input input-sm" placeholder="Mulai" />
-                    <input type="text" id="peSlowEnd" class="input input-sm" placeholder="Selesai" />
-                    <select id="peSlowFactor" class="input input-sm">
-                      <option value="0.5">0.5x</option>
-                      <option value="0.65">0.65x</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
+              <div class="text-xs muted mt-4" id="peWmCoords">Posisi: X 72% · Y 6%</div>
             </div>
           </div>
 
-          <!-- SUBTAB 4: DRAG & DROP WATERMARK MANUAL -->
-          <div id="peSub-wm" class="pe-subpanel mt-8">
-            <div class="pe-section">
-              <div class="card-head" style="margin-bottom:6px;">
-                <label class="check-inline" style="font-weight:700;font-size:12.5px;">
-                  <input type="checkbox" id="peWmEnabled" /> 🎯 Pasang / Geser Watermark Manual di Video
+          <div class="pe-section mt-12">
+            <div class="card-head" style="margin-bottom:6px;">
+              <div class="fx-section-title" style="margin:0;">⚡ Preset Pintar (1-Klik di Detik Player!)</div>
+              <button class="btn btn-2xs btn-secondary" id="btnPeSavePreset" title="Simpan kombinasi SFX + BGM ini untuk dipakai lagi">💾 Simpan Preset</button>
+            </div>
+            <div id="peSmartPresets" class="pe-preset-bar"></div>
+          </div>
+
+          <div class="pe-section mt-12">
+            <div class="card-head" style="margin-bottom:6px;">
+              <div class="fx-section-title" style="margin:0;">💥 Track SFX (36+ Viral SFX + Upload Manual)</div>
+              <div class="head-actions">
+                <label class="btn btn-2xs btn-secondary" style="cursor:pointer;" title="Upload MP3/WAV SFX viral manual (cth: Roblox Ahh, suara Windah, meme)">
+                  ⬆️ Upload SFX <input type="file" id="peQuickUpSfx" accept="audio/*,.mp3,.wav,.m4a,.ogg" class="hidden" />
                 </label>
-                <label class="check-inline text-xs"><input type="checkbox" id="peWmFullFrame" /> Full-Frame 1:1</label>
-              </div>
-              <div id="peWmBody" class="hidden">
-                <div class="text-xs muted">Seret kotak watermark langsung di atas preview video di sebelah kiri! (Otomatis hilang saat Outro 4s)</div>
-                <div class="pe-wm-controls">
-                  <label class="text-xs">Ukuran (<span id="lblPeWmScale">22%</span>)
-                    <input type="range" id="peWmScale" min="8" max="75" value="22" />
-                  </label>
-                  <label class="text-xs">Opacity (<span id="lblPeWmOpacity">95%</span>)
-                    <input type="range" id="peWmOpacity" min="20" max="100" value="95" />
-                  </label>
-                </div>
-                <div class="text-xs muted mt-4" id="peWmCoords">Posisi: X 72% · Y 6%</div>
+                <button class="btn btn-2xs btn-accent" id="btnPeAddSfxRow">+ Tambah SFX</button>
               </div>
             </div>
+            <div class="pe-cat-bar" id="peSfxCatBar">
+              <button class="pe-cat-pill active" data-cat="all">Semua</button>
+              <button class="pe-cat-pill" data-cat="Meme">Meme</button>
+              <button class="pe-cat-pill" data-cat="Impact">Impact</button>
+              <button class="pe-cat-pill" data-cat="Transition">Transition</button>
+              <button class="pe-cat-pill" data-cat="Fail">Fail</button>
+              <button class="pe-cat-pill" data-cat="Alert">Alert</button>
+              <button class="pe-cat-pill" data-cat="Crowd">Crowd</button>
+              <button class="pe-cat-pill" data-cat="Custom">⭐ Custom</button>
+            </div>
+            <div class="pe-quick-sfx mt-8">
+              <span class="text-xs muted">Stempel viral:</span>
+              <button class="topic-pill pe-stamp" data-sfx="sfx-boom">💥 Vine Boom</button>
+              <button class="topic-pill pe-stamp" data-sfx="sfx-metal-pipe">🔧 Metal Pipe</button>
+              <button class="topic-pill pe-stamp" data-sfx="sfx-roblox-oof">😵 Oof / Ahh!</button>
+              <button class="topic-pill pe-stamp" data-sfx="sfx-bruh">🤨 Bruh</button>
+              <button class="topic-pill pe-stamp" data-sfx="sfx-sad-trombone">🎺 Sad Fail</button>
+              <button class="topic-pill pe-stamp" data-sfx="sfx-dun-dun-dun">😱 Dun-Dun</button>
+              <button class="topic-pill pe-stamp" data-sfx="sfx-record-scratch">📀 Scratch</button>
+              <button class="topic-pill pe-stamp" data-sfx="sfx-airhorn">📣 Airhorn</button>
+            </div>
+            <div id="peSfxList" class="pe-sfx-list mt-8"></div>
           </div>
-        </div>
-      </div>
 
-      <!-- INTERACTIVE MULTI-TRACK VISUAL TIMELINE (DRAG SFX + CLICK TO SCRUB!) -->
-      <div class="pe-timeline-wrap mt-12">
-        <div class="pe-tl-head">
-          <span class="text-xs" style="font-weight:700;">🎞️ Multi-Track Visual Timeline — Klik penggaris untuk geser video, seret blok SFX kiri/kanan untuk atur timing presisi!</span>
-          <span class="text-xs muted" id="peSpeedHint">⚡ Mode Instant (-c:v copy ~2 dtk)</span>
-        </div>
-        <div class="pe-tl-stage" id="peTimelineStage">
-          <div class="pe-tl-ruler" id="peTlRuler"></div>
-          <div class="pe-tl-playhead" id="peTlPlayhead" style="left:0%"></div>
-          <div class="pe-tl-track"><span class="tl-lbl">🎬 Video</span><div class="tl-lane" id="peTlVideo"></div></div>
-          <div class="pe-tl-track"><span class="tl-lbl">💬 Teks</span><div class="tl-lane" id="peTlText"></div></div>
-          <div class="pe-tl-track"><span class="tl-lbl">💥 SFX</span><div class="tl-lane" id="peTlSfx"></div></div>
-          <div class="pe-tl-track"><span class="tl-lbl">🎵 BGM</span><div class="tl-lane" id="peTlBgm"></div></div>
-        </div>
-      </div>
+          <div class="pe-section mt-12">
+            <div class="card-head" style="margin-bottom:6px;">
+              <div class="fx-section-title" style="margin:0;">🎵 Track Backsound / BGM (15+ Mood + Fade In/Out)</div>
+              <label class="btn btn-2xs btn-secondary" style="cursor:pointer;" title="Upload lagu/BGM MP3/WAV manual kamu sendiri">
+                ⬆️ Upload BGM <input type="file" id="peQuickUpBgm" accept="audio/*,.mp3,.wav,.m4a,.ogg" class="hidden" />
+              </label>
+            </div>
+            <div class="pe-bgm-adv-grid">
+              <select id="peBgm" class="input input-sm">
+                <option value="">— Tanpa BGM Tambahan —</option>
+              </select>
+              <button class="btn btn-2xs btn-secondary" id="btnPePreviewBgm" title="Dengar preview BGM">▶</button>
+              <input type="number" id="peBgmVol" class="input input-sm" min="5" max="60" value="15" title="Volume BGM (%)" />
+              <input type="number" step="0.1" id="peBgmFadeIn" class="input input-sm" min="0" max="5" value="0.35" title="Fade-In (detik)" />
+              <input type="number" step="0.1" id="peBgmFadeOut" class="input input-sm" min="0" max="5" value="0.85" title="Fade-Out (detik)" />
+              <label class="check-inline text-xs"><input type="checkbox" id="peBgmDuck" checked /> Duck</label>
+            </div>
+            <div class="text-xs muted mt-4">Kolom kanan: Vol (%) · Fade-In (dtk) · Fade-Out (dtk) · Auto-Duck</div>
+          </div>
 
-      <div class="pe-footer mt-12">
-        <div class="text-xs muted">Tip: Klik blok SFX di timeline untuk dengar preview, atau seret kiri/kanan untuk geser waktunya!</div>
-        <div class="head-actions">
-          <button class="btn btn-sm btn-secondary" id="btnPeOpenVodSource" title="Ubah menit lebih awal/panjang dari video YouTube asli">🔄 Edit Menit VOD Asli</button>
-          <button class="btn btn-sm btn-accent" id="btnPeRender">💾 RENDER HASIL EDIT PRO</button>
+          <div class="pe-footer mt-16">
+            <div class="text-xs" id="peSpeedHint">⚡ Mode Instant (-c:v copy ~2 dtk)</div>
+            <div class="head-actions">
+              <button class="btn btn-sm btn-secondary" id="btnPeOpenVodSource" title="Ubah menit lebih awal/panjang dari video YouTube asli">🔄 Edit Menit VOD Asli</button>
+              <button class="btn btn-sm btn-accent" id="btnPeRender">💾 RENDER HASIL EDIT</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

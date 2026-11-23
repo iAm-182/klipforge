@@ -17,16 +17,13 @@ import (
 	"klipforge/internal/model"
 )
 
-// Library manages built-in royalty-free CapCut-Pro SFX/BGM packs, smart audio presets,
-// plus user-uploaded custom MP3/WAV audio files.
+// Library manages built-in royalty-free CapCut-style SFX (36+) & BGM (15+) packs plus user-uploaded custom audio files.
 type Library struct {
-	mu          sync.RWMutex
-	AudioDir    string
-	MetaPath    string
-	PresetsPath string
-	Deps        *deps.Manager
-	assets      map[string]*model.AudioAsset
-	presets     map[string]*model.AudioPreset
+	mu       sync.RWMutex
+	AudioDir string
+	MetaPath string
+	Deps     *deps.Manager
+	assets   map[string]*model.AudioAsset
 }
 
 type synthSpec struct {
@@ -39,15 +36,15 @@ type synthSpec struct {
 	Args     []string // FFmpeg filter/input args before output path
 }
 
-// Built-in 100% DMCA-free CapCut-Pro Mega Pack:
-// 33 Viral SFX (Meme, Impact, Transition, Fail, Alert, Crowd) + 12 Mood BGM Loops (Funny, Hype, Chill, Suspense, Victory, Fail, Horror, Retro)!
+// Built-in 100% DMCA-free synthesized CapCut-style starter pack:
+// 36 Viral Clipper SFX (Meme, Impact, Transition, Fail, Alert, Crowd) + 15 Mood BGM loops (Funny, Hype, Chill, Suspense, Victory, Fail).
 var builtInPack = []synthSpec{
-	// ==================== MEME SFX ====================
+	// ================= 1. MEME & VIRAL SFX (12) =================
 	{
 		ID:       "sfx-boom",
 		Name:     "Deep Bass Boom (Vine Impact)",
 		Kind:     "sfx",
-		Category: "Impact",
+		Category: "Meme",
 		FileName: "builtin_sfx_boom.wav",
 		Duration: 1.4,
 		Args: []string{
@@ -70,42 +67,55 @@ var builtInPack = []synthSpec{
 		},
 	},
 	{
-		ID:       "sfx-oof-roblox",
-		Name:     "Oof / Ahh Roblox Impact (Meme Mati!)",
+		ID:       "sfx-record-scratch",
+		Name:     "Record Scratch / Freeze Stop",
 		Kind:     "sfx",
 		Category: "Meme",
-		FileName: "builtin_sfx_oof_roblox.wav",
-		Duration: 0.55,
+		FileName: "builtin_sfx_record_scratch.wav",
+		Duration: 0.65,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='(0.55*sin(2*PI*(245*exp(-3.4*t)+105)*t)+0.35*sin(2*PI*(520*exp(-4.0*t)+220)*t)+0.22*sin(2*PI*(980*exp(-5.0*t)+340)*t))*exp(-4.5*t)':s=48000:d=0.55",
-			"-af", "bandpass=f=480:w=520,bass=g=5:f=180,afade=t=out:st=0.35:d=0.20",
+			"aevalsrc=exprs='0.75*sin(2*PI*(1100*exp(-5.5*t)+120*sin(2*PI*18*t))*t)*exp(-2.2*t)':s=48000:d=0.65",
+			"-af", "bandpass=f=900:w=700,afade=t=out:st=0.48:d=0.17",
+		},
+	},
+	{
+		ID:       "sfx-roblox-oof",
+		Name:     "Oof / Ahh! Retro Hurt (Meme)",
+		Kind:     "sfx",
+		Category: "Meme",
+		FileName: "builtin_sfx_roblox_oof.wav",
+		Duration: 0.52,
+		Args: []string{
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='(0.65*sin(2*PI*(245*exp(-2.8*t)+115)*t)+0.38*sin(2*PI*(520*exp(-3.1*t)+220)*t)+0.22*sin(2*PI*(980*exp(-4*t)+340)*t))*exp(-5.2*t)':s=48000:d=0.52",
+			"-af", "bandpass=f=480:w=520,bass=g=5:f=180,afade=t=in:st=0:d=0.015,afade=t=out:st=0.35:d=0.17",
 		},
 	},
 	{
 		ID:       "sfx-bruh",
-		Name:     "Bruh Low Drop (Meme Datar)",
+		Name:     "Bruh Low Pitch Drop",
 		Kind:     "sfx",
 		Category: "Meme",
 		FileName: "builtin_sfx_bruh.wav",
 		Duration: 0.72,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='(0.52*sin(2*PI*(155*exp(-2.6*t)+78)*t)+0.32*sin(2*PI*(310*exp(-2.6*t)+156)*t)+0.20*sin(2*PI*(620*exp(-3.2*t)+280)*t))*exp(-3.0*t)':s=48000:d=0.72",
-			"-af", "lowpass=f=950,bass=g=6:f=130,afade=t=out:st=0.48:d=0.24",
+			"aevalsrc=exprs='(0.70*sin(2*PI*(155*exp(-1.9*t)+78)*t)+0.35*sin(2*PI*(310*exp(-2.0*t)+150)*t)+0.18*sin(2*PI*(620*exp(-2.5*t)+260)*t))*exp(-2.9*t)':s=48000:d=0.72",
+			"-af", "lowpass=f=900,bass=g=6:f=120,afade=t=out:st=0.5:d=0.22",
 		},
 	},
 	{
 		ID:       "sfx-bonk",
-		Name:     "Cartoon Bonk Kepala (Kocak)",
+		Name:     "Wooden Bonk Meme",
 		Kind:     "sfx",
 		Category: "Meme",
 		FileName: "builtin_sfx_bonk.wav",
-		Duration: 0.45,
+		Duration: 0.38,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='(0.75*sin(2*PI*(560*exp(-14*t)+185)*t)+0.35*sin(2*PI*(1120*exp(-18*t)+370)*t))*exp(-8.5*t)':s=48000:d=0.45",
-			"-af", "bandpass=f=420:w=450,afade=t=out:st=0.28:d=0.17",
+			"aevalsrc=exprs='(0.8*sin(2*PI*(420*exp(-12*t)+185)*t)+0.4*sin(2*PI*760*t)*exp(-22*t))*exp(-8.5*t)':s=48000:d=0.38",
+			"-af", "bandpass=f=520:w=600,afade=t=out:st=0.25:d=0.13",
 		},
 	},
 	{
@@ -114,93 +124,80 @@ var builtInPack = []synthSpec{
 		Kind:     "sfx",
 		Category: "Meme",
 		FileName: "builtin_sfx_boing.wav",
-		Duration: 0.85,
-		Args: []string{
-			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='0.75*sin(2*PI*(170+260*t+65*sin(2*PI*14*t))*t)*exp(-2.8*t)':s=48000:d=0.85",
-			"-af", "afade=t=out:st=0.6:d=0.25",
-		},
-	},
-	{
-		ID:       "sfx-slip-whistle",
-		Name:     "Slide Whistle Terpeleset",
-		Kind:     "sfx",
-		Category: "Meme",
-		FileName: "builtin_sfx_slip_whistle.wav",
 		Duration: 0.75,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='0.65*sin(2*PI*(1450-1050*sin(PI*t/0.75))*t)*exp(-1.2*t)':s=48000:d=0.75",
-			"-af", "afade=t=in:st=0:d=0.05,afade=t=out:st=0.58:d=0.17",
-		},
-	},
-	{
-		ID:       "sfx-fart-poot",
-		Name:     "Meme Poot / Kentut Lucu",
-		Kind:     "sfx",
-		Category: "Meme",
-		FileName: "builtin_sfx_fart_poot.wav",
-		Duration: 0.6,
-		Args: []string{
-			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='0.65*sin(2*PI*(95-35*t+28*sin(2*PI*36*t))*t)*exp(-2.6*t)':s=48000:d=0.6",
-			"-af", "acrusher=bits=5:mode=lin:aa=1,lowpass=f=680,afade=t=out:st=0.4:d=0.2",
-		},
-	},
-	{
-		ID:       "sfx-bleep",
-		Name:     "Sensor Bleep 1kHz (Sensor Kata!)",
-		Kind:     "sfx",
-		Category: "Meme",
-		FileName: "builtin_sfx_bleep.wav",
-		Duration: 0.65,
-		Args: []string{
-			"-f", "lavfi", "-i",
-			"sine=frequency=1000:sample_rate=48000:duration=0.65",
-			"-af", "volume=0.7,afade=t=in:st=0:d=0.02,afade=t=out:st=0.6:d=0.05",
-		},
-	},
-	{
-		ID:       "sfx-pop",
-		Name:     "Pop Bubble Teks Muncul",
-		Kind:     "sfx",
-		Category: "Meme",
-		FileName: "builtin_sfx_pop.wav",
-		Duration: 0.22,
-		Args: []string{
-			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='0.85*sin(2*PI*(240+1350*t)*t)*exp(-18*t)':s=48000:d=0.22",
-			"-af", "afade=t=out:st=0.14:d=0.08",
-		},
-	},
-	{
-		ID:       "sfx-ding",
-		Name:     "Pop Ding Highlight",
-		Kind:     "sfx",
-		Category: "Meme",
-		FileName: "builtin_sfx_ding.wav",
-		Duration: 0.85,
-		Args: []string{
-			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='(0.65*sin(2*PI*1318.5*t)+0.35*sin(2*PI*2637*t))*exp(-5.5*t)':s=48000:d=0.85",
-			"-af", "afade=t=out:st=0.6:d=0.25",
-		},
-	},
-	{
-		ID:       "sfx-coin",
-		Name:     "Cha-Ching / Coin Pop",
-		Kind:     "sfx",
-		Category: "Meme",
-		FileName: "builtin_sfx_coin.wav",
-		Duration: 0.75,
-		Args: []string{
-			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='(lt(t,0.12)*sin(2*PI*987.77*t)+gte(t,0.12)*sin(2*PI*1318.51*t))*exp(-4.5*max(0,t-0.12))':s=48000:d=0.75",
+			"aevalsrc=exprs='0.72*sin(2*PI*(190+340*t+75*sin(2*PI*16*t))*t)*exp(-2.8*t)':s=48000:d=0.75",
 			"-af", "afade=t=out:st=0.55:d=0.2",
 		},
 	},
+	{
+		ID:       "sfx-fart-reverb",
+		Name:     "Bass Reverb Bruh/Fart Meme",
+		Kind:     "sfx",
+		Category: "Meme",
+		FileName: "builtin_sfx_fart_reverb.wav",
+		Duration: 1.15,
+		Args: []string{
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='0.82*sin(2*PI*(62+18*sin(2*PI*24*t))*t+2.2*sin(2*PI*95*t))*exp(-3.0*t)':s=48000:d=1.15",
+			"-af", "lowpass=f=380,aecho=0.8:0.85:55|110:0.45|0.3,bass=g=7:f=80,afade=t=out:st=0.8:d=0.35",
+		},
+	},
+	{
+		ID:       "sfx-honk",
+		Name:     "Clown Horn Honk (Badut)",
+		Kind:     "sfx",
+		Category: "Meme",
+		FileName: "builtin_sfx_honk.wav",
+		Duration: 0.55,
+		Args: []string{
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='(0.45*sin(2*PI*392*t)+0.42*sin(2*PI*784*t)+0.35*sin(2*PI*1176*t)+0.25*sin(2*PI*1568*t))*(lt(t,0.22)+gte(t,0.28)*lt(t,0.52))':s=48000:d=0.55",
+			"-af", "bandpass=f=880:w=900,afade=t=out:st=0.45:d=0.1",
+		},
+	},
+	{
+		ID:       "sfx-quack",
+		Name:     "Cartoon Quack Pop",
+		Kind:     "sfx",
+		Category: "Meme",
+		FileName: "builtin_sfx_quack.wav",
+		Duration: 0.32,
+		Args: []string{
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='(0.55*sin(2*PI*(540-260*t)*t)+0.45*sin(2*PI*(1080-520*t)*t)+0.3*sin(2*PI*1620*t))*exp(-7.5*t)':s=48000:d=0.32",
+			"-af", "bandpass=f=950:w=700,afade=t=out:st=0.2:d=0.12",
+		},
+	},
+	{
+		ID:       "sfx-slide-up",
+		Name:     "Slide Whistle Naik (Lucu)",
+		Kind:     "sfx",
+		Category: "Meme",
+		FileName: "builtin_sfx_slide_up.wav",
+		Duration: 0.55,
+		Args: []string{
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='0.65*sin(2*PI*(420+1600*t*t)*t)*exp(-1.2*t)':s=48000:d=0.55",
+			"-af", "afade=t=in:st=0:d=0.04,afade=t=out:st=0.42:d=0.13",
+		},
+	},
+	{
+		ID:       "sfx-slide-down",
+		Name:     "Slide Whistle Turun (Jatuh)",
+		Kind:     "sfx",
+		Category: "Meme",
+		FileName: "builtin_sfx_slide_down.wav",
+		Duration: 0.65,
+		Args: []string{
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='0.65*sin(2*PI*(1550*exp(-2.8*t)+220)*t)*exp(-1.5*t)':s=48000:d=0.65",
+			"-af", "afade=t=in:st=0:d=0.03,afade=t=out:st=0.5:d=0.15",
+		},
+	},
 
-	// ==================== IMPACT SFX ====================
+	// ================= 2. IMPACT & HYPE SFX (7) =================
 	{
 		ID:       "sfx-bassdrop",
 		Name:     "Jedag-Jedug Sub Kick",
@@ -215,58 +212,85 @@ var builtInPack = []synthSpec{
 		},
 	},
 	{
-		ID:       "sfx-dun-dun-dun",
-		Name:     "Dramatic Dun-Dun-DUUN! (Plot Twist)",
+		ID:       "sfx-riser",
+		Name:     "Hype Tension Riser",
 		Kind:     "sfx",
 		Category: "Impact",
-		FileName: "builtin_sfx_dun_dun_dun.wav",
-		Duration: 2.1,
+		FileName: "builtin_sfx_riser.wav",
+		Duration: 1.8,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='(lt(t,0.42)*(0.45*sin(2*PI*196*t)+0.3*sin(2*PI*392*t))*exp(-4*t)+gte(t,0.45)*lt(t,0.88)*(0.45*sin(2*PI*185*t)+0.3*sin(2*PI*370*t))*exp(-4*(t-0.45))+gte(t,0.92)*(0.5*sin(2*PI*146.83*t)+0.35*sin(2*PI*293.66*t)+0.25*sin(2*PI*73.42*t))*exp(-1.8*(t-0.92)))':s=48000:d=2.1",
-			"-af", "lowpass=f=1400,aecho=0.8:0.75:55:0.35,afade=t=out:st=1.7:d=0.4",
+			"aevalsrc=exprs='0.55*sin(2*PI*(180+620*t*t)*t)*(t/1.8)':s=48000:d=1.8",
+			"-af", "highpass=f=140,afade=t=in:st=0:d=0.4,afade=t=out:st=1.65:d=0.15",
 		},
 	},
 	{
-		ID:       "sfx-punch-slap",
-		Name:     "Tamparan / Punch Smack!",
+		ID:       "sfx-cinematic-braam",
+		Name:     "Cinematic Braam Horn (Epic)",
 		Kind:     "sfx",
 		Category: "Impact",
-		FileName: "builtin_sfx_punch_slap.wav",
-		Duration: 0.42,
+		FileName: "builtin_sfx_braam.wav",
+		Duration: 1.9,
 		Args: []string{
-			"-f", "lavfi", "-i", "anoisesrc=c=white:r=48000:d=0.42:a=0.9",
-			"-f", "lavfi", "-i", "aevalsrc=exprs='0.9*sin(2*PI*(150*exp(-18*t)+55)*t)*exp(-10*t)':s=48000:d=0.42",
-			"-filter_complex", "[0:a]bandpass=f=1400:w=1200,afade=t=out:st=0.05:d=0.18[n];[n][1:a]amix=inputs=2:normalize=0,alimiter=limit=0.95",
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='(0.45*sin(2*PI*55*t)+0.35*sin(2*PI*110*t)+0.28*sin(2*PI*165*t)+0.22*sin(2*PI*220*t)+0.16*sin(2*PI*277*t))*exp(-1.2*t)':s=48000:d=1.9",
+			"-af", "lowpass=f=750,bass=g=7:f=75,aecho=0.8:0.75:90:0.4,afade=t=in:st=0:d=0.06,afade=t=out:st=1.4:d=0.5",
 		},
 	},
 	{
-		ID:       "sfx-explosion",
-		Name:     "Ledakan Besar / Wasted Boom",
+		ID:       "sfx-punch-hit",
+		Name:     "Anime Punch Impact Hit",
+		Kind:     "sfx",
+		Category: "Impact",
+		FileName: "builtin_sfx_punch.wav",
+		Duration: 0.42,
+		Args: []string{
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='0.95*sin(2*PI*(240*exp(-18*t)+42)*t)*exp(-7.5*t)+0.35*(random(0)-0.5)*exp(-22*t)':s=48000:d=0.42",
+			"-af", "lowpass=f=1200,bass=g=9:f=70,alimiter=limit=0.95",
+		},
+	},
+	{
+		ID:       "sfx-whip-crack",
+		Name:     "Whip Crack Snap",
+		Kind:     "sfx",
+		Category: "Impact",
+		FileName: "builtin_sfx_whip.wav",
+		Duration: 0.45,
+		Args: []string{
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='0.35*sin(2*PI*(300+1800*t)*t)*lt(t,0.18)+0.95*(random(0)-0.5)*gte(t,0.18)*exp(-28*(t-0.18))':s=48000:d=0.45",
+			"-af", "highpass=f=500,alimiter=limit=0.95",
+		},
+	},
+	{
+		ID:       "sfx-explosion-thud",
+		Name:     "Explosion Sub Thud (Meledak!)",
 		Kind:     "sfx",
 		Category: "Impact",
 		FileName: "builtin_sfx_explosion.wav",
-		Duration: 2.0,
+		Duration: 1.5,
 		Args: []string{
-			"-f", "lavfi", "-i", "anoisesrc=c=brown:r=48000:d=2.0:a=0.95",
-			"-f", "lavfi", "-i", "aevalsrc=exprs='0.9*sin(2*PI*(85*exp(-4*t)+30)*t)*exp(-2.1*t)':s=48000:d=2.0",
-			"-filter_complex", "[0:a]lowpass=f=520,afade=t=out:st=0.35:d=1.65[n];[n][1:a]amix=inputs=2:normalize=0,bass=g=8:f=60,alimiter=limit=0.95",
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='(0.85*(random(0)-0.5)+0.75*sin(2*PI*(70*exp(-3*t)+28)*t))*exp(-2.3*t)':s=48000:d=1.5",
+			"-af", "lowpass=f=420,bass=g=9:f=60,afade=t=out:st=1.0:d=0.5",
 		},
 	},
 	{
-		ID:       "sfx-thunder",
-		Name:     "Petir Menyambar (Dramatis)",
+		ID:       "sfx-powerup",
+		Name:     "8-Bit Power-Up Level Up",
 		Kind:     "sfx",
 		Category: "Impact",
-		FileName: "builtin_sfx_thunder.wav",
-		Duration: 2.2,
+		FileName: "builtin_sfx_powerup.wav",
+		Duration: 0.8,
 		Args: []string{
-			"-f", "lavfi", "-i", "anoisesrc=c=pink:r=48000:d=2.2:a=0.9",
-			"-af", "lowpass=f=380,aecho=0.8:0.8:120:0.45,afade=t=in:st=0:d=0.04,afade=t=out:st=0.6:d=1.6",
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='0.6*sin(2*PI*(523.25*lt(t,0.12)+659.25*gte(t,0.12)*lt(t,0.24)+783.99*gte(t,0.24)*lt(t,0.36)+1046.5*gte(t,0.36))*t)*exp(-2.8*max(0,t-0.36))':s=48000:d=0.8",
+			"-af", "afade=t=out:st=0.62:d=0.18",
 		},
 	},
 
-	// ==================== TRANSITION SFX ====================
+	// ================= 3. TRANSITION SFX (5) =================
 	{
 		ID:       "sfx-whoosh",
 		Name:     "Whoosh Transition",
@@ -277,31 +301,6 @@ var builtInPack = []synthSpec{
 		Args: []string{
 			"-f", "lavfi", "-i", "anoisesrc=c=pink:r=48000:d=0.7:a=0.8",
 			"-af", "bandpass=f=850:w=500,afade=t=in:st=0:d=0.22,afade=t=out:st=0.28:d=0.42",
-		},
-	},
-	{
-		ID:       "sfx-swoosh-fast",
-		Name:     "Whip Pan Swoosh Cepat",
-		Kind:     "sfx",
-		Category: "Transition",
-		FileName: "builtin_sfx_swoosh_fast.wav",
-		Duration: 0.38,
-		Args: []string{
-			"-f", "lavfi", "-i", "anoisesrc=c=white:r=48000:d=0.38:a=0.85",
-			"-af", "bandpass=f=1600:w=900,afade=t=in:st=0:d=0.10,afade=t=out:st=0.15:d=0.23",
-		},
-	},
-	{
-		ID:       "sfx-riser",
-		Name:     "Hype Tension Riser",
-		Kind:     "sfx",
-		Category: "Transition",
-		FileName: "builtin_sfx_riser.wav",
-		Duration: 1.8,
-		Args: []string{
-			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='0.55*sin(2*PI*(180+620*t*t)*t)*(t/1.8)':s=48000:d=1.8",
-			"-af", "highpass=f=140,afade=t=in:st=0:d=0.4,afade=t=out:st=1.65:d=0.15",
 		},
 	},
 	{
@@ -318,89 +317,102 @@ var builtInPack = []synthSpec{
 		},
 	},
 	{
-		ID:       "sfx-shutter",
-		Name:     "Camera Freeze-Frame Shutter",
+		ID:       "sfx-fast-swoosh",
+		Name:     "Fast Anime Swoosh",
+		Kind:     "sfx",
+		Category: "Transition",
+		FileName: "builtin_sfx_fast_swoosh.wav",
+		Duration: 0.38,
+		Args: []string{
+			"-f", "lavfi", "-i", "anoisesrc=c=white:r=48000:d=0.38:a=0.75",
+			"-af", "bandpass=f=1600:w=1100,afade=t=in:st=0:d=0.09,afade=t=out:st=0.12:d=0.26",
+		},
+	},
+	{
+		ID:       "sfx-camera-shutter",
+		Name:     "Camera Shutter Freeze Snap",
 		Kind:     "sfx",
 		Category: "Transition",
 		FileName: "builtin_sfx_shutter.wav",
-		Duration: 0.32,
+		Duration: 0.25,
 		Args: []string{
-			"-f", "lavfi", "-i", "anoisesrc=c=white:r=48000:d=0.32:a=0.85",
-			"-af", "highpass=f=1800,volume='if(lt(t,0.04),1,if(gt(t,0.09)*lt(t,0.14),0.8,0.05))':eval=frame,afade=t=out:st=0.14:d=0.18",
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='0.9*(random(0)-0.5)*(exp(-55*t)+gte(t,0.08)*exp(-65*(t-0.08)))':s=48000:d=0.25",
+			"-af", "highpass=f=1800,lowpass=f=7500",
 		},
 	},
 	{
-		ID:       "sfx-rewind",
-		Name:     "Tape Rewind Cepat",
+		ID:       "sfx-tape-rewind",
+		Name:     "Tape Rewind Zip Back",
 		Kind:     "sfx",
 		Category: "Transition",
 		FileName: "builtin_sfx_rewind.wav",
-		Duration: 0.65,
+		Duration: 0.55,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='0.6*sin(2*PI*(450+1800*t+220*sin(2*PI*30*t))*t)*(0.3+0.7*t/0.65)':s=48000:d=0.65",
-			"-af", "bandpass=f=1500:w=1200,afade=t=out:st=0.52:d=0.13",
+			"aevalsrc=exprs='0.6*sin(2*PI*(450+2200*t+200*sin(2*PI*38*t))*t)*exp(-1.5*t)':s=48000:d=0.55",
+			"-af", "bandpass=f=1500:w=1200,afade=t=out:st=0.42:d=0.13",
 		},
 	},
 
-	// ==================== FAIL SFX ====================
-	{
-		ID:       "sfx-record-scratch",
-		Name:     "Record Scratch / Fail Stop",
-		Kind:     "sfx",
-		Category: "Fail",
-		FileName: "builtin_sfx_record_scratch.wav",
-		Duration: 0.65,
-		Args: []string{
-			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='0.75*sin(2*PI*(1100*exp(-5.5*t)+120*sin(2*PI*18*t))*t)*exp(-2.2*t)':s=48000:d=0.65",
-			"-af", "bandpass=f=900:w=700,afade=t=out:st=0.48:d=0.17",
-		},
-	},
+	// ================= 4. FAIL & AWKWARD SFX (4) =================
 	{
 		ID:       "sfx-sad-trombone",
-		Name:     "Sad Trombone (Wah-Wah-Waaah Fail)",
+		Name:     "Sad Trombone Wah-Wah-Waaah",
 		Kind:     "sfx",
 		Category: "Fail",
 		FileName: "builtin_sfx_sad_trombone.wav",
-		Duration: 2.3,
+		Duration: 1.85,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='(lt(t,0.48)*sin(2*PI*293.66*t)*exp(-1.5*t)+gte(t,0.50)*lt(t,0.98)*sin(2*PI*277.18*t)*exp(-1.5*(t-0.50))+gte(t,1.00)*lt(t,1.48)*sin(2*PI*261.63*t)*exp(-1.5*(t-1.00))+gte(t,1.50)*sin(2*PI*(246.94-18*(t-1.50)+6*sin(2*PI*6*t))*t)*exp(-1.1*(t-1.50)))*0.68':s=48000:d=2.3",
-			"-af", "lowpass=f=1200,aecho=0.7:0.6:40:0.25,afade=t=out:st=1.95:d=0.35",
+			"aevalsrc=exprs='(0.45*sin(2*PI*(293.66*lt(t,0.36)+277.18*gte(t,0.38)*lt(t,0.74)+261.63*gte(t,0.76)*lt(t,1.12)+(246.94-18*(t-1.14)+4*sin(2*PI*6*t))*gte(t,1.14))*t)+0.22*sin(4*PI*(293.66*lt(t,0.36)+277.18*gte(t,0.38)*lt(t,0.74)+261.63*gte(t,0.76)*lt(t,1.12)+246.94*gte(t,1.14))*t))':s=48000:d=1.85",
+			"-af", "lowpass=f=1100,afade=t=out:st=1.45:d=0.4",
+		},
+	},
+	{
+		ID:       "sfx-error-buzzer",
+		Name:     "Wrong Answer Buzzer (Tetot!)",
+		Kind:     "sfx",
+		Category: "Fail",
+		FileName: "builtin_sfx_buzzer.wav",
+		Duration: 0.65,
+		Args: []string{
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='(0.42*sin(2*PI*140*t)+0.35*sin(2*PI*148*t)+0.28*sin(2*PI*285*t)+0.22*sin(2*PI*425*t))*exp(-1.6*t)':s=48000:d=0.65",
+			"-af", "acrusher=bits=5:mode=lin:aa=1,lowpass=f=1400,afade=t=out:st=0.5:d=0.15",
 		},
 	},
 	{
 		ID:       "sfx-win-error",
-		Name:     "Windows Error Bong (Freeze Otak!)",
+		Name:     "PC Error Chord (Crash!)",
 		Kind:     "sfx",
 		Category: "Fail",
 		FileName: "builtin_sfx_win_error.wav",
-		Duration: 0.85,
+		Duration: 0.75,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='(0.45*sin(2*PI*220*t)+0.42*sin(2*PI*311.13*t)+0.28*sin(2*PI*440*t))*exp(-4.2*t)':s=48000:d=0.85",
-			"-af", "aecho=0.7:0.6:30:0.3,afade=t=out:st=0.6:d=0.25",
+			"aevalsrc=exprs='(0.45*sin(2*PI*440*t)+0.4*sin(2*PI*554.37*t)+0.38*sin(2*PI*659.25*t)+0.3*sin(2*PI*880*t))*exp(-5.0*t)':s=48000:d=0.75",
+			"-af", "afade=t=out:st=0.55:d=0.2",
 		},
 	},
 	{
-		ID:       "sfx-crickets",
-		Name:     "Jangkrik Krik-Krik (Garing/Canggung)",
+		ID:       "sfx-cricket",
+		Name:     "Jangkrik Krik-Krik (Garing)",
 		Kind:     "sfx",
 		Category: "Fail",
-		FileName: "builtin_sfx_crickets.wav",
-		Duration: 2.0,
+		FileName: "builtin_sfx_cricket.wav",
+		Duration: 1.6,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='0.45*sin(2*PI*4200*t)*lt(mod(t,0.62),0.26)*(0.5+0.5*sin(2*PI*34*t))':s=48000:d=2.0",
-			"-af", "bandpass=f=4200:w=900,afade=t=in:st=0:d=0.1,afade=t=out:st=1.7:d=0.3",
+			"aevalsrc=exprs='0.45*sin(2*PI*4250*t)*(0.5+0.5*sin(2*PI*28*t))*(lt(mod(t,0.75),0.30))':s=48000:d=1.6",
+			"-af", "bandpass=f=4250:w=900,afade=t=out:st=1.35:d=0.25",
 		},
 	},
 
-	// ==================== ALERT SFX ====================
+	// ================= 5. ALERT & POP SFX (5) =================
 	{
 		ID:       "sfx-alert",
-		Name:     "Kaget / Dramatic Alert Sting",
+		Name:     "Kaget / Dramatic Sting",
 		Kind:     "sfx",
 		Category: "Alert",
 		FileName: "builtin_sfx_alert.wav",
@@ -412,73 +424,100 @@ var builtInPack = []synthSpec{
 		},
 	},
 	{
-		ID:       "sfx-airhorn",
-		Name:     "MLG Airhorn Hype!",
+		ID:       "sfx-dun-dun-dun",
+		Name:     "Dramatic Dun-Dun-DUUN!",
 		Kind:     "sfx",
 		Category: "Alert",
-		FileName: "builtin_sfx_airhorn.wav",
-		Duration: 1.35,
+		FileName: "builtin_sfx_dundundun.wav",
+		Duration: 1.75,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='(0.32*sin(2*PI*415.3*t)+0.30*sin(2*PI*523.25*t)+0.28*sin(2*PI*622.25*t)+0.22*sin(2*PI*830.6*t))*(lt(t,0.18)+gte(t,0.23)*lt(t,0.40)+gte(t,0.46)*exp(-1.1*(t-0.46)))':s=48000:d=1.35",
-			"-af", "aecho=0.8:0.7:40:0.3,alimiter=limit=0.95,afade=t=out:st=1.1:d=0.25",
+			"aevalsrc=exprs='(0.55*sin(2*PI*130.81*t)+0.35*sin(2*PI*261.63*t))*lt(t,0.28)*exp(-4*t)+(0.55*sin(2*PI*123.47*t)+0.35*sin(2*PI*246.94*t))*gte(t,0.34)*lt(t,0.62)*exp(-4*(t-0.34))+(0.75*sin(2*PI*98*t)+0.45*sin(2*PI*196*t)+0.3*sin(2*PI*146.83*t))*gte(t,0.70)*exp(-1.9*(t-0.70))':s=48000:d=1.75",
+			"-af", "lowpass=f=1100,bass=g=6:f=95,aecho=0.75:0.7:65:0.35,afade=t=out:st=1.4:d=0.35",
 		},
 	},
 	{
-		ID:       "sfx-siren-police",
-		Name:     "Sirine Polisi GTA Wiu-Wiu!",
+		ID:       "sfx-ding",
+		Name:     "Pop Ding Highlight",
 		Kind:     "sfx",
 		Category: "Alert",
-		FileName: "builtin_sfx_siren_police.wav",
-		Duration: 1.8,
+		FileName: "builtin_sfx_ding.wav",
+		Duration: 0.85,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='0.62*sin(2*PI*(820+280*sin(2*PI*1.35*t))*t)':s=48000:d=1.8",
-			"-af", "bandpass=f=950:w=700,afade=t=in:st=0:d=0.1,afade=t=out:st=1.5:d=0.3",
+			"aevalsrc=exprs='(0.65*sin(2*PI*1318.5*t)+0.35*sin(2*PI*2637*t))*exp(-5.5*t)':s=48000:d=0.85",
+			"-af", "afade=t=out:st=0.6:d=0.25",
+		},
+	},
+	{
+		ID:       "sfx-coin",
+		Name:     "Cha-Ching / Coin Pop",
+		Kind:     "sfx",
+		Category: "Alert",
+		FileName: "builtin_sfx_coin.wav",
+		Duration: 0.75,
+		Args: []string{
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='(lt(t,0.12)*sin(2*PI*987.77*t)+gte(t,0.12)*sin(2*PI*1318.51*t))*exp(-4.5*max(0,t-0.12))':s=48000:d=0.75",
+			"-af", "afade=t=out:st=0.55:d=0.2",
 		},
 	},
 	{
 		ID:       "sfx-heartbeat",
-		Name:     "Detak Jantung Tegang (Dug-Dug)",
+		Name:     "Deg-Degan Heartbeat (Tegang)",
 		Kind:     "sfx",
 		Category: "Alert",
 		FileName: "builtin_sfx_heartbeat.wav",
-		Duration: 1.6,
+		Duration: 1.4,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='0.9*sin(2*PI*58*t)*(exp(-16*mod(t,0.8))+0.75*exp(-16*mod(t+0.58,0.8)))':s=48000:d=1.6",
-			"-af", "lowpass=f=180,bass=g=8:f=58,afade=t=out:st=1.4:d=0.2",
+			"aevalsrc=exprs='0.9*sin(2*PI*58*t)*(exp(-18*mod(t,0.7))+0.7*gte(mod(t,0.7),0.18)*exp(-22*(mod(t,0.7)-0.18)))':s=48000:d=1.4",
+			"-af", "lowpass=f=180,bass=g=8:f=55,afade=t=out:st=1.2:d=0.2",
 		},
 	},
 
-	// ==================== CROWD SFX ====================
+	// ================= 6. CROWD & CELEBRATION SFX (3) =================
 	{
-		ID:       "sfx-crowd-cheer",
-		Name:     "Sorakan / Tepuk Tangan Crowd",
+		ID:       "sfx-airhorn",
+		Name:     "MLG Airhorn Hype!",
 		Kind:     "sfx",
 		Category: "Crowd",
-		FileName: "builtin_sfx_crowd_cheer.wav",
-		Duration: 2.0,
+		FileName: "builtin_sfx_airhorn.wav",
+		Duration: 1.25,
 		Args: []string{
-			"-f", "lavfi", "-i", "anoisesrc=c=pink:r=48000:d=2.0:a=0.7",
-			"-af", "bandpass=f=1350:w=1100,tremolo=f=9:d=0.35,afade=t=in:st=0:d=0.35,afade=t=out:st=1.35:d=0.65",
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='(0.38*sin(2*PI*466.16*t)+0.34*sin(2*PI*470.5*t)+0.32*sin(2*PI*932.32*t)+0.25*sin(2*PI*1398*t)+0.18*sin(2*PI*1864*t))*(lt(t,0.16)+gte(t,0.20)*lt(t,0.36)+gte(t,0.40)*exp(-1.1*(t-0.40)))':s=48000:d=1.25",
+			"-af", "bandpass=f=1100:w=1600,aecho=0.7:0.6:50:0.3,afade=t=out:st=1.0:d=0.25",
 		},
 	},
 	{
-		ID:       "sfx-anime-sparkle",
-		Name:     "Anime Wow / Sparkle Chime",
+		ID:       "sfx-wow-sparkle",
+		Name:     "Sparkle Magic Wow Chime",
 		Kind:     "sfx",
 		Category: "Crowd",
-		FileName: "builtin_sfx_anime_sparkle.wav",
-		Duration: 1.15,
+		FileName: "builtin_sfx_sparkle.wav",
+		Duration: 1.0,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='(lt(t,0.18)*sin(2*PI*1046.5*t)+gte(t,0.12)*lt(t,0.34)*sin(2*PI*1318.5*t)+gte(t,0.24)*lt(t,0.52)*sin(2*PI*1568*t)+gte(t,0.36)*sin(2*PI*2093*t))*0.42*exp(-2.8*max(0,t-0.36))':s=48000:d=1.15",
-			"-af", "aecho=0.8:0.75:50:0.4,afade=t=out:st=0.85:d=0.3",
+			"aevalsrc=exprs='(0.4*sin(2*PI*(1046.5+523*floor(t*12))*t)+0.25*sin(2*PI*(2093+350*floor(t*12))*t))*exp(-2.6*t)':s=48000:d=1.0",
+			"-af", "aecho=0.75:0.7:55:0.4,afade=t=out:st=0.75:d=0.25",
+		},
+	},
+	{
+		ID:       "sfx-applause-burst",
+		Name:     "Crowd Cheer & Claps Burst",
+		Kind:     "sfx",
+		Category: "Crowd",
+		FileName: "builtin_sfx_applause.wav",
+		Duration: 1.5,
+		Args: []string{
+			"-f", "lavfi", "-i", "anoisesrc=c=pink:r=48000:d=1.5:a=0.65",
+			"-af", "bandpass=f=1350:w=1500,tremolo=f=14:d=0.45,afade=t=in:st=0:d=0.18,afade=t=out:st=0.95:d=0.55",
 		},
 	},
 
-	// ==================== 12 MOOD BGM LOOPS (100% DMCA-FREE) ====================
+	// ================= DMCA-FREE MOOD BGM LOOPS (15) =================
+	// --- Hype / Gaming ---
 	{
 		ID:       "bgm-gaming-pulse",
 		Name:     "Gaming Synth Pulse (120 BPM)",
@@ -494,61 +533,91 @@ var builtInPack = []synthSpec{
 		},
 	},
 	{
-		ID:       "bgm-hype-phonk",
-		Name:     "Phonk Vice Drift Bass (135 BPM)",
+		ID:       "bgm-phonk-drift",
+		Name:     "Phonk Cowbell Drift (130 BPM)",
 		Kind:     "bgm",
 		Category: "Hype",
-		FileName: "builtin_bgm_hype_phonk.mp3",
+		FileName: "builtin_bgm_phonk_drift.mp3",
 		Duration: 16.0,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='0.38*sin(2*PI*(55*exp(-6*mod(t,0.444))+41.2)*t)*exp(-3.5*mod(t,0.444))+0.14*sin(2*PI*(622.25*(lt(mod(t,0.888),0.444))+587.33*(gte(mod(t,0.888),0.444)))*t)*exp(-9*mod(t,0.222))':s=48000:d=16",
-			"-af", "bass=g=7:f=60,lowpass=f=2400,alimiter=limit=0.92,afade=t=in:st=0:d=0.25,afade=t=out:st=15.5:d=0.5",
+			"aevalsrc=exprs='0.40*sin(2*PI*(55*exp(-12*mod(t,0.4615))+42)*t)*exp(-5*mod(t,0.4615))+0.18*(sin(2*PI*560*t)+sin(2*PI*845*t))*exp(-14*mod(t,0.2307))*gte(mod(t,0.923),0.23)':s=48000:d=16",
+			"-af", "bass=g=6:f=60,lowpass=f=2400,afade=t=in:st=0:d=0.25,afade=t=out:st=15.5:d=0.5",
 			"-c:a", "libmp3lame", "-b:a", "160k",
 		},
 	},
 	{
-		ID:       "bgm-hype-trap",
-		Name:     "Hyper 808 Clutch Trap Beat",
+		ID:       "bgm-boss-battle",
+		Name:     "Epic Boss Chase (140 BPM)",
 		Kind:     "bgm",
 		Category: "Hype",
-		FileName: "builtin_bgm_hype_trap.mp3",
+		FileName: "builtin_bgm_boss_battle.mp3",
 		Duration: 16.0,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='0.40*sin(2*PI*(49+32*exp(-14*mod(t,0.5)))*t)*exp(-2.8*mod(t,0.5))+0.12*sin(2*PI*(329.63+82*floor(mod(t*4,4)))*t)*exp(-10*mod(t,0.125))':s=48000:d=16",
-			"-af", "bass=g=6:f=55,lowpass=f=2100,afade=t=in:st=0:d=0.25,afade=t=out:st=15.5:d=0.5",
+			"aevalsrc=exprs='0.30*sin(2*PI*(73.42*(lt(mod(t,4),2))+65.41*(gte(mod(t,4),2)))*t)*(0.35+0.65*exp(-10*mod(t,0.214)))+0.15*sin(2*PI*(293.66+73.42*floor(mod(t*4.66,4)))*t)*exp(-7*mod(t,0.214))':s=48000:d=16",
+			"-af", "lowpass=f=2600,bass=g=5:f=70,afade=t=in:st=0:d=0.25,afade=t=out:st=15.5:d=0.5",
 			"-c:a", "libmp3lame", "-b:a", "160k",
 		},
 	},
+	{
+		ID:       "bgm-arcade-rush",
+		Name:     "Arcade 8-Bit Rush (Fast)",
+		Kind:     "bgm",
+		Category: "Hype",
+		FileName: "builtin_bgm_arcade_rush.mp3",
+		Duration: 16.0,
+		Args: []string{
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='0.22*sin(2*PI*(261.63+65.4*floor(mod(t*6,5)))*t)*exp(-6*mod(t,0.166))+0.25*sin(2*PI*(130.81*(lt(mod(t,4),2))+98*(gte(mod(t,4),2)))*t)*exp(-6*mod(t,0.333))':s=48000:d=16",
+			"-af", "acrusher=bits=7:mode=lin:aa=1,lowpass=f=2800,afade=t=in:st=0:d=0.2,afade=t=out:st=15.5:d=0.5",
+			"-c:a", "libmp3lame", "-b:a", "160k",
+		},
+	},
+	// --- Funny / Meme ---
 	{
 		ID:       "bgm-funny-bouncy",
-		Name:     "Funny Comedy Pluck (Lucu / Kocak)",
+		Name:     "Funny Bouncy Comedy Pluck",
 		Kind:     "bgm",
 		Category: "Funny",
 		FileName: "builtin_bgm_funny_bouncy.mp3",
 		Duration: 16.0,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='0.26*sin(2*PI*(261.63*(lt(mod(t,2),0.5))+329.63*(gte(mod(t,2),0.5)*lt(mod(t,2),1.0))+392*(gte(mod(t,2),1.0)*lt(mod(t,2),1.5))+523.25*(gte(mod(t,2),1.5)))*t)*exp(-8*mod(t,0.25))+0.18*sin(2*PI*130.81*t)*exp(-6*mod(t,0.5))':s=48000:d=16",
-			"-af", "lowpass=f=2400,afade=t=in:st=0:d=0.2,afade=t=out:st=15.5:d=0.5",
+			"aevalsrc=exprs='0.28*sin(2*PI*(196*lt(mod(t,1),0.25)+246.94*gte(mod(t,1),0.25)*lt(mod(t,1),0.5)+293.66*gte(mod(t,1),0.5)*lt(mod(t,1),0.75)+392*gte(mod(t,1),0.75))*t)*exp(-10*mod(t,0.25))+0.18*sin(2*PI*130.81*t)*exp(-9*mod(t,0.5))':s=48000:d=16",
+			"-af", "lowpass=f=1900,afade=t=in:st=0:d=0.25,afade=t=out:st=15.5:d=0.5",
 			"-c:a", "libmp3lame", "-b:a", "160k",
 		},
 	},
 	{
-		ID:       "bgm-funny-sneaky",
-		Name:     "Sneaky Tiptoe Meme (Iseng / Ngeles)",
+		ID:       "bgm-sneaky-troll",
+		Name:     "Sneaky Troll Pizzicato (Ngeselin)",
 		Kind:     "bgm",
 		Category: "Funny",
-		FileName: "builtin_bgm_funny_sneaky.mp3",
+		FileName: "builtin_bgm_sneaky_troll.mp3",
 		Duration: 16.0,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='0.28*sin(2*PI*(196*(lt(mod(t,2),0.5))+207.65*(gte(mod(t,2),0.5)*lt(mod(t,2),1.0))+233.08*(gte(mod(t,2),1.0)*lt(mod(t,2),1.5))+196*(gte(mod(t,2),1.5)))*t)*exp(-11*mod(t,0.5))':s=48000:d=16",
-			"-af", "bandpass=f=600:w=900,afade=t=in:st=0:d=0.2,afade=t=out:st=15.5:d=0.5",
+			"aevalsrc=exprs='0.32*sin(2*PI*(220*lt(mod(t,2),0.5)+233.08*gte(mod(t,2),0.5)*lt(mod(t,2),1.0)+261.63*gte(mod(t,2),1.0)*lt(mod(t,2),1.5)+207.65*gte(mod(t,2),1.5))*t)*exp(-12*mod(t,0.5))':s=48000:d=16",
+			"-af", "bandpass=f=620:w=900,aecho=0.6:0.5:110:0.2,afade=t=in:st=0:d=0.25,afade=t=out:st=15.5:d=0.5",
 			"-c:a", "libmp3lame", "-b:a", "160k",
 		},
 	},
+	{
+		ID:       "bgm-circus-chaos",
+		Name:     "Chaotic Panic Chase (Kacau)",
+		Kind:     "bgm",
+		Category: "Funny",
+		FileName: "builtin_bgm_circus_chaos.mp3",
+		Duration: 16.0,
+		Args: []string{
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='0.26*sin(2*PI*(329.63+55*mod(floor(t*8),4))*t)*exp(-8*mod(t,0.125))+0.24*sin(2*PI*(110+36*mod(floor(t*4),2))*t)*exp(-7*mod(t,0.25))':s=48000:d=16",
+			"-af", "lowpass=f=2100,afade=t=in:st=0:d=0.2,afade=t=out:st=15.5:d=0.5",
+			"-c:a", "libmp3lame", "-b:a", "160k",
+		},
+	},
+	// --- Chill / Story / Retro ---
 	{
 		ID:       "bgm-chill-lofi",
 		Name:     "Chill Lo-Fi Warm Pad (Story)",
@@ -564,8 +633,37 @@ var builtInPack = []synthSpec{
 		},
 	},
 	{
+		ID:       "bgm-sunset-vice",
+		Name:     "Vice City Synthwave Retro (GTA VI!)",
+		Kind:     "bgm",
+		Category: "Chill",
+		FileName: "builtin_bgm_sunset_vice.mp3",
+		Duration: 16.0,
+		Args: []string{
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='0.26*sin(2*PI*(82.41*lt(mod(t,8),4)+98*gte(mod(t,8),4))*t)*(0.5+0.5*exp(-7*mod(t,0.25)))+(0.12*sin(2*PI*329.63*t)+0.10*sin(2*PI*392*t)+0.10*sin(2*PI*493.88*t))*(0.7+0.3*sin(2*PI*0.35*t))':s=48000:d=16",
+			"-af", "lowpass=f=1800,aecho=0.7:0.6:180:0.3,afade=t=in:st=0:d=0.4,afade=t=out:st=15.4:d=0.6",
+			"-c:a", "libmp3lame", "-b:a", "160k",
+		},
+	},
+	{
+		ID:       "bgm-acoustic-chill",
+		Name:     "Soft Warm Pluck (Santai)",
+		Kind:     "bgm",
+		Category: "Chill",
+		FileName: "builtin_bgm_acoustic_chill.mp3",
+		Duration: 16.0,
+		Args: []string{
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='(0.20*sin(2*PI*196*t)+0.16*sin(2*PI*293.66*t)+0.14*sin(2*PI*392*t))*exp(-3.2*mod(t,1.0))+0.14*sin(2*PI*493.88*t)*exp(-4.5*mod(t+0.5,1.0))':s=48000:d=16",
+			"-af", "lowpass=f=1600,aecho=0.7:0.5:160:0.25,afade=t=in:st=0:d=0.4,afade=t=out:st=15.4:d=0.6",
+			"-c:a", "libmp3lame", "-b:a", "160k",
+		},
+	},
+	// --- Suspense / Horror / Heist ---
+	{
 		ID:       "bgm-suspense",
-		Name:     "Suspense Tension Drone (Dark GTA)",
+		Name:     "Suspense Tension Drone (Horror/GTA)",
 		Kind:     "bgm",
 		Category: "Suspense",
 		FileName: "builtin_bgm_suspense.mp3",
@@ -578,177 +676,61 @@ var builtInPack = []synthSpec{
 		},
 	},
 	{
-		ID:       "bgm-suspense-chase",
-		Name:     "Police Chase Pulse (Kejar-Kejaran)",
+		ID:       "bgm-horror-pulse",
+		Name:     "Creepy Horror Heartbeat Sub",
 		Kind:     "bgm",
 		Category: "Suspense",
-		FileName: "builtin_bgm_suspense_chase.mp3",
+		FileName: "builtin_bgm_horror_pulse.mp3",
 		Duration: 16.0,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='0.32*sin(2*PI*(73.42*(lt(mod(t,4),2))+65.41*(gte(mod(t,4),2)))*t)*exp(-7*mod(t,0.25))+0.14*sin(2*PI*(293.66+15*sin(2*PI*2*t))*t)*exp(-6*mod(t,0.5))':s=48000:d=16",
-			"-af", "lowpass=f=1500,afade=t=in:st=0:d=0.25,afade=t=out:st=15.5:d=0.5",
+			"aevalsrc=exprs='0.38*sin(2*PI*46*t)*exp(-12*mod(t,0.85))+0.14*sin(2*PI*(660+12*sin(2*PI*0.2*t))*t)*(0.5+0.5*sin(2*PI*0.18*t))':s=48000:d=16",
+			"-af", "lowpass=f=950,aecho=0.8:0.75:220:0.4,afade=t=in:st=0:d=0.5,afade=t=out:st=15.3:d=0.7",
 			"-c:a", "libmp3lame", "-b:a", "160k",
 		},
 	},
+	{
+		ID:       "bgm-heist-stealth",
+		Name:     "GTA Heist Stealth Bass",
+		Kind:     "bgm",
+		Category: "Suspense",
+		FileName: "builtin_bgm_heist_stealth.mp3",
+		Duration: 16.0,
+		Args: []string{
+			"-f", "lavfi", "-i",
+			"aevalsrc=exprs='0.34*sin(2*PI*(65.41*lt(mod(t,4),3)+61.74*gte(mod(t,4),3))*t)*exp(-7*mod(t,0.5))+0.10*sin(2*PI*523.25*t)*exp(-18*mod(t,0.25))':s=48000:d=16",
+			"-af", "lowpass=f=1400,bass=g=5:f=70,afade=t=in:st=0:d=0.3,afade=t=out:st=15.4:d=0.6",
+			"-c:a", "libmp3lame", "-b:a", "160k",
+		},
+	},
+	// --- Victory & Fail ---
 	{
 		ID:       "bgm-victory-fanfare",
-		Name:     "Victory Winner Chords (Epic Win)",
+		Name:     "Victory Champion Synth (GG!)",
 		Kind:     "bgm",
 		Category: "Victory",
-		FileName: "builtin_bgm_victory_fanfare.mp3",
+		FileName: "builtin_bgm_victory.mp3",
 		Duration: 16.0,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='(0.20*sin(2*PI*261.63*t)+0.18*sin(2*PI*329.63*t)+0.16*sin(2*PI*392*t)+0.14*sin(2*PI*523.25*t))*(0.55+0.45*exp(-5*mod(t,0.5)))':s=48000:d=16",
-			"-af", "lowpass=f=2400,aecho=0.7:0.6:140:0.25,afade=t=in:st=0:d=0.3,afade=t=out:st=15.4:d=0.6",
+			"aevalsrc=exprs='(0.22*sin(2*PI*261.63*t)+0.18*sin(2*PI*329.63*t)+0.16*sin(2*PI*392*t)+0.14*sin(2*PI*523.25*t))*(0.55+0.45*exp(-6*mod(t,0.5)))':s=48000:d=16",
+			"-af", "lowpass=f=2400,aecho=0.7:0.6:140:0.3,afade=t=in:st=0:d=0.3,afade=t=out:st=15.4:d=0.6",
 			"-c:a", "libmp3lame", "-b:a", "160k",
 		},
 	},
 	{
-		ID:       "bgm-fail-sad",
-		Name:     "Sad Piano Fail Loop (Wasted / Sedih)",
+		ID:       "bgm-sad-piano",
+		Name:     "Sad Fail Slow Keys (Kasian)",
 		Kind:     "bgm",
 		Category: "Fail",
-		FileName: "builtin_bgm_fail_sad.mp3",
+		FileName: "builtin_bgm_sad_piano.mp3",
 		Duration: 16.0,
 		Args: []string{
 			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='(0.22*sin(2*PI*(220*(lt(mod(t,8),4))+174.61*(gte(mod(t,8),4)))*t)+0.18*sin(2*PI*(261.63*(lt(mod(t,8),4))+220*(gte(mod(t,8),4)))*t)+0.14*sin(2*PI*329.63*t))*exp(-0.9*mod(t,2.0))':s=48000:d=16",
-			"-af", "lowpass=f=1300,aecho=0.75:0.7:220:0.35,afade=t=in:st=0:d=0.4,afade=t=out:st=15.2:d=0.8",
+			"aevalsrc=exprs='(0.24*sin(2*PI*(220*lt(mod(t,8),4)+174.61*gte(mod(t,8),4))*t)+0.18*sin(2*PI*(261.63*lt(mod(t,8),4)+220*gte(mod(t,8),4))*t)+0.15*sin(2*PI*329.63*t))*exp(-1.2*mod(t,2.0))':s=48000:d=16",
+			"-af", "lowpass=f=1100,aecho=0.75:0.7:240:0.35,afade=t=in:st=0:d=0.4,afade=t=out:st=15.2:d=0.8",
 			"-c:a", "libmp3lame", "-b:a", "160k",
 		},
-	},
-	{
-		ID:       "bgm-horror-eerie",
-		Name:     "Creepy Horror Ambience (Serem)",
-		Kind:     "bgm",
-		Category: "Horror",
-		FileName: "builtin_bgm_horror_eerie.mp3",
-		Duration: 16.0,
-		Args: []string{
-			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='(0.24*sin(2*PI*61.74*t)+0.22*sin(2*PI*65.41*t)+0.12*sin(2*PI*(440+8*sin(2*PI*0.3*t))*t))*(0.65+0.35*sin(2*PI*0.2*t))':s=48000:d=16",
-			"-af", "lowpass=f=900,aecho=0.8:0.75:260:0.4,afade=t=in:st=0:d=0.6,afade=t=out:st=15.0:d=1.0",
-			"-c:a", "libmp3lame", "-b:a", "160k",
-		},
-	},
-	{
-		ID:       "bgm-retro-arcade",
-		Name:     "Retro 8-Bit Arcade Turbo",
-		Kind:     "bgm",
-		Category: "Retro",
-		FileName: "builtin_bgm_retro_arcade.mp3",
-		Duration: 16.0,
-		Args: []string{
-			"-f", "lavfi", "-i",
-			"aevalsrc=exprs='0.22*sin(2*PI*(261.63+65*floor(mod(t*6,5)))*t)*exp(-7*mod(t,0.166))+0.20*sin(2*PI*130.81*t)*exp(-6*mod(t,0.333))':s=48000:d=16",
-			"-af", "acrusher=bits=7:mode=lin:aa=1,lowpass=f=2200,afade=t=in:st=0:d=0.2,afade=t=out:st=15.5:d=0.5",
-			"-c:a", "libmp3lame", "-b:a", "160k",
-		},
-	},
-}
-
-// Built-in 1-click Smart Moment Audio Presets (offsets are relative to selected playhead/peak second!)
-var builtInPresets = []model.AudioPreset{
-	{
-		ID:          "preset-crash",
-		Name:        "💥 Crash / Nabrak",
-		MomentType:  "crash",
-		Description: "Metal Pipe + Vine Boom + Oof Roblox tepat di momen nabrak!",
-		BGMVolume:   0.14,
-		BGMFadeIn:   0.3,
-		BGMFadeOut:  0.8,
-		BGMAutoDuck: true,
-		SFXCues: []model.SFXCue{
-			{AssetID: "sfx-metal-pipe", AtSec: 0.0, Volume: 1.05},
-			{AssetID: "sfx-boom", AtSec: 0.15, Volume: 1.0},
-			{AssetID: "sfx-oof-roblox", AtSec: 0.45, Volume: 0.95},
-		},
-		BuiltIn: true,
-	},
-	{
-		ID:          "preset-fail",
-		Name:        "💀 Fail / Wasted",
-		MomentType:  "fail",
-		Description: "Record Scratch + Sad Trombone + Bruh + Sad Piano BGM",
-		BGMAssetID:  "bgm-fail-sad",
-		BGMVolume:   0.15,
-		BGMFadeIn:   0.4,
-		BGMFadeOut:  0.9,
-		BGMAutoDuck: true,
-		SFXCues: []model.SFXCue{
-			{AssetID: "sfx-record-scratch", AtSec: 0.0, Volume: 1.0},
-			{AssetID: "sfx-sad-trombone", AtSec: 0.45, Volume: 0.95},
-			{AssetID: "sfx-bruh", AtSec: 1.8, Volume: 0.95},
-		},
-		BuiltIn: true,
-	},
-	{
-		ID:          "preset-hype",
-		Name:        "🔥 Hype / Clutch",
-		MomentType:  "hype",
-		Description: "Tension Riser (-1.4s) → Bass Drop + Airhorn + Phonk BGM",
-		BGMAssetID:  "bgm-hype-phonk",
-		BGMVolume:   0.16,
-		BGMFadeIn:   0.3,
-		BGMFadeOut:  0.8,
-		BGMAutoDuck: true,
-		SFXCues: []model.SFXCue{
-			{AssetID: "sfx-riser", AtSec: -1.4, Volume: 0.85},
-			{AssetID: "sfx-bassdrop", AtSec: 0.0, Volume: 1.1},
-			{AssetID: "sfx-airhorn", AtSec: 0.2, Volume: 0.8},
-		},
-		BuiltIn: true,
-	},
-	{
-		ID:          "preset-kaget",
-		Name:        "😱 Kaget / Plot Twist",
-		MomentType:  "kaget",
-		Description: "Dramatic Dun-Dun-DUUN + Alert Sting + Vine Boom",
-		BGMVolume:   0.14,
-		BGMFadeIn:   0.3,
-		BGMFadeOut:  0.8,
-		BGMAutoDuck: true,
-		SFXCues: []model.SFXCue{
-			{AssetID: "sfx-alert", AtSec: 0.0, Volume: 1.0},
-			{AssetID: "sfx-dun-dun-dun", AtSec: 0.25, Volume: 1.0},
-			{AssetID: "sfx-boom", AtSec: 1.15, Volume: 1.0},
-		},
-		BuiltIn: true,
-	},
-	{
-		ID:          "preset-funny",
-		Name:        "😂 Kocak / Meme Ngakak",
-		MomentType:  "funny",
-		Description: "Cartoon Bonk + Boing + Pop + Funny Bouncy BGM",
-		BGMAssetID:  "bgm-funny-bouncy",
-		BGMVolume:   0.14,
-		BGMFadeIn:   0.3,
-		BGMFadeOut:  0.8,
-		BGMAutoDuck: true,
-		SFXCues: []model.SFXCue{
-			{AssetID: "sfx-bonk", AtSec: 0.0, Volume: 1.05},
-			{AssetID: "sfx-boing", AtSec: 0.35, Volume: 0.9},
-			{AssetID: "sfx-pop", AtSec: 1.1, Volume: 0.85},
-		},
-		BuiltIn: true,
-	},
-	{
-		ID:          "preset-awkward",
-		Name:        "🦗 Garing / Canggung",
-		MomentType:  "awkward",
-		Description: "Record Scratch + Jangkrik Krik-Krik + Windows Error",
-		BGMVolume:   0.12,
-		BGMFadeIn:   0.3,
-		BGMFadeOut:  0.8,
-		BGMAutoDuck: true,
-		SFXCues: []model.SFXCue{
-			{AssetID: "sfx-record-scratch", AtSec: 0.0, Volume: 0.95},
-			{AssetID: "sfx-crickets", AtSec: 0.4, Volume: 0.95},
-			{AssetID: "sfx-win-error", AtSec: 1.9, Volume: 0.9},
-		},
-		BuiltIn: true,
 	},
 }
 
@@ -756,16 +738,13 @@ func NewLibrary(dataDir string, d *deps.Manager) *Library {
 	audioDir := filepath.Join(dataDir, "audio")
 	_ = os.MkdirAll(audioDir, 0o755)
 	lib := &Library{
-		AudioDir:    audioDir,
-		MetaPath:    filepath.Join(dataDir, "audio_library.json"),
-		PresetsPath: filepath.Join(dataDir, "audio_presets.json"),
-		Deps:        d,
-		assets:      make(map[string]*model.AudioAsset),
-		presets:     make(map[string]*model.AudioPreset),
+		AudioDir: audioDir,
+		MetaPath: filepath.Join(dataDir, "audio_library.json"),
+		Deps:     d,
+		assets:   make(map[string]*model.AudioAsset),
 	}
 	lib.load()
-	lib.loadPresets()
-	// Generate missing built-in royalty-free assets asynchronously so startup stays instant!
+	// Generate missing built-in royalty-free assets asynchronously with bounded concurrency!
 	go lib.EnsureBuiltIns()
 	return lib
 }
@@ -783,91 +762,6 @@ func (l *Library) load() {
 	}
 }
 
-func (l *Library) loadPresets() {
-	for _, p := range builtInPresets {
-		cp := p
-		l.presets[cp.ID] = &cp
-	}
-	if b, err := os.ReadFile(l.PresetsPath); err == nil {
-		var list []*model.AudioPreset
-		if json.Unmarshal(b, &list) == nil {
-			for _, p := range list {
-				if p.ID != "" && !p.BuiltIn {
-					l.presets[p.ID] = p
-				}
-			}
-		}
-	}
-}
-
-func (l *Library) savePresetsLocked() {
-	var custom []*model.AudioPreset
-	for _, p := range l.presets {
-		if !p.BuiltIn {
-			custom = append(custom, p)
-		}
-	}
-	sort.Slice(custom, func(i, j int) bool { return custom[i].Name < custom[j].Name })
-	if b, err := json.MarshalIndent(custom, "", "  "); err == nil {
-		tmp := l.PresetsPath + ".tmp"
-		if os.WriteFile(tmp, b, 0o644) == nil {
-			_ = os.Rename(tmp, l.PresetsPath)
-		}
-	}
-}
-
-func (l *Library) ListPresets() []*model.AudioPreset {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	list := make([]*model.AudioPreset, 0, len(l.presets))
-	for _, p := range l.presets {
-		cp := *p
-		cp.SFXCues = append([]model.SFXCue{}, p.SFXCues...)
-		list = append(list, &cp)
-	}
-	sort.Slice(list, func(i, j int) bool {
-		if list[i].BuiltIn != list[j].BuiltIn {
-			return !list[i].BuiltIn // User custom presets first!
-		}
-		return list[i].Name < list[j].Name
-	})
-	return list
-}
-
-func (l *Library) SavePreset(p model.AudioPreset) (*model.AudioPreset, error) {
-	if strings.TrimSpace(p.Name) == "" {
-		return nil, fmt.Errorf("nama preset wajib diisi")
-	}
-	if p.ID == "" {
-		p.ID = fmt.Sprintf("preset-custom-%d", time.Now().UnixNano())
-	}
-	p.BuiltIn = false
-	if p.MomentType == "" {
-		p.MomentType = "custom"
-	}
-	l.mu.Lock()
-	cp := p
-	l.presets[cp.ID] = &cp
-	l.savePresetsLocked()
-	l.mu.Unlock()
-	return &cp, nil
-}
-
-func (l *Library) DeletePreset(id string) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	p, ok := l.presets[id]
-	if !ok {
-		return nil
-	}
-	if p.BuiltIn {
-		return fmt.Errorf("preset bawaan tidak bisa dihapus")
-	}
-	delete(l.presets, id)
-	l.savePresetsLocked()
-	return nil
-}
-
 func (l *Library) saveLocked() {
 	list := make([]*model.AudioAsset, 0, len(l.assets))
 	for _, a := range l.assets {
@@ -883,21 +777,18 @@ func (l *Library) saveLocked() {
 		return list[i].Name < list[j].Name
 	})
 	if b, err := json.MarshalIndent(list, "", "  "); err == nil {
-		tmp := l.MetaPath + ".tmp"
-		if os.WriteFile(tmp, b, 0o644) == nil {
-			_ = os.Rename(tmp, l.MetaPath)
-		}
+		_ = os.WriteFile(l.MetaPath, b, 0o644)
 	}
 }
 
-// EnsureBuiltIns synthesizes any missing royalty-free SFX/BGM files using FFmpeg (bounded concurrency).
+// EnsureBuiltIns synthesizes any missing royalty-free SFX/BGM files using FFmpeg (bounded 4-worker pool).
 func (l *Library) EnsureBuiltIns() {
 	ff := l.Deps.GetStatus().FFmpegPath
 	if ff == "" {
 		return
 	}
 
-	sem := make(chan struct{}, 4) // Max 4 parallel FFmpeg synths to stay light on CPU
+	sem := make(chan struct{}, 4)
 	var wg sync.WaitGroup
 	changed := false
 	var mu sync.Mutex
@@ -906,7 +797,8 @@ func (l *Library) EnsureBuiltIns() {
 		dest := filepath.Join(l.AudioDir, spec.FileName)
 		if fileExists(dest) {
 			l.mu.Lock()
-			if existing, ok := l.assets[spec.ID]; !ok || existing.Category != spec.Category || existing.Name != spec.Name {
+			existing, ok := l.assets[spec.ID]
+			if !ok || existing.Category != spec.Category || existing.Name != spec.Name {
 				l.assets[spec.ID] = &model.AudioAsset{
 					ID:       spec.ID,
 					Name:     spec.Name,

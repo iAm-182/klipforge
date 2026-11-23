@@ -300,60 +300,34 @@ type CompileOptions struct {
 	CRF              int              `json:"crf"`
 }
 
-// TimeRange marks a [StartSec, EndSec] span on a video timeline (e.g. dead-air section to remove).
-type TimeRange struct {
-	StartSec float64 `json:"startSec"`
-	EndSec   float64 `json:"endSec"`
-}
-
-// TextOverlay defines a timed pop-up meme caption placed anywhere on the video frame.
-type TextOverlay struct {
-	Text     string  `json:"text"`
-	StartSec float64 `json:"startSec"`
-	EndSec   float64 `json:"endSec"`
-	X        float64 `json:"x"`        // 0.0 - 1.0 (default 0.5 center)
-	Y        float64 `json:"y"`        // 0.0 - 1.0 (default 0.25 upper-mid)
-	Color    string  `json:"color"`    // Hex e.g. "#FFE600", "#FFFFFF", "#FF2A85", "#00E5FF"
-	FontSize int     `json:"fontSize"` // Default 66
-}
-
-// AudioPreset stores a reusable 1-click Smart Audio Preset (BGM + Fade + Ducking + SFX cues).
+// AudioPreset stores a reusable 1-click SFX + BGM moment combo (built-in or user-saved!).
 type AudioPreset struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	MomentType  string   `json:"momentType"` // crash, fail, hype, kaget, funny, awkward, custom
-	Description string   `json:"description"`
-	BGMAssetID  string   `json:"bgmAssetId"`
-	BGMVolume   float64  `json:"bgmVolume"`
-	BGMFadeIn   float64  `json:"bgmFadeIn"`
-	BGMFadeOut  float64  `json:"bgmFadeOut"`
-	BGMAutoDuck bool     `json:"bgmAutoDuck"`
-	SFXCues     []SFXCue `json:"sfxCues"` // Relative offsets (seconds from target playhead/peak)
-	BuiltIn     bool     `json:"builtIn"`
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	MomentType    string   `json:"momentType"`    // crash, fail, hype, twist, victory, meme, custom
+	Icon          string   `json:"icon"`          // e.g. "💥", "💀", "🔥"
+	BGMAssetID    string   `json:"bgmAssetId"`    // Optional BGM ID
+	BGMVolume     float64  `json:"bgmVolume"`     // 0.05 - 0.60
+	BGMFadeInSec  float64  `json:"bgmFadeInSec"`  // Default 0.35
+	BGMFadeOutSec float64  `json:"bgmFadeOutSec"` // Default 0.85
+	BGMAutoDuck   bool     `json:"bgmAutoDuck"`
+	SFXCues       []SFXCue `json:"sfxCues"` // Offsets relative to anchor playhead/peak!
+	BuiltIn       bool     `json:"builtIn"`
 }
 
-// PostEditOptions lets the user polish an already-rendered clip like CapCut Pro:
-// trim, cut dead-air middle sections, stamp unlimited SFX & BGM with fades, pop-up meme text,
-// freeze-frame meme, partial slow-mo, and manual drag-and-drop watermark — zero YouTube re-download!
+// PostEditOptions lets the user trim an already-rendered clip's start/end timestamps,
+// stamp unlimited additional SFX cues (or BGM with custom fades), and place a manual drag-and-drop watermark!
 type PostEditOptions struct {
 	SourceJobID   string           `json:"sourceJobId"`
 	Title         string           `json:"title"`
-	TrimStartSec  float64          `json:"trimStartSec"`            // Seconds in rendered clip (0 = from beginning)
-	TrimEndSec    float64          `json:"trimEndSec"`              // Seconds in rendered clip (<=0 = until end of main body)
-	PreserveOutro bool             `json:"preserveOutro"`           // Keep campaign's clean Outro template untouched at the end
-	CutRanges     []TimeRange      `json:"cutRanges,omitempty"`     // Middle spans to delete (Jump-Cut / Silence Removal)
-	TextOverlays  []TextOverlay    `json:"textOverlays,omitempty"`  // Timed pop-up meme captions
-	FreezeAtSec   float64          `json:"freezeAtSec,omitempty"`   // Optional Freeze-Frame Meme timestamp (source timeline)
-	FreezeDurSec  float64          `json:"freezeDurSec,omitempty"`  // Freeze hold duration (e.g. 1.2s)
-	FreezeGray    bool             `json:"freezeGray,omitempty"`    // Dramatic B&W grayscale during freeze
-	SlowMoStart   float64          `json:"slowMoStart,omitempty"`   // Optional partial Slow-Mo start
-	SlowMoEnd     float64          `json:"slowMoEnd,omitempty"`     // Optional partial Slow-Mo end
-	SlowMoFactor  float64          `json:"slowMoFactor,omitempty"`  // e.g. 0.5 (half speed)
-	SFXCues       []SFXCue         `json:"sfxCues"`                 // Additional SFX cues stamped at timestamps on the source clip timeline
-	BGMAssetID    string           `json:"bgmAssetId"`              // Optional additional BGM overlay
-	BGMVolume     float64          `json:"bgmVolume"`               // 0.05 - 0.60
-	BGMFadeInSec  float64          `json:"bgmFadeInSec,omitempty"`  // Default 0.35s
-	BGMFadeOutSec float64          `json:"bgmFadeOutSec,omitempty"` // Default 0.85s
+	TrimStartSec  float64          `json:"trimStartSec"`  // Seconds in rendered clip (0 = from beginning)
+	TrimEndSec    float64          `json:"trimEndSec"`    // Seconds in rendered clip (<=0 = until end of main body)
+	PreserveOutro bool             `json:"preserveOutro"` // Keep campaign's clean Outro template untouched at the end
+	SFXCues       []SFXCue         `json:"sfxCues"`       // Additional SFX cues stamped at timestamps on the source clip timeline
+	BGMAssetID    string           `json:"bgmAssetId"`    // Optional additional BGM overlay
+	BGMVolume     float64          `json:"bgmVolume"`     // 0.05 - 0.60
+	BGMFadeInSec  float64          `json:"bgmFadeInSec"`  // Custom BGM fade-in seconds (default 0.35)
+	BGMFadeOutSec float64          `json:"bgmFadeOutSec"` // Custom BGM fade-out seconds (default 0.85)
 	BGMAutoDuck   bool             `json:"bgmAutoDuck"`
 	Speed         float64          `json:"speed"`               // Optional 1.0 - 1.20
 	Watermark     *WatermarkConfig `json:"watermark,omitempty"` // Optional manual drag-and-drop watermark placement!

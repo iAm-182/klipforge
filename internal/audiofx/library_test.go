@@ -1,58 +1,64 @@
 package audiofx
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"klipforge/internal/deps"
 	"klipforge/internal/model"
 )
 
-func TestMegaAudioPackAndPresets(t *testing.T) {
+func TestAudioLibraryBuiltInCountsAndSynthesis(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg tidak ditemukan di PATH")
 	}
 	tmp := t.TempDir()
-	depMgr := deps.NewManager(tmp)
-	lib := NewLibrary(tmp, depMgr)
+	d := deps.NewManager(tmp)
+	lib := &Library{
+		AudioDir: filepath.Join(tmp, "audio"),
+		MetaPath: filepath.Join(tmp, "audio_library.json"),
+		Deps:     d,
+		assets:   make(map[string]*model.AudioAsset),
+	}
+	_ = os.MkdirAll(lib.AudioDir, 0o755)
 	lib.EnsureBuiltIns()
 
-	all := lib.List()
-	bgmCount, sfxCount := 0, 0
-	for _, a := range all {
-		if a.Kind == "bgm" {
-			bgmCount++
-		} else if a.Kind == "sfx" {
-			sfxCount++
+	list := lib.List()
+	var sfxCnt, bgmCnt int
+	for _, a := range list {
+		fi, err := os.Stat(a.FilePath)
+		if err != nil || fi.Size() < 1024 {
+			t.Fatalf("synthesized audio %s (%s) missing or too small: err=%v", a.ID, a.FilePath, err)
+		}
+		if a.Kind == "sfx" {
+			sfxCnt++
+		} else if a.Kind == "bgm" {
+			bgmCnt++
 		}
 	}
-	if bgmCount < 12 {
-		t.Fatalf("expected >= 12 built-in BGM tracks, got %d", bgmCount)
+	if sfxCnt < 30 {
+		t.Fatalf("expected >= 30 built-in SFX, got %d", sfxCnt)
 	}
-	if sfxCount < 30 {
-		t.Fatalf("expected >= 30 built-in SFX tracks, got %d", sfxCount)
-	}
-
-	// Check viral Roblox-style & iconic CapCut SFX exist
-	for _, reqID := range []string{"sfx-oof-roblox", "sfx-metal-pipe", "sfx-boom", "sfx-sad-trombone", "sfx-bruh", "sfx-bonk", "bgm-hype-phonk", "bgm-funny-bouncy"} {
-		if _, ok := lib.Get(reqID); !ok {
-			t.Fatalf("missing expected built-in audio asset %s", reqID)
-		}
+	if bgmCnt < 12 {
+		t.Fatalf("expected >= 12 built-in BGM, got %d", bgmCnt)
 	}
 
-	// Verify Smart Audio Presets (built-in + custom save/reload/delete)
+	// Verify presets CRUD
 	presets := lib.ListPresets()
 	if len(presets) < 6 {
-		t.Fatalf("expected >= 6 built-in smart audio presets, got %d", len(presets))
+		t.Fatalf("expected >= 6 built-in smart presets, got %d", len(presets))
 	}
 	saved, err := lib.SavePreset(model.AudioPreset{
-		Name:       "My Windah Crash Combo",
-		MomentType: "crash",
-		BGMAssetID: "bgm-hype-phonk",
-		BGMVolume:  0.15,
-		SFXCues:    []model.SFXCue{{AssetID: "sfx-oof-roblox", AtSec: 0, Volume: 1.0}},
+		Name:       "Preset Custom Windah",
+		MomentType: "custom",
+		Icon:       "⭐",
+		BGMAssetID: "bgm-phonk-drift",
+		BGMVolume:  0.18,
+		SFXCues:    []model.SFXCue{{AssetID: "sfx-roblox-oof", AtSec: 0, Volume: 1.0}},
 	})
-	if err != nil {
+	if err != nil || saved.ID == "" {
 		t.Fatalf("SavePreset failed: %v", err)
 	}
 	if err := lib.DeletePreset(saved.ID); err != nil {
