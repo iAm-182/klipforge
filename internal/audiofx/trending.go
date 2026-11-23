@@ -165,6 +165,9 @@ func (l *Library) FetchTrendingSounds(ctx context.Context, category, customQuery
 
 	spec := resolveTrendingQuery(catKey, customQuery)
 	args := []string{"--flat-playlist", "--no-warnings", "-J", spec.Query}
+	if _, err := exec.LookPath("node"); err == nil {
+		args = append(args, "--js-runtimes", "node")
+	}
 	if settings.CookiesFile != "" {
 		if _, err := os.Stat(settings.CookiesFile); err == nil {
 			args = append(args, "--cookies", settings.CookiesFile)
@@ -290,6 +293,12 @@ func (l *Library) ImportSoundFromURL(ctx context.Context, rawURL, name, kind, ca
 		"--no-warnings",
 		"-f", "bestaudio/best",
 		"-o", rawTpl,
+	}
+	if _, err := exec.LookPath("node"); err == nil {
+		ytArgs = append(ytArgs, "--js-runtimes", "node")
+	}
+	if dir := l.Deps.FFmpegDir(); dir != "" {
+		ytArgs = append(ytArgs, "--ffmpeg-location", dir)
 	}
 	if settings.CookiesFile != "" {
 		if _, err := os.Stat(settings.CookiesFile); err == nil {

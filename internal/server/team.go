@@ -526,7 +526,52 @@ func (s *Server) handleSyncTeamEdge(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleUploadCookiesFile lets Owner upload YouTube cookies.txt directly from the browser (essential for Linux VPS IPs!).
+// convertJSONCookiesToNetscape converts a Cookie-Editor JSON array export into yt-dlp Netscape cookies.txt format.
+func convertJSONCookiesToNetscape(raw []byte) ([]byte, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, false
+	}
+	var items []struct {
+		Domain         string  `json:"domain"`
+		ExpirationDate float64 `json:"expirationDate"`
+		Path           string  `json:"path"`
+		Secure         bool    `json:"secure"`
+		Name           string  `json:"name"`
+		Value          string  `json:"value"`
+	}
+	if err := json.Unmarshal(trimmed, &items); err != nil || len(items) == 0 {
+		return nil, false
+	}
+	var sb strings.Builder
+	sb.WriteString("# Netscape HTTP Cookie File\n")
+	for _, c := range items {
+		dom := strings.TrimSpace(c.Domain)
+		if dom == "" || c.Name == "" {
+			continue
+		}
+		inc := "FALSE"
+		if strings.HasPrefix(dom, ".") {
+			inc = "TRUE"
+		}
+		p := c.Path
+		if p == "" {
+			p = "/"
+		}
+		sec := "FALSE"
+		if c.Secure {
+			sec = "TRUE"
+		}
+		exp := int64(c.ExpirationDate)
+		if exp < 0 {
+			exp = 0
+		}
+		sb.WriteString(fmt.Sprintf("%s\t%s\t%s\t%s\t%d\t%s\t%s\n", dom, inc, p, sec, exp, c.Name, c.Value))
+	}
+	return []byte(sb.String()), true
+}
+
+// handleUploadCookiesFile lets Owner upload YouTube cookies.txt (Netscape OR Cookie-Editor JSON!) directly from the browser.
 func (s *Server) handleUploadCookiesFile(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(4 << 20); err != nil {
 		writeErr(w, http.StatusBadRequest, "Gagal membaca upload cookies.txt: "+err.Error())
@@ -544,6 +589,11 @@ func (s *Server) handleUploadCookiesFile(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusBadRequest, "File cookies.txt kosong atau tidak terbaca")
 		return
 	}
+	convertedFromJSON := false
+	if netscape, ok := convertJSONCookiesToNetscape(data); ok {
+		data = netscape
+		convertedFromJSON = true
+	}
 	dest := filepath.Join(s.Store.DataDir, "cookies.txt")
 	if err := os.WriteFile(dest, data, 0o600); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -557,8 +607,9 @@ func (s *Server) handleUploadCookiesFile(w http.ResponseWriter, r *http.Request)
 	}
 	s.Broker.Log("system", "success", "YouTube cookies.txt berhasil di-upload & diaktifkan (anti-bot VPS siap!).")
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"ok":          true,
-		"cookiesFile": dest,
-		"sizeBytes":   len(data),
+		"ok":                true,
+		"cookiesFile":       dest,
+		"sizeBytes":         len(data),
+		"convertedFromJson": convertedFromJSON,
 	})
 }

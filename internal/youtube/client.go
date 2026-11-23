@@ -88,6 +88,11 @@ func (c *Client) FetchChannelVideos(ctx context.Context, channelURL string, limi
 	if _, err := exec.LookPath("node"); err == nil {
 		args = append(args, "--js-runtimes", "node")
 	}
+	if settings.CookiesFile != "" {
+		if _, err := os.Stat(settings.CookiesFile); err == nil {
+			args = append(args, "--cookies", settings.CookiesFile)
+		}
+	}
 	cmd := exec.CommandContext(ctx, ytBin, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
