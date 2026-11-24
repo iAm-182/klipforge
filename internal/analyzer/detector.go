@@ -40,6 +40,7 @@ var hypeKeywords = []string{
 	"omg", "wtf", "lmao", "lol", "bro", "bruh", "rip", "no way", "crazy", "insane", "goat",
 	"windah", "bocil", "kematian", "brando", "gta", "tamat", "panik", "kabur", "meledak",
 	"jumpscare", "setan", "hantu", "pocong", "kuntilanak", "savage", "blunder", "ngebug", "karma",
+	"clip", "klip", "potong", "bengek", "ngik", "salfok",
 	"😂", "🤣", "😭", "🔥", "💀", "😱", "🤯", "👏", "❤️",
 }
 
@@ -145,43 +146,99 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 		}
 	}
 
-	// 2. Populate Live Chat Hype grid (velocity + Indonesian/EN hype keywords + caps + SuperChat)
+	// 2. Populate Live Chat Hype grid with:
+	//    - Trailing reaction window (+4s .. +15s): viewers react & type "wkwk"/"clip" 5-15s AFTER the on-screen moment!
+	//    - Anti-spam Unique Chatter weighting: 1 chatter spamming 30x counts ~1.25x instead of 30x!
 	if hasChat {
-		rawHype := make([]float64, dur)
-		for _, msg := range in.Chats {
+		type bucketMsg struct {
+			chatterKey string
+			weight     float64
+			text       string
+		}
+		perSecMsgs := make([][]bucketMsg, dur)
+		for idx, msg := range in.Chats {
 			sec := int(math.Floor(msg.OffsetSec))
 			if sec < 0 || sec >= dur {
 				continue
 			}
 			chatCounts[sec]++
-			weight := scoreChatMessage(msg)
-			rawHype[sec] += weight
-			if weight >= 1.8 && len(chatBucketSamples[sec]) < 4 && len(msg.Text) <= 65 {
+			w := scoreChatMessage(msg)
+			key := strings.TrimSpace(msg.AuthorID)
+			if key == "" {
+				key = strings.ToLower(strings.TrimSpace(msg.Author))
+			}
+			if key == "" {
+				// Anonymous fallback (e.g. legacy synthetic fixtures without author): unique per message
+				key = fmt.Sprintf("_anon_%d", idx)
+			}
+			perSecMsgs[sec] = append(perSecMsgs[sec], bucketMsg{
+				chatterKey: key,
+				weight:     w,
+				text:       msg.Text,
+			})
+			if w >= 1.8 && len(chatBucketSamples[sec]) < 4 && len(msg.Text) <= 65 {
 				chatBucketSamples[sec] = append(chatBucketSamples[sec], msg.Text)
 			}
 		}
 
-		smoothed := make([]float64, dur)
-		win := 3
-		for i := 0; i < dur; i++ {
-			var sum, cnt float64
-			for j := i - win; j <= i+win; j++ {
-				if j >= 0 && j < dur {
-					sum += rawHype[j]
-					cnt++
-				}
-			}
-			if cnt > 0 {
-				smoothed[i] = sum / cnt
+		// Trailing reaction kernel: moment at second `i` collects reactions arriving at `i + lag` (lag = 3..15s).
+		// Peak reaction lag is 5..11s (1.0), tapering cleanly at 3..4s and 12..15s.
+		lagWeight := func(lag int) float64 {
+			switch {
+			case lag >= 5 && lag <= 11:
+				return 1.0
+			case lag == 4 || lag == 12 || lag == 13:
+				return 0.72
+			case lag == 3 || lag == 14 || lag == 15:
+				return 0.45
+			case lag >= 0 && lag <= 2:
+				return 0.30
+			default:
+				return 0
 			}
 		}
 
-		p98 := percentile(smoothed, 0.985)
+		// Detect whether timestamps span enough future seconds for trailing lag (e.g., short clips <= 15s keep lag 0..5)
+		trailingRaw := make([]float64, dur)
+		seenPerWindow := make(map[string]int, 64)
+		for i := 0; i < dur; i++ {
+			clear(seenPerWindow)
+			winEnd := i + 15
+			if winEnd >= dur {
+				winEnd = dur - 1
+			}
+			var sum float64
+			uniqueCnt := 0
+			for t := i; t <= winEnd; t++ {
+				lw := lagWeight(t - i)
+				if lw <= 0 || len(perSecMsgs[t]) == 0 {
+					continue
+				}
+				for _, bm := range perSecMsgs[t] {
+					prev := seenPerWindow[bm.chatterKey]
+					seenPerWindow[bm.chatterKey] = prev + 1
+					if prev == 0 {
+						uniqueCnt++
+						sum += bm.weight * lw
+					} else if prev == 1 {
+						// Heavy diminishing return on 2nd message from same chatter in the same window
+						sum += bm.weight * lw * 0.20
+					}
+					// 3rd+ message from same chatter in the same 15s window contributes 0 (anti-spam!)
+				}
+			}
+			// Unique chatter breadth bonus: broad audience bursts outrank narrow chatter bursts
+			if uniqueCnt > 0 {
+				trailingRaw[i] = sum * (1.0 + math.Min(0.50, float64(uniqueCnt)/30.0))
+			}
+		}
+
+		p98 := percentile(trailingRaw, 0.985)
 		if p98 <= 0 {
 			p98 = 1.0
 		}
 		for i := 0; i < dur; i++ {
-			v := smoothed[i] / p98
+			v := trailingRaw[i] / p98
 			if v > 1.0 {
 				v = 1.0
 			}
@@ -325,6 +382,11 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 			if preMean < 0.28 && peakAhead >= 0.78 {
 				score = math.Min(1.0, score+0.18)
 			}
+		}
+
+		// Visual Gag Boost: silent/low-dialogue comedy (e.g. funny on-screen sight gag) where unique chatters explode!
+		if hasChat && chatGrid[i] >= 0.65 && (!hasAudio || audioGrid[i] < 0.45) && (!hasTranscript || transcriptGrid[i] < 0.45) {
+			score = math.Min(1.0, score+0.20)
 		}
 
 		if i < skipIntro && (!hasChat || chatGrid[i] < 0.65) && (!hasAudio || audioGrid[i] < 0.70) {
@@ -552,7 +614,13 @@ func extractCandidates(
 		if vScore >= 55 {
 			reasons = append(reasons, fmt.Sprintf("Virality %.0f", vScore))
 		}
-		samples := collectChatSamples(chatSamples, pk.sec-5, pk.sec+12, 5)
+		samples := collectChatSamples(chatSamples, pk.sec+2, pk.sec+16, 5)
+		if len(samples) == 0 {
+			samples = collectChatSamples(chatSamples, pk.sec-5, pk.sec+12, 5)
+		}
+		if hasChat && maxC >= 0.65 && (!hasAudio || maxA < 0.45) && (!hasTranscript || maxT < 0.45) {
+			reasons = append(reasons, "Visual Gag (Chat Meledak)")
+		}
 		speech := collectTranscriptSnippet(transcript, float64(left), float64(right), 220)
 		chapTitle := findChapterTitle(chapters, float64(pk.sec))
 

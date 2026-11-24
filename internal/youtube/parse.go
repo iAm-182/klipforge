@@ -26,10 +26,11 @@ type HeatmapPoint struct {
 
 // ChatMessage represents a single YouTube Live Chat replay message.
 type ChatMessage struct {
-	OffsetSec  float64
-	Author     string
-	Text       string
-	IsPaid     bool // SuperChat / SuperSticker = strong hype signal
+	OffsetSec float64
+	AuthorID  string // Unique YouTube channel ID (authorExternalChannelId) for spam resistance
+	Author    string
+	Text      string
+	IsPaid    bool // SuperChat / SuperSticker = strong hype signal
 }
 
 // ExtractVideoID extracts the 11-char YouTube video ID from watch, live, shorts, or youtu.be URLs.
@@ -171,7 +172,8 @@ func ParseLiveChatFile(path string) ([]ChatMessage, error) {
 					AddChatItemAction struct {
 						Item struct {
 							LiveChatTextMessageRenderer *struct {
-								AuthorName struct {
+								AuthorExternalChannelID string `json:"authorExternalChannelId"`
+								AuthorName              struct {
 									SimpleText string `json:"simpleText"`
 								} `json:"authorName"`
 								Message struct {
@@ -184,7 +186,8 @@ func ParseLiveChatFile(path string) ([]ChatMessage, error) {
 								} `json:"message"`
 							} `json:"liveChatTextMessageRenderer"`
 							LiveChatPaidMessageRenderer *struct {
-								AuthorName struct {
+								AuthorExternalChannelID string `json:"authorExternalChannelId"`
+								AuthorName              struct {
 									SimpleText string `json:"simpleText"`
 								} `json:"authorName"`
 								Message struct {
@@ -193,6 +196,12 @@ func ParseLiveChatFile(path string) ([]ChatMessage, error) {
 									} `json:"runs"`
 								} `json:"message"`
 							} `json:"liveChatPaidMessageRenderer"`
+							LiveChatPaidStickerRenderer *struct {
+								AuthorExternalChannelID string `json:"authorExternalChannelId"`
+								AuthorName              struct {
+									SimpleText string `json:"simpleText"`
+								} `json:"authorName"`
+							} `json:"liveChatPaidStickerRenderer"`
 						} `json:"item"`
 					} `json:"addChatItemAction"`
 				} `json:"actions"`
@@ -223,6 +232,7 @@ func ParseLiveChatFile(path string) ([]ChatMessage, error) {
 				if txt != "" {
 					msgs = append(msgs, ChatMessage{
 						OffsetSec: offsetSec,
+						AuthorID:  r.AuthorExternalChannelID,
 						Author:    r.AuthorName.SimpleText,
 						Text:      txt,
 					})
@@ -235,8 +245,18 @@ func ParseLiveChatFile(path string) ([]ChatMessage, error) {
 				}
 				msgs = append(msgs, ChatMessage{
 					OffsetSec: offsetSec,
+					AuthorID:  r.AuthorExternalChannelID,
 					Author:    r.AuthorName.SimpleText,
 					Text:      strings.TrimSpace(sb.String()),
+					IsPaid:    true,
+				})
+			}
+			if r := act.AddChatItemAction.Item.LiveChatPaidStickerRenderer; r != nil {
+				msgs = append(msgs, ChatMessage{
+					OffsetSec: offsetSec,
+					AuthorID:  r.AuthorExternalChannelID,
+					Author:    r.AuthorName.SimpleText,
+					Text:      "[SuperSticker]",
 					IsPaid:    true,
 				})
 			}
