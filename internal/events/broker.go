@@ -9,16 +9,25 @@ import (
 	"klipforge/internal/model"
 )
 
-// Broker manages SSE (Server-Sent Events) subscribers for real-time dashboard updates.
+// Broker manages SSE (Server-Sent Events) subscribers for real-time dashboard updates
+// and optionally forwards activity logs into a persisted activity feed sink.
 type Broker struct {
-	mu          sync.RWMutex
-	subscribers map[chan []byte]struct{}
+	mu           sync.RWMutex
+	subscribers  map[chan []byte]struct{}
+	activitySink func(source, level, message string)
 }
 
 func NewBroker() *Broker {
 	return &Broker{
 		subscribers: make(map[chan []byte]struct{}),
 	}
+}
+
+// SetActivitySink attaches a persistence callback invoked whenever Log() emits an event.
+func (b *Broker) SetActivitySink(fn func(source, level, message string)) {
+	b.mu.Lock()
+	b.activitySink = fn
+	b.mu.Unlock()
 }
 
 func (b *Broker) Publish(eventType string, payload interface{}) {
@@ -48,6 +57,12 @@ func (b *Broker) Log(source, level, message string) {
 		"level":   level,
 		"message": message,
 	})
+	b.mu.RLock()
+	sink := b.activitySink
+	b.mu.RUnlock()
+	if sink != nil {
+		sink(source, level, message)
+	}
 }
 
 func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {

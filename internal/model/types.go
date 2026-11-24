@@ -158,12 +158,13 @@ type WordTiming struct {
 	Text  string  `json:"text"`
 }
 
-// TranscriptCue represents a single subtitle/caption line with optional word-level timings.
+// TranscriptCue represents a single subtitle/caption line with optional word-level timings & speaker diarization.
 type TranscriptCue struct {
-	Start float64      `json:"start"`
-	End   float64      `json:"end"`
-	Text  string       `json:"text"`
-	Words []WordTiming `json:"words,omitempty"`
+	Start   float64      `json:"start"`
+	End     float64      `json:"end"`
+	Text    string       `json:"text"`
+	Speaker string       `json:"speaker,omitempty"` // e.g. "SPEAKER_0" (primary streamer), "SPEAKER_1" (NPC/guest)
+	Words   []WordTiming `json:"words,omitempty"`
 }
 
 // ViralityBreakdown stores rule-based offline virality dimensions (0-100 each, no LLM required).
@@ -198,11 +199,21 @@ type ClipCandidate struct {
 	HookText          string             `json:"hookText"`      // Optional editable top headline
 	StartFrameURL     string             `json:"startFrameUrl,omitempty"`
 	PeakFrameURL      string             `json:"peakFrameUrl,omitempty"`
+	CoverFrameURL     string             `json:"coverFrameUrl,omitempty"`
 	StartFramePath    string             `json:"-"`
 	PeakFramePath     string             `json:"-"`
+	CoverFramePath    string             `json:"-"`
 	MomentType        string             `json:"momentType,omitempty"`
 	AutoEdit          *AutoEditDecision  `json:"autoEdit,omitempty"`
 	Verdict           *CandidateVerdict  `json:"verdict,omitempty"`
+	BoardColumn       string             `json:"boardColumn,omitempty"`    // kandidat, verifikasi_frame, render, review, siap_posting, diposting
+	BoardReason       string             `json:"boardReason,omitempty"`    // Last reject/move note
+	OwnerID           string             `json:"ownerId,omitempty"`
+	OwnerName         string             `json:"ownerName,omitempty"`
+	BoardUpdatedAt    *time.Time         `json:"boardUpdatedAt,omitempty"`
+	SceneSnapped      bool               `json:"sceneSnapped,omitempty"`
+	SilenceTrimmed    bool               `json:"silenceTrimmed,omitempty"`
+	SpeakerSummary    map[string]float64 `json:"speakerSummary,omitempty"` // Speaker -> speaking seconds inside candidate
 	Selected          bool               `json:"selected"`
 }
 
@@ -293,6 +304,9 @@ type RenderOptions struct {
 	UseWatermark bool            `json:"useWatermark"`
 	UseOutro     bool            `json:"useOutro"`
 	UseIntro     bool            `json:"useIntro"`
+	SilenceTrim  bool            `json:"silenceTrim,omitempty"` // Ported auto-editor dead-air trim (never trims peakSec!)
+	SceneSnap    bool            `json:"sceneSnap,omitempty"`   // Snap start/end to nearest real shot boundary
+	PickCover    bool            `json:"pickCover,omitempty"`   // Pick sharpest face-present frame near peakSec
 	Encoder      string          `json:"encoder"` // auto, libx264, h264_qsv, h264_nvenc, h264_amf
 	Preset       string          `json:"preset"`  // ultrafast, veryfast, fast, medium
 	CRF          int             `json:"crf"`     // default 20
@@ -397,6 +411,9 @@ type CompileOptions struct {
 	AudioNorm        bool             `json:"audioNorm"`
 	UseWatermark     bool             `json:"useWatermark"`
 	UseOutro         bool             `json:"useOutro"`
+	SilenceTrim      bool             `json:"silenceTrim,omitempty"`
+	SceneSnap        bool             `json:"sceneSnap,omitempty"`
+	PickCover        bool             `json:"pickCover,omitempty"`
 	Encoder          string           `json:"encoder"`
 	Preset           string           `json:"preset"`
 	CRF              int              `json:"crf"`
@@ -435,41 +452,161 @@ type PostEditOptions struct {
 	Watermark     *WatermarkConfig `json:"watermark,omitempty"` // Optional manual drag-and-drop watermark placement!
 }
 
+// PublishChecklist tracks the 4 mandatory MotionKlip SOP checks before a clip is Siap Posting.
+type PublishChecklist struct {
+	WatermarkOK      bool     `json:"watermarkOk"`
+	OutroCleanOK     bool     `json:"outroCleanOk"`
+	ForbiddenCleanOK bool     `json:"forbiddenCleanOk"`
+	CreditHashtagsOK bool     `json:"creditHashtagsOk"`
+	ReadyToPost      bool     `json:"readyToPost"`
+	Missing          []string `json:"missing,omitempty"`
+}
+
+// TikTokVariant stores TikTok-formatted caption & hashtags.
+type TikTokVariant struct {
+	Caption    string `json:"caption"`
+	Hashtags   string `json:"hashtags"`
+	CreditLine string `json:"creditLine,omitempty"`
+}
+
+// ShortsVariant stores YouTube Shorts title (<=100 chars) & description.
+type ShortsVariant struct {
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Hashtags    string `json:"hashtags"`
+}
+
+// ReelsVariant stores Instagram Reels caption & cover frame URL.
+type ReelsVariant struct {
+	Caption  string `json:"caption"`
+	Hashtags string `json:"hashtags"`
+	CoverURL string `json:"coverUrl,omitempty"`
+}
+
+// PublishKit bundles per-platform publishing copy + SOP compliance checklist for an approved clip.
+type PublishKit struct {
+	TikTok      TikTokVariant    `json:"tiktok"`
+	Shorts      ShortsVariant    `json:"shorts"`
+	Reels       ReelsVariant     `json:"reels"`
+	Checklist   PublishChecklist `json:"checklist"`
+	GeneratedAt time.Time        `json:"generatedAt"`
+}
+
+// PublishRecord tracks an individual platform publish attempt (sau sidecar, YouTube API v3, or Instagram Graph API).
+type PublishRecord struct {
+	Platform      string     `json:"platform"` // tiktok, youtube, instagram
+	Method        string     `json:"method"`   // sau_sidecar, youtube_api, instagram_api
+	AccountName   string     `json:"accountName,omitempty"`
+	Status        string     `json:"status"` // queued, publishing, published, error
+	PublishedURL  string     `json:"publishedUrl,omitempty"`
+	RemoteVideoID string     `json:"remoteVideoId,omitempty"`
+	ScheduledAt   *time.Time `json:"scheduledAt,omitempty"`
+	Error         string     `json:"error,omitempty"`
+	UpdatedAt     time.Time  `json:"updatedAt"`
+}
+
+// AnalyticsSnapshot stores collected post-publish performance stats (YouTube Analytics / videos.list first).
+type AnalyticsSnapshot struct {
+	Platform  string    `json:"platform"`
+	VideoID   string    `json:"videoId"`
+	Views     int64     `json:"views"`
+	Likes     int64     `json:"likes"`
+	Comments  int64     `json:"comments"`
+	FetchedAt time.Time `json:"fetchedAt"`
+}
+
+// JianyingDraftInfo describes an exported CapCut / Jianying desktop draft bundle.
+type JianyingDraftInfo struct {
+	FileName      string    `json:"fileName"`
+	FilePath      string    `json:"-"`
+	DownloadURL   string    `json:"downloadUrl"`
+	SchemaVersion string    `json:"schemaVersion"`
+	TrackCount    int       `json:"trackCount"`
+	SegmentCount  int       `json:"segmentCount"`
+	DurationUS    int64     `json:"durationUs"`
+	GeneratedAt   time.Time `json:"generatedAt"`
+}
+
+// ActivityEntry is one persisted line in the team activity feed (data/activity.jsonl).
+type ActivityEntry struct {
+	ID         string    `json:"id"`
+	Timestamp  time.Time `json:"timestamp"`
+	ActorID    string    `json:"actorId,omitempty"`
+	ActorName  string    `json:"actorName,omitempty"`
+	ActorVia   string    `json:"actorVia,omitempty"` // web, agent, system
+	Action     string    `json:"action"`             // render_queued, render_done, review_approved, review_rejected, board_move, publish_kit, published, draft_export, audio_import, diarize, scene_detect
+	TargetType string    `json:"targetType,omitempty"`
+	TargetID   string    `json:"targetId,omitempty"`
+	Summary    string    `json:"summary"`
+	Detail     string    `json:"detail,omitempty"`
+	Level      string    `json:"level,omitempty"` // info, success, warn, error
+}
+
+// PublishAccount stores per-team-account OAuth / session metadata for publishing (owner-managed).
+type PublishAccount struct {
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Platform     string    `json:"platform"` // youtube, instagram, tiktok_sau
+	ChannelTitle string    `json:"channelTitle,omitempty"`
+	ClientID     string    `json:"clientId,omitempty"`
+	ClientSecret string    `json:"clientSecret,omitempty"`
+	RefreshToken string    `json:"refreshToken,omitempty"` // YouTube OAuth refresh token
+	AccessToken  string    `json:"accessToken,omitempty"`  // Instagram Graph API token
+	IGUserID     string    `json:"igUserId,omitempty"`
+	PageID       string    `json:"pageId,omitempty"`
+	SAUAccount   string    `json:"sauAccount,omitempty"` // social-auto-upload session name
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
 // RenderJob tracks a queued, running, completed, or failed clip render.
 type RenderJob struct {
-	ID            string           `json:"id"`
-	JobType       string           `json:"jobType,omitempty"` // "" / "single", "compilation", or "post_edit"
-	ProjectID     string           `json:"projectId"`
-	ProjectTitle  string           `json:"projectTitle"`
-	CampaignID    string           `json:"campaignId"`
-	CampaignName  string           `json:"campaignName"`
-	Title         string           `json:"title"`
-	Options       RenderOptions    `json:"options"`
-	CompileOpts   *CompileOptions  `json:"compileOpts,omitempty"`
-	PostEditOpts  *PostEditOptions `json:"postEditOpts,omitempty"`
-	AppliedPlan   *AppliedEditPlan `json:"appliedPlan,omitempty"`
-	AutoEdit      *AutoEditDecision `json:"autoEdit,omitempty"`
-	Status        string          `json:"status"`        // queued, downloading, rendering, done, error, canceled
-	Stage         string          `json:"stage"`         // human readable stage
-	Progress      float64         `json:"progress"`      // 0 - 100
-	Speed         string          `json:"speed"`         // e.g. "2.4x"
-	OutputPath    string          `json:"outputPath"`
-	OutputFile    string          `json:"outputFile"`
-	FileSizeBytes int64           `json:"fileSizeBytes"`
-	FinalDuration float64         `json:"finalDuration"`
-	PostCaption   string          `json:"postCaption"`
-	HashtagLine   string          `json:"hashtagLine"`
-	Compliance    ComplianceCheck `json:"compliance"`
-	ReviewStatus  string          `json:"reviewStatus"` // "", "pending_review", "approved", "rejected"
-	ReviewNote    string          `json:"reviewNote,omitempty"`
-	ReviewedBy    string          `json:"reviewedBy,omitempty"`
-	CreatedByID   string          `json:"createdById,omitempty"`
-	CreatedBy     string          `json:"createdBy,omitempty"`
-	CreatedVia    string          `json:"createdVia,omitempty"` // "web", "agent", "autopilot"
-	AutopilotID   string          `json:"autopilotId,omitempty"`
-	Error         string          `json:"error,omitempty"`
-	CreatedAt     time.Time       `json:"createdAt"`
-	CompletedAt   *time.Time      `json:"completedAt,omitempty"`
+	ID             string             `json:"id"`
+	JobType        string             `json:"jobType,omitempty"` // "" / "single", "compilation", "post_edit", or "publish"
+	ProjectID      string             `json:"projectId"`
+	ProjectTitle   string             `json:"projectTitle"`
+	CampaignID     string             `json:"campaignId"`
+	CampaignName   string             `json:"campaignName"`
+	Title          string             `json:"title"`
+	Options        RenderOptions      `json:"options"`
+	CompileOpts    *CompileOptions    `json:"compileOpts,omitempty"`
+	PostEditOpts   *PostEditOptions   `json:"postEditOpts,omitempty"`
+	AppliedPlan    *AppliedEditPlan   `json:"appliedPlan,omitempty"`
+	AutoEdit       *AutoEditDecision  `json:"autoEdit,omitempty"`
+	Status         string             `json:"status"`        // queued, downloading, rendering, done, error, canceled
+	Stage          string             `json:"stage"`         // human readable stage
+	Progress       float64            `json:"progress"`      // 0 - 100
+	Speed          string             `json:"speed"`         // e.g. "2.4x"
+	WorkerID       int                `json:"workerId,omitempty"`
+	StartedAt      *time.Time         `json:"startedAt,omitempty"`
+	OutputPath     string             `json:"outputPath"`
+	OutputFile     string             `json:"outputFile"`
+	FileSizeBytes  int64              `json:"fileSizeBytes"`
+	FinalDuration  float64            `json:"finalDuration"`
+	PeekFramePath  string             `json:"-"`
+	PeekFrameURL   string             `json:"peekFrameUrl,omitempty"`
+	CoverFramePath string             `json:"-"`
+	CoverFrameURL  string             `json:"coverFrameUrl,omitempty"`
+	PostCaption    string             `json:"postCaption"`
+	HashtagLine    string             `json:"hashtagLine"`
+	PublishKit     *PublishKit        `json:"publishKit,omitempty"`
+	PublishRecords []PublishRecord    `json:"publishRecords,omitempty"`
+	Analytics      *AnalyticsSnapshot `json:"analytics,omitempty"`
+	Draft          *JianyingDraftInfo `json:"draft,omitempty"`
+	Compliance     ComplianceCheck    `json:"compliance"`
+	ReviewStatus   string             `json:"reviewStatus"` // "", "pending_review", "approved", "rejected"
+	ReviewNote     string             `json:"reviewNote,omitempty"`
+	RejectReason   string             `json:"rejectReason,omitempty"`
+	ReviewedBy     string             `json:"reviewedBy,omitempty"`
+	ReviewedAt     *time.Time         `json:"reviewedAt,omitempty"`
+	BoardColumn    string             `json:"boardColumn,omitempty"` // kandidat, verifikasi_frame, render, review, siap_posting, diposting
+	CreatedByID    string             `json:"createdById,omitempty"`
+	CreatedBy      string             `json:"createdBy,omitempty"`
+	CreatedVia     string             `json:"createdVia,omitempty"` // "web", "agent", "autopilot"
+	AutopilotID    string             `json:"autopilotId,omitempty"`
+	Error          string             `json:"error,omitempty"`
+	CreatedAt      time.Time          `json:"createdAt"`
+	CompletedAt    *time.Time         `json:"completedAt,omitempty"`
 }
 
 // JobSummary is a compact, truncation-proof representation returned by GET /api/jobs?summary=1.
@@ -559,9 +696,13 @@ type AppSettings struct {
 	DownloadQuality     string  `json:"downloadQuality"`     // 1080p, 720p, best
 	OutputDir           string  `json:"outputDir"`           // Default E:\klipforge\outputs
 	NotifyWebhookURL    string  `json:"notifyWebhookUrl"`    // Optional Discord/n8n webhook for render done/fail & engine up/down
-	MinFreeDiskGB              float64 `json:"minFreeDiskGb"`                        // Block new renders below this free GB threshold (default 2.0)
-	OutputRetentionDays        int     `json:"outputRetentionDays"`                  // Optional cleanup threshold in days (0 = manual)
-	DisableAgentTrendingImport bool    `json:"disableAgentTrendingImport,omitempty"` // Owner toggle to block agent trending audio imports (default false = enabled)
+	MinFreeDiskGB              float64    `json:"minFreeDiskGb"`                        // Block new renders below this free GB threshold (default 2.0)
+	OutputRetentionDays        int        `json:"outputRetentionDays"`                  // Optional cleanup threshold in days (0 = manual)
+	DisableAgentTrendingImport bool       `json:"disableAgentTrendingImport,omitempty"` // Owner toggle to block agent trending audio imports (default false = enabled)
+	CooldownUntil              *time.Time `json:"cooldownUntil,omitempty"`              // Optional engine cooldown timestamp for live status strip countdown
+	SAUPath                    string     `json:"sauPath,omitempty"`                    // Path to social-auto-upload (sau) CLI sidecar
+	SherpaURL                  string     `json:"sherpaUrl,omitempty"`                  // Optional sherpa-onnx-server URL (default http://127.0.0.1:8790)
+	SceneDetectBin             string     `json:"sceneDetectBin,omitempty"`             // Optional PySceneDetect CLI path
 }
 
 // DiskStats summarizes available storage & KlipForge disk usage.

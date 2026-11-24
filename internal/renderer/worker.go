@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -551,6 +552,19 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 	outPath := filepath.Join(outDir, fileName)
 
 	wp.updateJob(job, "rendering", "Rendering FFmpeg (FX + BGM/SFX + Watermark + Outro)...", 40, "")
+	nowStart := time.Now()
+	job.WorkerID = workerID
+	if job.StartedAt == nil {
+		job.StartedAt = &nowStart
+	}
+	job.BoardColumn = "render"
+	_ = wp.Store.SaveJob(job)
+	wp.Broker.Publish("job_update", job)
+
+	peekCtx, stopPeek := context.WithCancel(ctx)
+	go wp.runPeekLoop(peekCtx, job, sourcePath, seekStart, clipDur)
+	defer stopPeek()
+
 	wp.Broker.Log("worker", "info", fmt.Sprintf("[W%d] Rendering %s (BGM:%v, SFX:%d, Color:%s, Motion:%s)",
 		workerID, fileName, bgmPath != "", len(resolvedSFX), opts.VideoFX.ColorPreset, opts.VideoFX.MotionPreset))
 
@@ -608,6 +622,13 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 	job.FileSizeBytes = size
 	job.FinalDuration = info.Duration
 	job.CompletedAt = &now
+	if job.ReviewStatus == "" {
+		job.ReviewStatus = "pending_review"
+	}
+	if job.BoardColumn == "" || job.BoardColumn == "render" || job.BoardColumn == "kandidat" {
+		job.BoardColumn = "review"
+	}
+	wp.grabPeekFrameOnce(ctx, job, outPath, math.Max(0.5, info.Duration*0.35))
 	job.Compliance = evaluateCompliance(opts, camp)
 	_ = wp.Store.SaveJob(job)
 	wp.Broker.Publish("job_update", job)
@@ -822,6 +843,20 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 	fileName := fmt.Sprintf("%s_%s_%s.mp4", filePrefix, sanitizeFilename(job.Title), job.ID[len(job.ID)-5:])
 	outPath := filepath.Join(outDir, fileName)
 
+	nowStart := time.Now()
+	job.WorkerID = workerID
+	if job.StartedAt == nil {
+		job.StartedAt = &nowStart
+	}
+	job.BoardColumn = "render"
+	_ = wp.Store.SaveJob(job)
+	wp.Broker.Publish("job_update", job)
+	if len(resolved) > 0 {
+		peekCtx, stopPeek := context.WithCancel(ctx)
+		go wp.runPeekLoop(peekCtx, job, resolved[0].SourcePath, resolved[0].SeekStart, resolved[0].ClipDuration)
+		defer stopPeek()
+	}
+
 	wp.Broker.Log("worker", "info", fmt.Sprintf("[W%d] Rendering Kompilasi %s (%d klip)", workerID, fileName, total))
 	depSt := wp.Deps.GetStatus()
 	info, err := RenderCompilation(ctx, CompileInput{
@@ -870,12 +905,22 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 	now := time.Now()
 	job.Status = "done"
 	job.Stage = fmt.Sprintf("Kompilasi Top-%d selesai & siap upload!", total)
+	if opts.Mode == "edit_script" {
+		job.Stage = fmt.Sprintf("Edit-Script (%d segmen) selesai & siap upload!", total)
+	}
 	job.Progress = 100
 	job.OutputPath = outPath
 	job.OutputFile = fileName
 	job.FileSizeBytes = size
 	job.FinalDuration = info.Duration
 	job.CompletedAt = &now
+	if job.ReviewStatus == "" {
+		job.ReviewStatus = "pending_review"
+	}
+	if job.BoardColumn == "" || job.BoardColumn == "render" || job.BoardColumn == "kandidat" {
+		job.BoardColumn = "review"
+	}
+	wp.grabPeekFrameOnce(ctx, job, outPath, math.Max(0.5, info.Duration*0.30))
 	_ = wp.Store.SaveJob(job)
 	wp.Broker.Publish("job_update", job)
 	wp.Broker.Log("worker", "success", fmt.Sprintf("Kompilasi selesai: %s (%.1fs, %.2f MB)", fileName, info.Duration, float64(size)/(1024*1024)))
@@ -1096,6 +1141,101 @@ func (wp *WorkerPool) resolveSFXCues(cfg model.AudioFXConfig, peakOffset, clipDu
 		})
 	}
 	return out
+}
+
+func (wp *WorkerPool) PeekFramePath(jobID string) string {
+	dir := filepath.Join(wp.Store.DataDir, "peeks")
+	_ = os.MkdirAll(dir, 0o755)
+	return filepath.Join(dir, sanitizeFilename(jobID)+".jpg")
+}
+
+func (wp *WorkerPool) grabPeekFrameOnce(ctx context.Context, job *model.RenderJob, mediaPath string, seekSec float64) bool {
+	if job == nil || mediaPath == "" || !fileExists(mediaPath) {
+		return false
+	}
+	ff := wp.Deps.GetStatus().FFmpegPath
+	if ff == "" {
+		return false
+	}
+	if seekSec < 0 {
+		seekSec = 0
+	}
+	dest := wp.PeekFramePath(job.ID)
+	tmp := dest + ".tmp.jpg"
+	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	args := []string{
+		"-y", "-hide_banner", "-loglevel", "error",
+		"-ss", fmt.Sprintf("%.2f", seekSec),
+		"-i", mediaPath,
+		"-frames:v", "1",
+		"-vf", "scale=360:-2",
+		"-q:v", "4",
+		tmp,
+	}
+	if err := exec.CommandContext(cctx, ff, args...).Run(); err != nil {
+		_ = os.Remove(tmp)
+		return false
+	}
+	if fi, err := os.Stat(tmp); err != nil || fi.Size() < 256 {
+		_ = os.Remove(tmp)
+		return false
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		_ = os.Remove(tmp)
+		return false
+	}
+	job.PeekFramePath = dest
+	job.PeekFrameURL = fmt.Sprintf("/api/jobs/%s/peek", job.ID)
+	return true
+}
+
+// runPeekLoop grabs a mid-render still frame immediately (3s) and every 30s while FFmpeg encodes,
+// so the Beranda "Sedang render" panel can show a live current-frame peek thumbnail!
+func (wp *WorkerPool) runPeekLoop(ctx context.Context, job *model.RenderJob, sourcePath string, seekStart, clipDur float64) {
+	if sourcePath == "" || !fileExists(sourcePath) {
+		return
+	}
+	grab := func(frac float64) {
+		if frac < 0.05 {
+			frac = 0.05
+		}
+		if frac > 0.92 {
+			frac = 0.92
+		}
+		at := seekStart + clipDur*frac
+		if wp.grabPeekFrameOnce(ctx, job, sourcePath, at) {
+			if latest, ok := wp.Store.GetJob(job.ID); ok {
+				latest.PeekFramePath = job.PeekFramePath
+				latest.PeekFrameURL = job.PeekFrameURL
+				_ = wp.Store.SaveJob(latest)
+				wp.Broker.Publish("job_update", latest)
+			}
+		}
+	}
+
+	// Quick initial peek so UI doesn't wait 30s for the first thumbnail
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(3 * time.Second):
+		grab(0.15)
+	}
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			frac := 0.5
+			if latest, ok := wp.Store.GetJob(job.ID); ok && latest.Progress > 0 {
+				frac = latest.Progress / 100.0
+			}
+			grab(frac)
+		}
+	}
 }
 
 func (wp *WorkerPool) updateJob(job *model.RenderJob, status, stage string, progress float64, speed string) {

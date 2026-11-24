@@ -28,7 +28,9 @@ type Store struct {
 	jobs            map[string]*model.RenderJob
 	autopilots      map[string]*model.AutopilotRule
 	team            map[string]*model.TeamMember
+	publishAccounts map[string]*model.PublishAccount
 	agentTrendQuota map[string]int
+	activity        []model.ActivityEntry
 	settings        model.AppSettings
 }
 
@@ -54,6 +56,7 @@ func NewStore(baseDir string) (*Store, error) {
 		jobs:            make(map[string]*model.RenderJob),
 		autopilots:      make(map[string]*model.AutopilotRule),
 		team:            make(map[string]*model.TeamMember),
+		publishAccounts: make(map[string]*model.PublishAccount),
 		agentTrendQuota: make(map[string]int),
 		settings: model.AppSettings{
 			MaxWorkers:      2,
@@ -194,6 +197,19 @@ func (s *Store) loadAll() {
 			}
 		}
 	}
+
+	// Load publish accounts (YouTube OAuth / Instagram Graph / SAU sessions)
+	var accs []*model.PublishAccount
+	if readJSONWithBackupFallback(filepath.Join(s.DataDir, "publish_accounts.json"), &accs) {
+		for _, a := range accs {
+			if a.ID != "" {
+				s.publishAccounts[a.ID] = a
+			}
+		}
+	}
+
+	// Load persisted activity feed
+	s.loadActivity()
 }
 
 func (s *Store) ensureDefaultAutopilots() {
@@ -919,4 +935,90 @@ func (s *Store) IncrementAgentTrendImportsToday(memberID string) int {
 	}
 	_ = writeJSONAtomic(filepath.Join(s.DataDir, "agent_trending_quota.json"), s.agentTrendQuota)
 	return count
+}
+
+// --- Publish Accounts CRUD (Owner-managed OAuth / sidecar session configs) ---
+
+func (s *Store) savePublishAccountsLocked() error {
+	list := make([]*model.PublishAccount, 0, len(s.publishAccounts))
+	for _, a := range s.publishAccounts {
+		list = append(list, a)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].CreatedAt.Before(list[j].CreatedAt)
+	})
+	p := filepath.Join(s.DataDir, "publish_accounts.json")
+	b, err := json.MarshalIndent(list, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
+}
+
+func (s *Store) ListPublishAccounts() []*model.PublishAccount {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	list := make([]*model.PublishAccount, 0, len(s.publishAccounts))
+	for _, a := range s.publishAccounts {
+		cp := *a
+		list = append(list, &cp)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].CreatedAt.Before(list[j].CreatedAt)
+	})
+	return list
+}
+
+func (s *Store) GetPublishAccount(id string) (*model.PublishAccount, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	a, ok := s.publishAccounts[id]
+	if !ok {
+		return nil, false
+	}
+	cp := *a
+	return &cp, true
+}
+
+func (s *Store) FindPublishAccountByPlatform(platform, nameOrID string) (*model.PublishAccount, bool) {
+	plat := strings.ToLower(strings.TrimSpace(platform))
+	target := strings.TrimSpace(nameOrID)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, a := range s.publishAccounts {
+		if strings.ToLower(a.Platform) != plat {
+			continue
+		}
+		if target == "" || a.ID == target || strings.EqualFold(a.Name, target) {
+			cp := *a
+			return &cp, true
+		}
+	}
+	return nil, false
+}
+
+func (s *Store) SavePublishAccount(a *model.PublishAccount) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	if ex, ok := s.publishAccounts[a.ID]; ok {
+		a.CreatedAt = ex.CreatedAt
+	} else if a.CreatedAt.IsZero() {
+		a.CreatedAt = now
+	}
+	a.UpdatedAt = now
+	cp := *a
+	s.publishAccounts[a.ID] = &cp
+	return s.savePublishAccountsLocked()
+}
+
+func (s *Store) DeletePublishAccount(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.publishAccounts, id)
+	return s.savePublishAccountsLocked()
 }
