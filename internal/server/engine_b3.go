@@ -11,6 +11,7 @@ import (
 	"klipforge/internal/analyzer"
 	"klipforge/internal/draft"
 	"klipforge/internal/model"
+	"klipforge/internal/renderer"
 	"klipforge/internal/youtube"
 )
 
@@ -272,5 +273,58 @@ func (s *Server) handleDiarizeProject(w http.ResponseWriter, r *http.Request) {
 			"model":    analyzer.VerifiedIndonesianTTSModel,
 			"url":      analyzer.VerifiedIndonesianTTSURL,
 		},
+	})
+}
+
+// handleDetectProjectFacecam auto-detects streamer webcam coordinates (edge/corner YuNet/OpenCV scan
+// over local video frames or preview thumbnail in Audio-First mode) and saves them on the Project.
+func (s *Server) handleDetectProjectFacecam(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	proj, ok := s.Store.GetProject(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "Project tidak ditemukan")
+		return
+	}
+
+	videoPath := ""
+	if proj.LocalVideoPath != "" && pathExists(proj.LocalVideoPath) {
+		videoPath = proj.LocalVideoPath
+	}
+	previewPath := ""
+	if proj.PreviewFrame != "" && pathExists(proj.PreviewFrame) {
+		previewPath = proj.PreviewFrame
+	} else {
+		cand := filepath.Join(s.Store.ProjectDir(proj.ID), "preview.jpg")
+		if pathExists(cand) {
+			previewPath = cand
+		}
+	}
+
+	res, err := renderer.DetectProjectFacecam(r.Context(), videoPath, previewPath, proj.DurationSec)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	boxCopy := res.FacecamBox
+	proj.FacecamBox = &boxCopy
+	proj.FacecamCorner = res.Corner
+	_ = s.Store.SaveProject(proj)
+	s.Broker.Publish("project_update", proj)
+
+	p := getPrincipal(r)
+	s.recordActivity(p, "facecam_detect", "project", proj.ID,
+		fmt.Sprintf("%s mendeteksi area facecam (%s, %s) untuk %s", p.Name, res.Corner, res.Engine, proj.Title),
+		fmt.Sprintf("found=%v samples=%d", res.Found, res.SampleCount), "info")
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok":          true,
+		"projectId":   proj.ID,
+		"found":       res.Found,
+		"corner":      res.Corner,
+		"facecamBox":  res.FacecamBox,
+		"gameplayBox": res.GameplayBox,
+		"sampleCount": res.SampleCount,
+		"engine":      res.Engine,
 	})
 }

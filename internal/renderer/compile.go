@@ -47,6 +47,7 @@ type CompileInput struct {
 	Layout         model.LayoutConfig
 	Subtitles      model.SubtitleStyle
 	AudioNorm      bool
+	VocalEnhance   bool
 	VideoFX        model.VideoFXConfig
 	BGMPath        string  // Optional global compilation BGM
 	BGMVolume      float64 // Default 0.18
@@ -172,6 +173,7 @@ func RenderCompilation(ctx context.Context, in CompileInput) (MediaInfo, error) 
 			SubtitleFile:    segASS,
 			HookText:        "", // Handled cleanly inside segASS
 			AudioNorm:       in.AudioNorm,
+			VocalEnhance:    in.VocalEnhance,
 			VideoFX:         vfx,
 			SpeedRamp:       segRamp,
 			ZoomPunch:       seg.Zoom,

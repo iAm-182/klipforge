@@ -100,6 +100,7 @@ type RenderInput struct {
 	SubtitleFile string // Generated .ass path (empty if none)
 	HookText     string
 	AudioNorm       bool
+	VocalEnhance    bool             // Broadcast voice mastering chain (highpass 80Hz + 3:1 comp + 3kHz boost)
 	VideoFX         model.VideoFXConfig
 	SpeedRamp       *model.SpeedRamp // Optional per-segment speed ramp (e.g. 1.0x -> 0.5x slow-mo!)
 	ZoomPunch       *model.ZoomPunch // Optional per-segment zoom punch-in
@@ -377,6 +378,9 @@ func RenderClip(ctx context.Context, in RenderInput) (MediaInfo, error) {
 				activeRamp.AtSec, activeRamp.FromSpeed,
 				activeRamp.AtSec, rawMainDur, activeRamp.ToSpeed,
 			)
+			if in.VocalEnhance {
+				aChain += ",highpass=f=80,acompressor=threshold=-18dB:ratio=3:attack=10:release=120,equalizer=f=3000:t=q:w=1.2:g=2.5"
+			}
 			if in.AudioNorm {
 				aChain += ",loudnorm=I=-14:TP=-1.5:LRA=11"
 			}
@@ -386,6 +390,9 @@ func RenderClip(ctx context.Context, in RenderInput) (MediaInfo, error) {
 			voiceChain := "[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
 			if math.Abs(speed-1.0) > 0.005 {
 				voiceChain += fmt.Sprintf(",atempo=%.4f", speed)
+			}
+			if in.VocalEnhance {
+				voiceChain += ",highpass=f=80,acompressor=threshold=-18dB:ratio=3:attack=10:release=120,equalizer=f=3000:t=q:w=1.2:g=2.5"
 			}
 			if in.AudioNorm {
 				voiceChain += ",loudnorm=I=-14:TP=-1.5:LRA=11"

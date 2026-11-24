@@ -620,6 +620,8 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 	wp.Broker.Log("worker", "info", fmt.Sprintf("[W%d] Rendering %s (BGM:%v, SFX:%d, Color:%s, Motion:%s)",
 		workerID, fileName, bgmPath != "", len(resolvedSFX), opts.VideoFX.ColorPreset, opts.VideoFX.MotionPreset))
 
+	applyProjectFacecamDefault(&opts.Layout, proj)
+
 	depSt := wp.Deps.GetStatus()
 	info, err := RenderClip(ctx, RenderInput{
 		FFmpegPath:   depSt.FFmpegPath,
@@ -634,6 +636,7 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 		SubtitleFile: subASS,
 		HookText:     opts.HookText,
 		AudioNorm:    opts.AudioNorm,
+		VocalEnhance: opts.AudioFX.VocalEnhance,
 		VideoFX:      opts.VideoFX,
 		BGMPath:      bgmPath,
 		BGMVolume:    opts.AudioFX.BGMVolume,
@@ -918,6 +921,12 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 		defer stopPeek()
 	}
 
+	if len(opts.Segments) > 0 {
+		if firstProj, ok := wp.Store.GetProject(opts.Segments[0].ProjectID); ok {
+			applyProjectFacecamDefault(&opts.Layout, firstProj)
+		}
+	}
+
 	wp.Broker.Log("worker", "info", fmt.Sprintf("[W%d] Rendering Kompilasi %s (%d klip)", workerID, fileName, total))
 	depSt := wp.Deps.GetStatus()
 	info, err := RenderCompilation(ctx, CompileInput{
@@ -932,6 +941,7 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 		Layout:         opts.Layout,
 		Subtitles:      opts.Subtitles,
 		AudioNorm:      opts.AudioNorm,
+		VocalEnhance:   opts.AudioFX.VocalEnhance,
 		VideoFX:        opts.VideoFX,
 		BGMPath:        globalBGMPath,
 		BGMVolume:      opts.AudioFX.BGMVolume,

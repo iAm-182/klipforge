@@ -291,15 +291,10 @@ func buildSubtitleEventLines(
 			if len(toks) == 0 || ce <= cs+0.05 {
 				continue
 			}
-			step := (ce - cs) / float64(len(toks))
-			for idx, tok := range toks {
+			for _, wt := range distributeWordTimings(toks, cs, ce) {
 				allWords = append(allWords, styledWord{
-					WordTiming: model.WordTiming{
-						Start: cs + float64(idx)*step,
-						End:   cs + float64(idx+1)*step,
-						Text:  tok,
-					},
-					Speaker: cue.Speaker,
+					WordTiming: wt,
+					Speaker:    cue.Speaker,
 				})
 			}
 		}
@@ -422,4 +417,71 @@ func formatASSTime(sec float64) string {
 	s := (totalCs % 6000) / 100
 	cs := totalCs % 100
 	return fmt.Sprintf("%d:%02d:%02d.%02d", h, m, s, cs)
+}
+
+// distributeWordTimings splits [startSec, endSec] across words proportionally by character/vowel syllable
+// complexity and punctuation pause weight so karaoke sweeps track natural Indonesian/English speech cadence.
+func distributeWordTimings(toks []string, startSec, endSec float64) []model.WordTiming {
+	n := len(toks)
+	if n == 0 || endSec <= startSec {
+		return nil
+	}
+	weights := make([]float64, n)
+	totalW := 0.0
+	for i, tok := range toks {
+		letters := 0
+		vowels := 0
+		for _, r := range strings.ToLower(tok) {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) {
+				letters++
+				switch r {
+				case 'a', 'e', 'i', 'o', 'u':
+					vowels++
+				}
+			}
+		}
+		if letters == 0 {
+			letters = 1
+		}
+		w := 1.0 + float64(letters)*0.45 + float64(vowels)*0.55
+		trimmed := strings.TrimSpace(tok)
+		if strings.HasSuffix(trimmed, ".") || strings.HasSuffix(trimmed, "!") || strings.HasSuffix(trimmed, "?") {
+			w += 1.25
+		} else if strings.HasSuffix(trimmed, ",") || strings.HasSuffix(trimmed, ";") || strings.HasSuffix(trimmed, ":") {
+			w += 0.65
+		}
+		weights[i] = w
+		totalW += w
+	}
+	if totalW <= 0 {
+		totalW = float64(n)
+	}
+
+	out := make([]model.WordTiming, 0, n)
+	cur := startSec
+	span := endSec - startSec
+	for i, tok := range toks {
+		var nxt float64
+		if i == n-1 {
+			nxt = endSec
+		} else {
+			nxt = cur + span*(weights[i]/totalW)
+			if nxt < cur+0.02 {
+				nxt = cur + 0.02
+			}
+			if nxt > endSec {
+				nxt = endSec
+			}
+		}
+		if nxt <= cur {
+			nxt = cur + 0.02
+		}
+		out = append(out, model.WordTiming{
+			Start: cur,
+			End:   nxt,
+			Text:  tok,
+		})
+		cur = nxt
+	}
+	return out
 }

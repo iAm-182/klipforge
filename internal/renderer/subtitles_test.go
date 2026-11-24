@@ -100,3 +100,27 @@ func TestGenerateASS_KaraokeWordTimingsAndPunchZoom(t *testing.T) {
 		}
 	}
 }
+
+func TestDistributeWordTimings_SyllableAndPunctuationWeighted(t *testing.T) {
+	wt := distributeWordTimings([]string{"eh", "astaghfirullah,", "nabrak!"}, 10.0, 14.0)
+	if len(wt) != 3 {
+		t.Fatalf("expected 3 word timings, got %d", len(wt))
+	}
+	if wt[0].Start != 10.0 || wt[2].End != 14.0 {
+		t.Fatalf("expected span [10.0, 14.0], got [%.3f, %.3f]", wt[0].Start, wt[2].End)
+	}
+	d0 := wt[0].End - wt[0].Start
+	d1 := wt[1].End - wt[1].Start
+	d2 := wt[2].End - wt[2].Start
+	if !(d1 > d0*1.8) {
+		t.Fatalf("expected long word 'astaghfirullah,' (%.3fs) to take meaningfully longer than short 'eh' (%.3fs)", d1, d0)
+	}
+	if !(d2 > d0) {
+		t.Fatalf("expected punctuated 'nabrak!' (%.3fs) > 'eh' (%.3fs)", d2, d0)
+	}
+	for i := 1; i < len(wt); i++ {
+		if wt[i].Start < wt[i-1].End-1e-9 || wt[i].End <= wt[i].Start {
+			t.Fatalf("non-monotonic word timings: %+v", wt)
+		}
+	}
+}

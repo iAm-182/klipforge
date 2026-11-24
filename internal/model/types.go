@@ -79,11 +79,12 @@ type SFXCue struct {
 
 // AudioFXConfig defines Backsound (BGM), ReaCut-style Auto-Ducking, and Sound Effects (SFX).
 type AudioFXConfig struct {
-	BGMAssetID    string   `json:"bgmAssetId"`    // Empty = no BGM
-	BGMVolume     float64  `json:"bgmVolume"`     // 0.05 - 0.80 (default 0.18)
-	AutoDuck      bool     `json:"autoDuck"`      // Automatically lower BGM when streamer speaks (ReaCut-style)
-	SFXAutoPreset string   `json:"sfxAutoPreset"` // none, meme_punch, hype_epic, kaget_alert, custom
-	SFXCues       []SFXCue `json:"sfxCues"`       // Used when SFXAutoPreset == "custom" (or additional cues)
+	BGMAssetID    string   `json:"bgmAssetId"`             // Empty = no BGM
+	BGMVolume     float64  `json:"bgmVolume"`              // 0.05 - 0.80 (default 0.18)
+	AutoDuck      bool     `json:"autoDuck"`               // Automatically lower BGM when streamer speaks (ReaCut-style)
+	VocalEnhance  bool     `json:"vocalEnhance,omitempty"` // Broadcast vocal chain (highpass 80Hz + 3:1 compressor + 3kHz presence)
+	SFXAutoPreset string   `json:"sfxAutoPreset"`          // none, meme_punch, hype_epic, kaget_alert, custom
+	SFXCues       []SFXCue `json:"sfxCues"`                // Used when SFXAutoPreset == "custom" (or additional cues)
 }
 
 // VideoFXConfig defines visual polish, color look, and viral motion effects (ONLY applied to main clip, NEVER outro).
@@ -275,6 +276,8 @@ type Project struct {
 	AnalysisMode    string             `json:"analysisMode,omitempty"` // "", "quick", "audio_first", "full"
 	AudioBytesUsed  int64              `json:"audioBytesUsed,omitempty"`
 	EstFullBytes    int64              `json:"estFullBytes,omitempty"`
+	FacecamBox      *CropBox           `json:"facecamBox,omitempty"`    // Auto-detected webcam crop box
+	FacecamCorner   string             `json:"facecamCorner,omitempty"` // top-left, top-right, bottom-left, bottom-right
 }
 
 // ComplianceCheck reports whether a rendered clip satisfies campaign rules.
