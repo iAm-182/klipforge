@@ -42,6 +42,7 @@ type Server struct {
 	Broker      *events.Broker
 	Worker      *renderer.WorkerPool
 	Autopilot   *autopilot.Scheduler
+	Cookies     *youtube.CookieKeeper
 	EngineToken string
 	AgentKey    string
 
@@ -96,6 +97,16 @@ func New(st *store.Store, d *deps.Manager, broker *events.Broker) *Server {
 		rawSignals:  make(map[string]*cachedSignals),
 	}
 	s.Autopilot = autopilot.NewScheduler(st, yt, wp, broker, s.analyzeSyncFast)
+	s.Cookies = youtube.NewCookieKeeper(d, st.GetSettings)
+	s.Cookies.OnLog = func(level, msg string) {
+		broker.Log("cookies", level, msg)
+	}
+	s.Cookies.OnExpired = func(reason string) {
+		if wh := strings.TrimSpace(st.GetSettings().NotifyWebhookURL); wh != "" {
+			go notify.Send(wh, "cookie_expired", "⚠️ Cookie YouTube Kedaluwarsa", reason)
+		}
+	}
+	s.Cookies.Start(context.Background())
 	broker.SetActivitySink(func(source, level, message string) {
 		if strings.TrimSpace(message) == "" {
 			return
@@ -193,6 +204,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", s.handleSaveSettings)
 	mux.HandleFunc("POST /api/settings/cookies", s.handleUploadCookiesFile)
+	mux.HandleFunc("GET /api/settings/cookies/status", s.handleCookieHealthStatus)
+	mux.HandleFunc("POST /api/settings/cookies/refresh", s.handleRefreshCookiesNow)
 	mux.HandleFunc("POST /api/open-output-folder", s.handleOpenOutputFolder)
 
 	// Team Mode Management (Owner-only: personal AccessKey + personal Muse AgentKey per member)
@@ -524,9 +537,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"teamCount":          len(s.Store.ListTeam()),
 			"role":               p.Role,
 		},
-		"campaigns": len(s.Store.ListCampaigns()),
-		"projects":  len(s.Store.ListProjects()),
-		"jobs":      len(s.Store.ListJobs()),
+		"campaigns":    len(s.Store.ListCampaigns()),
+		"projects":     len(s.Store.ListProjects()),
+		"jobs":         len(s.Store.ListJobs()),
+		"cookieHealth": s.Cookies.Status(),
 	})
 }
 

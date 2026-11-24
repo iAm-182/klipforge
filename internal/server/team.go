@@ -138,9 +138,10 @@ func isRoleAllowed(p model.Principal, method, path string) bool {
 	if p.Role == "owner" || p.Role == "admin" {
 		return true
 	}
-	// Team management & secrets are strictly Owner-only (except non-secret /api/team/metrics presence/KPI view!)
+	// Team management & secrets are strictly Owner-only (except non-secret /api/team/metrics & /api/settings/cookies/status!)
 	if (strings.HasPrefix(path, "/api/team") && path != "/api/team/metrics") ||
 		path == "/api/settings/cookies" ||
+		path == "/api/settings/cookies/refresh" ||
 		strings.HasPrefix(path, "/api/publish/accounts") {
 		return false
 	}
@@ -616,11 +617,45 @@ func (s *Server) handleUploadCookiesFile(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.Broker.Log("system", "success", "YouTube cookies.txt berhasil di-upload & diaktifkan (anti-bot VPS siap!).")
+	if s.Cookies != nil {
+		s.Cookies.OnCookiesUploaded()
+	}
+	s.Broker.Log("system", "success", "YouTube cookies.txt berhasil di-upload & diaktifkan (auto keep-alive server aktif!).")
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok":                true,
 		"cookiesFile":       dest,
 		"sizeBytes":         len(data),
 		"convertedFromJson": convertedFromJSON,
+		"cookieHealth":      s.Cookies.Status(),
+	})
+}
+
+// handleCookieHealthStatus returns strictly non-secret server-side YouTube cookie keep-alive status.
+func (s *Server) handleCookieHealthStatus(w http.ResponseWriter, r *http.Request) {
+	if s.Cookies == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"state": "unknown"})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.Cookies.Status())
+}
+
+// handleRefreshCookiesNow lets Owner manually trigger an immediate server-side yt-dlp cookie keep-alive check & refresh.
+func (s *Server) handleRefreshCookiesNow(w http.ResponseWriter, r *http.Request) {
+	if s.Cookies == nil {
+		writeErr(w, http.StatusServiceUnavailable, "CookieKeeper tidak aktif")
+		return
+	}
+	st, err := s.Cookies.RefreshNow(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok":           false,
+			"error":        err.Error(),
+			"cookieHealth": st,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok":           true,
+		"cookieHealth": st,
 	})
 }

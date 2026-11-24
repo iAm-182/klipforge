@@ -141,6 +141,23 @@
       $('stripDiskGauge').classList.toggle('low', free < 5.0 || !!disk.lowDisk);
     }
 
+    const ch = b1.statusRaw?.cookieHealth;
+    const cPill = $('stripCookiePill');
+    const cTxt = $('stripCookieText');
+    if (ch && cPill && cTxt) {
+      if (ch.state === 'healthy') {
+        cPill.className = 'engine-pill awake';
+        cTxt.textContent = 'Cookie YT Aktif';
+      } else if (ch.state === 'expired' || ch.state === 'missing') {
+        cPill.className = 'engine-pill cooldown';
+        cTxt.textContent = ch.state === 'expired' ? 'Cookie Expired' : 'Cookie Kosong';
+      } else {
+        cPill.className = 'engine-pill asleep';
+        cTxt.textContent = 'Cookie YT Cek...';
+      }
+      cPill.title = ch.message || 'Status YouTube cookie keep-alive di server';
+    }
+
     const mq = b1.homeData?.myQueue;
     if (mq && $('stripQueueMeter')) {
       $('stripQueueMeter').innerHTML = `Antrean kamu <strong>${mq.active}/${mq.limit}</strong>`;
