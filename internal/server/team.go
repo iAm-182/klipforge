@@ -138,8 +138,10 @@ func isRoleAllowed(p model.Principal, method, path string) bool {
 	if p.Role == "owner" || p.Role == "admin" {
 		return true
 	}
-	// Team management & secrets are strictly Owner-only!
-	if strings.HasPrefix(path, "/api/team") || path == "/api/settings/cookies" {
+	// Team management & secrets are strictly Owner-only (except non-secret /api/team/metrics presence/KPI view!)
+	if (strings.HasPrefix(path, "/api/team") && path != "/api/team/metrics") ||
+		path == "/api/settings/cookies" ||
+		strings.HasPrefix(path, "/api/publish/accounts") {
 		return false
 	}
 	if p.Role == "agent" {
@@ -160,6 +162,7 @@ func isRoleAllowed(p model.Principal, method, path string) bool {
 			"/api/jobs/edit-script":      true,
 			"/api/audio/presets":         true,
 			"/api/audio/trending/import": true,
+			"/api/board/move":            true,
 		}
 		if allowedClipperExact[path] {
 			return true
@@ -180,11 +183,14 @@ func isRoleAllowed(p model.Principal, method, path string) bool {
 		if strings.HasPrefix(path, "/api/jobs/") {
 			if strings.HasSuffix(path, "/post-edit") ||
 				strings.HasSuffix(path, "/retry") ||
-				strings.HasSuffix(path, "/cancel") {
+				strings.HasSuffix(path, "/cancel") ||
+				strings.HasSuffix(path, "/publish-kit") ||
+				strings.HasSuffix(path, "/publish") ||
+				strings.HasSuffix(path, "/analytics/sync") {
 				return true
 			}
 			// Only QC (and Owner) can Approve / Reject clips in Review!
-			if p.Role == "qc" && strings.HasSuffix(path, "/review") {
+			if p.Role == "qc" && (strings.HasSuffix(path, "/review") || path == "/api/jobs/review/batch") {
 				return true
 			}
 		}

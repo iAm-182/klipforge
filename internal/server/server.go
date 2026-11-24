@@ -96,6 +96,18 @@ func New(st *store.Store, d *deps.Manager, broker *events.Broker) *Server {
 		rawSignals:  make(map[string]*cachedSignals),
 	}
 	s.Autopilot = autopilot.NewScheduler(st, yt, wp, broker, s.analyzeSyncFast)
+	broker.SetActivitySink(func(source, level, message string) {
+		if strings.TrimSpace(message) == "" {
+			return
+		}
+		st.AppendActivity(model.ActivityEntry{
+			ActorName:  "Engine",
+			ActorVia:   "system",
+			Action:     source,
+			Summary:    message,
+			Level:      level,
+		})
+	})
 	go s.recoverIncompleteProjects()
 	s.syncTeamToEdgeAsync()
 	if wh := strings.TrimSpace(st.GetSettings().NotifyWebhookURL); wh != "" {
@@ -185,11 +197,18 @@ func (s *Server) Handler() http.Handler {
 
 	// Team Mode Management (Owner-only: personal AccessKey + personal Muse AgentKey per member)
 	mux.HandleFunc("GET /api/team", s.handleListTeam)
+	mux.HandleFunc("GET /api/team/metrics", s.handleTeamMetrics)
 	mux.HandleFunc("POST /api/team", s.handleCreateTeamMember)
 	mux.HandleFunc("PUT /api/team/{id}", s.handleUpdateTeamMember)
 	mux.HandleFunc("POST /api/team/{id}/rotate", s.handleRotateTeamKeys)
 	mux.HandleFunc("DELETE /api/team/{id}", s.handleDeleteTeamMember)
 	mux.HandleFunc("POST /api/team/sync-edge", s.handleSyncTeamEdge)
+
+	// Kanban Board, Activity Feed & Home Metrics (B1)
+	mux.HandleFunc("GET /api/activity", s.handleListActivity)
+	mux.HandleFunc("GET /api/metrics/home", s.handleHomeMetrics)
+	mux.HandleFunc("GET /api/board", s.handleGetBoard)
+	mux.HandleFunc("POST /api/board/move", s.handleBoardMove)
 
 	// Campaigns & Asset uploads (Watermark / Outro / Intro)
 	mux.HandleFunc("GET /api/campaigns", s.handleListCampaigns)
@@ -224,7 +243,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/jobs/edit-script", s.handleEditScript)
 	mux.HandleFunc("POST /api/jobs/{id}/post-edit", s.handlePostEditJob)
 	mux.HandleFunc("POST /api/jobs/{id}/review", s.handleReviewJob)
+	mux.HandleFunc("POST /api/jobs/review/batch", s.handleBatchReviewJobs)
+	mux.HandleFunc("GET /api/jobs/{id}/peek", s.handleJobPeek)
+	mux.HandleFunc("POST /api/jobs/{id}/publish-kit", s.handleGeneratePublishKit)
+	mux.HandleFunc("POST /api/jobs/{id}/publish", s.handlePublishJob)
+	mux.HandleFunc("POST /api/jobs/{id}/analytics/sync", s.handleSyncJobAnalytics)
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.handleCancelJob)
+
+	// Publish Accounts Management (Owner-only OAuth / SAU session configs)
+	mux.HandleFunc("GET /api/publish/accounts", s.handleListPublishAccounts)
+	mux.HandleFunc("POST /api/publish/accounts", s.handleSavePublishAccount)
+	mux.HandleFunc("DELETE /api/publish/accounts/{id}", s.handleDeletePublishAccount)
 	mux.HandleFunc("POST /api/jobs/{id}/retry", s.handleRetryJob)
 	mux.HandleFunc("DELETE /api/jobs/{id}", s.handleDeleteJob)
 	mux.HandleFunc("GET /api/jobs/{id}/video", s.handleServeJobVideo)
@@ -316,6 +345,7 @@ func isAgentAllowed(method, path string) bool {
 		"/api/jobs/compile":          true,
 		"/api/jobs/edit-script":      true,
 		"/api/audio/trending/import": true,
+		"/api/board/move":            true,
 	}
 	if allowedExact[path] {
 		return true
@@ -331,7 +361,10 @@ func isAgentAllowed(method, path string) bool {
 	}
 	if strings.HasPrefix(path, "/api/jobs/") {
 		if strings.HasSuffix(path, "/post-edit") ||
-			strings.HasSuffix(path, "/retry") {
+			strings.HasSuffix(path, "/retry") ||
+			strings.HasSuffix(path, "/publish-kit") ||
+			strings.HasSuffix(path, "/publish") ||
+			strings.HasSuffix(path, "/analytics/sync") {
 			return true
 		}
 	}
@@ -2002,6 +2035,7 @@ func (s *Server) handleReviewJob(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ReviewStatus       string `json:"reviewStatus"` // approved, rejected, pending_review
 		ReviewNote         string `json:"reviewNote"`
+		RejectReason       string `json:"rejectReason"`
 		PostCaption        string `json:"postCaption"`
 		DeleteFileOnReject bool   `json:"deleteFileOnReject"`
 	}
@@ -2014,13 +2048,42 @@ func (s *Server) handleReviewJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := getPrincipal(r)
+	if p.Role == "qc" && req.ReviewStatus == "approved" && job.CreatedByID != "" && job.CreatedByID == p.ID {
+		writeErr(w, http.StatusForbidden, "Self-approve dilarang: QC tidak boleh menyetujui klip miliknya sendiri")
+		return
+	}
+	nowRev := time.Now()
 	job.ReviewStatus = req.ReviewStatus
 	job.ReviewedBy = p.Name
+	job.ReviewedAt = &nowRev
 	if req.ReviewNote != "" {
 		job.ReviewNote = req.ReviewNote
 	}
+	if req.RejectReason != "" {
+		job.RejectReason = req.RejectReason
+		if job.ReviewNote == "" {
+			job.ReviewNote = req.RejectReason
+		}
+	}
 	if strings.TrimSpace(req.PostCaption) != "" {
 		job.PostCaption = req.PostCaption
+	}
+	switch req.ReviewStatus {
+	case "approved":
+		job.BoardColumn = "siap_posting"
+		if job.PublishKit == nil {
+			if kit, err := s.buildPublishKitForJob(job, nil); err == nil {
+				job.PublishKit = kit
+			}
+		}
+		s.recordActivity(p, "review_approved", "job", job.ID,
+			fmt.Sprintf("%s menyetujui klip %s", p.Name, job.Title), job.ReviewNote, "success")
+	case "rejected":
+		job.BoardColumn = "kandidat"
+		s.recordActivity(p, "review_rejected", "job", job.ID,
+			fmt.Sprintf("%s menolak klip %s", p.Name, job.Title), job.RejectReason, "warn")
+	case "pending_review":
+		job.BoardColumn = "review"
 	}
 	if req.ReviewStatus == "rejected" && req.DeleteFileOnReject && job.OutputPath != "" {
 		_ = os.Remove(job.OutputPath)
