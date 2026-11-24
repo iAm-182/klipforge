@@ -14,7 +14,8 @@ import (
 func TestFetchLiveChatReplayFast_ParallelSeekingAndParse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/watch" {
-			_, _ = w.Write([]byte(`<html><script>{"INNERTUBE_API_KEY":"TESTKEY","INNERTUBE_CLIENT_VERSION":"2.20261124.00.00","liveChatRenderer":{"continuations":[{"reloadContinuationData":{"continuation":"INIT_CONT"}}]}}</script></html>`))
+			// Include the real-world decoy JS array `"liveChatRenderer","liveChatHeaderRenderer"` before the real JSON object!
+			_, _ = w.Write([]byte(`<html><script>var names=["liveChatRenderer","liveChatHeaderRenderer"]; var ytcfg={"INNERTUBE_API_KEY":"TESTKEY","INNERTUBE_CLIENT_VERSION":"2.20261124.00.00"}; var ytInitialData={"liveChatRenderer":{"continuations":[{"reloadContinuationData":{"continuation":"INIT_CONT"}}]}};</script></html>`))
 			return
 		}
 		if r.URL.Path == "/youtubei/v1/live_chat/get_live_chat_replay" {
@@ -94,5 +95,15 @@ func TestFetchLiveChatReplayFast_ParallelSeekingAndParse(t *testing.T) {
 	}
 	if msgs[0].AuthorID == "" || msgs[0].Author == "" {
 		t.Fatalf("expected AuthorID & Author populated, got %+v", msgs[0])
+	}
+
+	// Also verify long-VOD dense parallel seek mode (>45m, e.g. 4-hour Windah stream)
+	destLong := filepath.Join(t.TempDir(), "long.live_chat.json")
+	_, writtenLong, err := FetchLiveChatReplayFast(context.Background(), "45r3OyaxvFE", 14631, destLong, nil)
+	if err != nil {
+		t.Fatalf("FetchLiveChatReplayFast longVODMode failed: %v", err)
+	}
+	if writtenLong < 200 {
+		t.Fatalf("expected >=200 messages across dense long-VOD probes, got %d", writtenLong)
 	}
 }

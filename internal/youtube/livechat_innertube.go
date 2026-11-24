@@ -67,15 +67,23 @@ func FetchLiveChatReplayFast(
 	if videoID == "" {
 		return "", 0, fmt.Errorf("videoID kosong")
 	}
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := &http.Client{
+		Timeout: 18 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        32,
+			MaxIdleConnsPerHost: 24,
+			IdleConnTimeout:     30 * time.Second,
+			ForceAttemptHTTP2:   true,
+		},
+	}
 
 	cfg, err := fetchInnertubeChatConfig(ctx, client, videoID)
 	if err != nil {
 		return "", 0, err
 	}
 
-	// Probe initial response at t=0 to grab playerSeekContinuationData (if available) + opening messages
-	firstResp, err := postLiveChatReplay(ctx, client, cfg.APIKey, cfg.ClientVersion, cfg.InitialCont, -1)
+	// Probe initial response at t=0 to grab playerSeekContinuationData + opening messages
+	firstResp, err := postLiveChatReplay(ctx, client, cfg.APIKey, cfg.ClientVersion, cfg.InitialCont, 0)
 	if err != nil {
 		return "", 0, fmt.Errorf("innertube live_chat probe gagal: %w", err)
 	}
@@ -86,21 +94,42 @@ func FetchLiveChatReplayFast(
 		cfg.SeekCont = cfg.InitialCont
 	}
 
-	// Partition the VOD timeline into concurrent slices so 4-hour streams don't crawl sequentially!
 	if durationSec <= 0 {
 		durationSec = 3600
 	}
-	sliceDur := 300.0 // 5-minute slices for short/medium streams
-	if durationSec > 7200 {
-		sliceDur = 600.0 // 10-minute slices for 2-5h streams (e.g. 24 slices for 4h)
-	}
-	numSlices := int(math.Ceil(durationSec / sliceDur))
-	if numSlices < 1 {
-		numSlices = 1
-	}
-	if numSlices > 36 {
-		numSlices = 36
+
+	// Two-mode concurrent strategy:
+	// - Short/Medium VODs (<= 45m): 6 workers walking 5-min slices sequentially (full chat capture).
+	// - Long Livestream VODs (> 45m, e.g. 3–5h Windah streams): 14 HTTP/2 keep-alive workers probing
+	//   every ~40s (up to 360 slices, matching KlipForge's 357 timeline buckets 1:1!) in ~6-12 seconds total!
+	longVODMode := durationSec > 2700 && seekCont != ""
+	var sliceDur float64
+	var numSlices int
+	var workers int
+	if longVODMode {
+		numSlices = int(math.Ceil(durationSec / 40.0))
+		if numSlices < 60 {
+			numSlices = 60
+		}
+		if numSlices > 360 {
+			numSlices = 360
+		}
 		sliceDur = durationSec / float64(numSlices)
+		workers = 14
+	} else {
+		sliceDur = 300.0
+		numSlices = int(math.Ceil(durationSec / sliceDur))
+		if numSlices < 1 {
+			numSlices = 1
+		}
+		if numSlices > 36 {
+			numSlices = 36
+			sliceDur = durationSec / float64(numSlices)
+		}
+		workers = 6
+	}
+	if numSlices < workers {
+		workers = numSlices
 	}
 
 	type rawLine struct {
@@ -121,11 +150,6 @@ func FetchLiveChatReplayFast(
 	}
 	close(jobsCh)
 
-	workers := 6
-	if numSlices < workers {
-		workers = numSlices
-	}
-
 	var (
 		mu         sync.Mutex
 		collected  []rawLine
@@ -133,7 +157,8 @@ func FetchLiveChatReplayFast(
 		totalMsgs  atomic.Int64
 	)
 
-	appendActions := func(actions []json.RawMessage, minSec, maxSec float64) (maxSeenSec float64, added int) {
+	appendActions := func(actions []json.RawMessage, minSec, maxSec float64) (minSeenSec, maxSeenSec float64, added int) {
+		minSeenSec = math.MaxFloat64
 		maxSeenSec = -1
 		var batch []rawLine
 		for _, raw := range actions {
@@ -142,14 +167,21 @@ func FetchLiveChatReplayFast(
 				continue
 			}
 			sec := float64(offMs) / 1000.0
+			if minSec > 10 && sec <= 1.0 {
+				// Skip pinned/header 0ms actions repeated on seek responses
+				continue
+			}
+			if sec < minSeenSec {
+				minSeenSec = sec
+			}
 			if sec > maxSeenSec {
 				maxSeenSec = sec
 			}
-			// Keep messages in [minSec-2, maxSec+2] (skip offset=0 pinned duplicates on later slices)
-			if minSec > 5 && sec < minSec-2 {
+			// Keep messages in [minSec-10, maxSec+10] so seek bursts right around slice edges aren't dropped!
+			if minSec > 10 && sec < minSec-10 {
 				continue
 			}
-			if maxSec > 0 && sec > maxSec+2 {
+			if maxSec > 0 && sec > maxSec+10 {
 				continue
 			}
 			cp := make([]byte, len(raw))
@@ -162,7 +194,10 @@ func FetchLiveChatReplayFast(
 			mu.Unlock()
 			totalMsgs.Add(int64(len(batch)))
 		}
-		return maxSeenSec, len(batch)
+		if minSeenSec == math.MaxFloat64 {
+			minSeenSec = -1
+		}
+		return minSeenSec, maxSeenSec, len(batch)
 	}
 
 	// Capture opening actions from probe
@@ -177,8 +212,29 @@ func FetchLiveChatReplayFast(
 				if ctx.Err() != nil {
 					return
 				}
-				// Walk this time slice via seek -> sequential pages; if ultra-dense mega-chat, adaptively jump forward
-				// so every minute of a 4-hour VOD gets clean coverage within the time budget!
+				if longVODMode {
+					// Dense parallel seek mode for 1-5h streams: 1 direct seek per ~40s bucket +
+					// 1 follow-up sequential page whenever high chat velocity is detected (>=25 msgs in <9s)!
+					resp, rerr := postLiveChatReplay(ctx, client, cfg.APIKey, cfg.ClientVersion, cfg.SeekCont, int64(sj.startSec*1000))
+					if rerr == nil {
+						acts := resp.ContinuationContents.LiveChatContinuation.Actions
+						minSeen, maxSeen, added := appendActions(acts, sj.startSec, sj.endSec)
+						nCont, _ := extractReplayContinuations(resp)
+						span := maxSeen - minSeen
+						if nCont != "" && added >= 25 && span >= 0 && span < 9.0 && maxSeen < sj.endSec-2 && ctx.Err() == nil {
+							if resp2, err2 := postLiveChatReplay(ctx, client, cfg.APIKey, cfg.ClientVersion, nCont, -1); err2 == nil {
+								appendActions(resp2.ContinuationContents.LiveChatContinuation.Actions, sj.startSec, sj.endSec)
+							}
+						}
+					}
+					done := int(doneSlices.Add(1))
+					if onProgress != nil {
+						onProgress(float64(done)/float64(numSlices)*100.0, int(totalMsgs.Load()))
+					}
+					continue
+				}
+
+				// Short/medium VOD walk mode: sequential pages inside 5-min slice with adaptive leap
 				const maxPagesPerSlice = 18
 				curCont := cfg.SeekCont
 				curSeekMs := int64(sj.startSec * 1000)
@@ -202,14 +258,9 @@ func FetchLiveChatReplayFast(
 						break
 					}
 					acts := resp.ContinuationContents.LiveChatContinuation.Actions
-					maxSeen, _ := appendActions(acts, sj.startSec, sj.endSec)
+					_, maxSeen, _ := appendActions(acts, sj.startSec, sj.endSec)
 					nCont, sCont := extractReplayContinuations(resp)
-					if sCont != "" {
-						// Prefer freshest seek token if present
-						curCont = nCont
-					} else {
-						curCont = nCont
-					}
+					curCont = nCont
 					useSeek = false
 
 					if maxSeen > curPosSec {
@@ -222,8 +273,6 @@ func FetchLiveChatReplayFast(
 						break
 					}
 
-					// Adaptive leap for ultra-dense mega-streams (>50 msgs/sec): if after page 5 we've moved
-					// less than 20% across the slice, hop forward with playerOffsetMs so zero minutes are skipped!
 					if page > 0 && page%4 == 0 && curPosSec < sj.endSec-30 {
 						remainingPages := maxPagesPerSlice - page
 						expectedStep := (sj.endSec - sj.startSec) / float64(maxPagesPerSlice)
@@ -366,13 +415,27 @@ func fetchInnertubeChatConfig(ctx context.Context, client *http.Client, videoID 
 		ver = vm[1]
 	}
 	var cont string
-	if idx := strings.Index(text, `"liveChatRenderer"`); idx >= 0 {
-		end := idx + 6000
-		if end > len(text) {
-			end = len(text)
+	searchPos := 0
+	for {
+		rel := strings.Index(text[searchPos:], `"liveChatRenderer"`)
+		if rel < 0 {
+			break
 		}
+		idx := searchPos + rel
+		searchPos = idx + len(`"liveChatRenderer"`)
+		// Skip JS string lists like `"liveChatRenderer","liveChatHeaderRenderer",...` — require JSON object `:{`!
+		after := strings.TrimLeft(text[searchPos:minInt(len(text), searchPos+16)], " \t\r\n")
+		if !strings.HasPrefix(after, ":") {
+			continue
+		}
+		after = strings.TrimLeft(after[1:], " \t\r\n")
+		if !strings.HasPrefix(after, "{") {
+			continue
+		}
+		end := minInt(len(text), idx+12000)
 		if cm := continuationFieldRe.FindStringSubmatch(text[idx:end]); len(cm) >= 2 {
 			cont = cm[1]
+			break
 		}
 	}
 	if cont == "" {
