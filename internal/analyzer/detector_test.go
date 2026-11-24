@@ -217,6 +217,44 @@ func TestArcAwareWindahRealCuesAndVirality(t *testing.T) {
 	}
 }
 
+func TestWordBoundaryAndAcousticJumpscareBoost(t *testing.T) {
+	// 1. Word-boundary check: "enggak tunggu" must NOT trigger "gg",
+	//    and "Ucok cocok dorong masalah boleh proses" must NOT trigger "cok"/"dor"/"lah"/"eh"/"pro".
+	if containsWordOrPhrase("enggak tunggu dulu", "gg") {
+		t.Fatalf("false positive: 'gg' matched inside 'enggak tunggu'")
+	}
+	if !containsWordOrPhrase("mantap gg banget!", "gg") {
+		t.Fatalf("expected standalone 'gg' to match")
+	}
+	if ContainsForbiddenWord("Ucok cocok dorong masalah", []string{"cok", "dor", "lah"}) {
+		t.Fatalf("false positive: short forbidden word matched substring")
+	}
+	if !ContainsForbiddenWord("dasar cok parah", []string{"cok"}) {
+		t.Fatalf("expected standalone forbidden word 'cok' to match")
+	}
+
+	// 2. Acoustic jumpscare/crash contrast boost: quiet buildup (<0.28) -> sudden peak (>=0.78)
+	audio := make([]float64, 180)
+	for i := range audio {
+		audio[i] = 0.14
+	}
+	// Sudden crash/scream at t=90..92 preceded by quiet 86..89
+	audio[90] = 0.92
+	audio[91] = 0.88
+	audio[92] = 0.84
+	res := DetectHype(AnalysisInput{
+		DurationSec: 180,
+		AudioEnergy: audio,
+		Settings:    model.DefaultDetectionSettings(),
+	})
+	if len(res.Candidates) == 0 {
+		t.Fatalf("expected acoustic jumpscare candidate")
+	}
+	if res.Candidates[0].PeakSec < 88 || res.Candidates[0].PeakSec > 95 {
+		t.Fatalf("expected peak near 90s jumpscare, got %.1fs", res.Candidates[0].PeakSec)
+	}
+}
+
 func containsAnyFold(s string, list []string) bool {
 	for _, w := range list {
 		if len(w) > 0 && containsFold(s, w) {

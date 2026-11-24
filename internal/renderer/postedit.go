@@ -30,6 +30,8 @@ type PostEditInput struct {
 	BGMFadeInSec       float64
 	BGMFadeOutSec      float64
 	BGMAutoDuck        bool
+	AudioNorm          bool
+	VocalEnhance       bool
 	Speed              float64
 	Watermark          *model.WatermarkConfig // Optional manual drag-and-drop watermark overlay (ONLY on main clip, NEVER Outro!)
 	Encoder            string
@@ -55,8 +57,8 @@ func RenderPostEdit(ctx context.Context, in PostEditInput) (MediaInfo, error) {
 	if err != nil || srcInfo.Duration <= 0 {
 		return MediaInfo{}, fmt.Errorf("gagal membaca durasi video sumber: %v", err)
 	}
-	outW, outH := srcInfo.Width, srcInfo.Height
-	if outW <= 0 || outH <= 0 {
+	outW, outH := makeEven(srcInfo.Width), makeEven(srcInfo.Height)
+	if outW <= 2 || outH <= 2 {
 		outW, outH = 1080, 1920
 	}
 
@@ -176,11 +178,17 @@ func RenderPostEdit(ctx context.Context, in PostEditInput) (MediaInfo, error) {
 		filters = append(filters, "[main_v0]copy[main_v]")
 	}
 
-	// Audio stream of trimmed main clip
+	// Audio stream of trimmed main clip (VocalEnhance + AudioNorm strictly on main clip, NEVER Outro!)
 	if srcInfo.HasAudio {
 		voiceChain := "[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
 		if !noSpeed {
 			voiceChain += fmt.Sprintf(",atempo=%.4f", speed)
+		}
+		if in.VocalEnhance {
+			voiceChain += ",highpass=f=80,acompressor=threshold=-18dB:ratio=3:attack=10:release=120,equalizer=f=3000:t=q:w=1.2:g=2.5"
+		}
+		if in.AudioNorm {
+			voiceChain += ",loudnorm=I=-14:TP=-1.5:LRA=11"
 		}
 		voiceChain += fmt.Sprintf(",atrim=0:%.3f,asetpts=PTS-STARTPTS[voice_raw]", effectiveMainDur)
 		filters = append(filters, voiceChain)
@@ -254,20 +262,53 @@ func renderPostEditStreamCopy(ctx context.Context, in PostEditInput, srcInfo Med
 	}
 
 	var filters []string
+	hasProtectedTail := bodyLimit < srcInfo.Duration-0.15
 	if srcInfo.HasAudio {
-		filters = append(filters, fmt.Sprintf("[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,atrim=0:%.3f,asetpts=PTS-STARTPTS[voice_raw]", srcInfo.Duration))
+		if hasProtectedTail {
+			// Split [0:a] at bodyLimit so VocalEnhance/AudioNorm/SFX/BGM/limiter NEVER touch the clean Outro tail!
+			headChain := fmt.Sprintf("[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,asplit=2[a_h0][a_t0];[a_h0]atrim=0:%.3f,asetpts=PTS-STARTPTS", bodyLimit)
+			if in.VocalEnhance {
+				headChain += ",highpass=f=80,acompressor=threshold=-18dB:ratio=3:attack=10:release=120,equalizer=f=3000:t=q:w=1.2:g=2.5"
+			}
+			if in.AudioNorm {
+				headChain += ",loudnorm=I=-14:TP=-1.5:LRA=11"
+			}
+			headChain += "[voice_raw]"
+			filters = append(filters, headChain)
+			filters = append(filters, fmt.Sprintf("[a_t0]atrim=%.3f:%.3f,asetpts=PTS-STARTPTS[outro_tail_a]", bodyLimit, srcInfo.Duration))
+		} else {
+			voiceChain := "[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
+			if in.VocalEnhance {
+				voiceChain += ",highpass=f=80,acompressor=threshold=-18dB:ratio=3:attack=10:release=120,equalizer=f=3000:t=q:w=1.2:g=2.5"
+			}
+			if in.AudioNorm {
+				voiceChain += ",loudnorm=I=-14:TP=-1.5:LRA=11"
+			}
+			voiceChain += fmt.Sprintf(",atrim=0:%.3f,asetpts=PTS-STARTPTS[voice_raw]", srcInfo.Duration)
+			filters = append(filters, voiceChain)
+		}
 	} else {
-		filters = append(filters, fmt.Sprintf("anullsrc=r=48000:cl=stereo:d=%.3f[voice_raw]", srcInfo.Duration))
+		if hasProtectedTail {
+			filters = append(filters, fmt.Sprintf("anullsrc=r=48000:cl=stereo:d=%.3f[voice_raw]", bodyLimit))
+			filters = append(filters, fmt.Sprintf("anullsrc=r=48000:cl=stereo:d=%.3f[outro_tail_a]", srcInfo.Duration-bodyLimit))
+		} else {
+			filters = append(filters, fmt.Sprintf("anullsrc=r=48000:cl=stereo:d=%.3f[voice_raw]", srcInfo.Duration))
+		}
 	}
 
 	// Clamp SFX & BGM strictly inside [0, bodyLimit] so ZERO SFX/BGM ever bleeds into Outro tail!
 	filters = append(filters, buildPostAudioMix(srcInfo.HasAudio, bodyLimit, 0, 1.0, hasBGM, bgmIdx, in.BGMVolume, in.BGMFadeInSec, in.BGMFadeOutSec, in.BGMAutoDuck, validSFX, sfxIndices)...)
+	outAudioLabel := "[main_a]"
+	if hasProtectedTail {
+		filters = append(filters, "[main_a][outro_tail_a]concat=n=2:v=0:a=1[final_post_a]")
+		outAudioLabel = "[final_post_a]"
+	}
 
 	filterGraph := strings.Join(filters, ";")
 	fullArgs := append(args,
 		"-filter_complex", filterGraph,
 		"-map", "0:v:0",
-		"-map", "[main_a]",
+		"-map", outAudioLabel,
 		"-c:v", "copy",
 		"-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
 		"-movflags", "+faststart",
@@ -307,7 +348,7 @@ func buildPostAudioMix(hasVoice bool, activeDur, trimStart, speed float64, hasBG
 	}
 
 	if !hasBGM && len(activeSFX) == 0 {
-		return []string{"[voice_raw]acopy[main_a]"}
+		return []string{"[voice_raw]alimiter=limit=0.891:attack=5:release=50:level=disabled[main_a]"}
 	}
 
 	var mixInputs []string
@@ -350,7 +391,7 @@ func buildPostAudioMix(hasVoice bool, activeDur, trimStart, speed float64, hasBG
 	}
 
 	filters = append(filters, fmt.Sprintf(
-		"%samix=inputs=%d:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95:attack=5:release=50,asetpts=PTS-STARTPTS[main_a]",
+		"%samix=inputs=%d:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.891:attack=5:release=50:level=disabled,asetpts=PTS-STARTPTS[main_a]",
 		strings.Join(mixInputs, ""), len(mixInputs),
 	))
 	return filters

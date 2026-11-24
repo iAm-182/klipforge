@@ -34,11 +34,25 @@ func TranscribeWordTimings(ctx context.Context, mediaPath string, startSec, endS
 		return &WhisperResult{Engine: "fallback_vtt", Language: lang, Note: "mediaPath kosong"}, nil
 	}
 
-	// Tier 1: Try faster-whisper inside KlipForge venv or system Python
-	for _, py := range []string{"/data/workspace/klipforge/.venv/bin/python", "python3", "python"} {
+	// Tier 1: Try faster-whisper inside KlipForge venv (Linux/Windows) or system Python
+	pyCandidates := []string{"/data/workspace/klipforge/.venv/bin/python", "/app/.venv/bin/python"}
+	for _, rel := range []string{".venv/bin/python", ".venv/Scripts/python.exe"} {
+		if abs, err := filepath.Abs(rel); err == nil {
+			if fi, serr := os.Stat(abs); serr == nil && !fi.IsDir() {
+				pyCandidates = append(pyCandidates, abs)
+			}
+		}
+	}
+	pyCandidates = append(pyCandidates, "python3", "python")
+	for _, py := range pyCandidates {
+		if _, err := os.Stat(py); err == nil {
+			if res, ok := tryFasterWhisperPython(ctx, py, mediaPath, startSec, endSec, lang); ok {
+				return res, nil
+			}
+			continue
+		}
 		if p, err := exec.LookPath(py); err == nil {
-			res, ok := tryFasterWhisperPython(ctx, p, mediaPath, startSec, endSec, lang)
-			if ok {
+			if res, ok := tryFasterWhisperPython(ctx, p, mediaPath, startSec, endSec, lang); ok {
 				return res, nil
 			}
 		}

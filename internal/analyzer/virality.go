@@ -15,7 +15,7 @@ var (
 		"jago", "nyetir", "latihan", "lihat nih", "liat nih", "gampang", "tenang",
 		"gua bisa", "gue bisa", "paling jago", "pro player", "santai", "coba lihat",
 		"tunggu", "watch this", "ez banget", "percaya sama gua", "skill", "drift",
-		"gaspol", "ngebut", "berani", "tantang", "bukti",
+		"gaspol", "ngebut", "berani", "tantang", "bukti", "sombong",
 	}
 
 	conflictKeywords = []string{
@@ -24,14 +24,15 @@ var (
 		"hancur", "rusak", "kalah", "gagal", "bintang", "wasted", "busted", "perang",
 		"serang", "musuh", "bunuh", "kabur", "kepung", "tangkap", "crash", "boom",
 		"kecelakaan", "terbang", "mental", "kelindes", "ketabrak",
+		"jumpscare", "setan", "hantu", "pocong", "kuntilanak", "ngebug", "blunder", "choke", "instan karma",
 	}
 
 	reactionPayoffKeywords = []string{
-		"wkwk", "kwkw", "haha", "ngakak", "kocak", "lucu", "anjir", "njir", "bjir",
-		"anjay", "gila", "parah", "astaga", "ya ampun", "waduh", "aduh", "buset",
-		"lah", "kok bisa", "tolong", "panik", "kaget", "sumpah", "bego", "bodoh",
+		"wkwk", "kwkw", "haha", "awok", "ngakak", "kocak", "lucu", "anjir", "njir", "bjir",
+		"anjay", "gila", "parah", "astaga", "astaghfirullah", "allahuakbar", "ya allah", "ya ampun", "waduh", "aduh", "buset",
+		"lah", "kok bisa", "tolong", "panik", "kaget", "merinding", "sumpah", "bego", "bodoh",
 		"kacau", "tamat", "riwayat", "sialan", "what the", "no way", "omg", "bruh",
-		"tertawa", "alasan", "bisa-bisanya",
+		"tertawa", "alasan", "bisa-bisanya", "kena mental", "epic comeback", "savage",
 	}
 
 	hookOpeningTriggers = []string{
@@ -60,13 +61,22 @@ func ScoreViralityWindow(cues []model.TranscriptCue, startSec, endSec float64) (
 
 	var hookRaw, emotionRaw, conflictRaw, quotableRaw float64
 	openingCutoff := startSec + math.Min(10.0, (endSec-startSec)*0.35)
+	seenEmotion := make(map[string]int)
+	seenConflict := make(map[string]int)
+	musikCues := 0
+	earliestSetup := math.Inf(1)
+	latestPayoff := math.Inf(-1)
 
 	for idx, c := range windowCues {
 		txt := strings.TrimSpace(c.Text)
 		if txt == "" {
 			continue
 		}
-		low := " " + strings.ToLower(txt) + " "
+		low := strings.ToLower(txt)
+		if low == "[musik]" || low == "[music]" {
+			musikCues++
+			continue
+		}
 		words := strings.Fields(txt)
 		wc := len(words)
 
@@ -74,12 +84,12 @@ func ScoreViralityWindow(cues []model.TranscriptCue, startSec, endSec float64) (
 		isOpening := idx < 2 || c.Start <= openingCutoff
 		if isOpening {
 			for _, tk := range hookOpeningTriggers {
-				if strings.Contains(low, tk) {
+				if containsWordOrPhrase(low, tk) {
 					hookRaw += 22
 				}
 			}
 			for _, tk := range setupBoastKeywords {
-				if strings.Contains(low, tk) {
+				if containsWordOrPhrase(low, tk) {
 					hookRaw += 28
 				}
 			}
@@ -91,72 +101,79 @@ func ScoreViralityWindow(cues []model.TranscriptCue, startSec, endSec float64) (
 			}
 		}
 
-		// 2. Emotion (laugh / panic / surprise — reuses speechHypeKeywords + reactionPayoffKeywords)
+		// 2. Emotion (deduplicated across speechHypeKeywords + reactionPayoffKeywords with diminishing returns!)
+		hitInCue := make(map[string]bool)
+		addEmotion := func(kw string, pts float64) {
+			if hitInCue[kw] {
+				return
+			}
+			hitInCue[kw] = true
+			cnt := seenEmotion[kw]
+			seenEmotion[kw] = cnt + 1
+			if cnt == 0 {
+				emotionRaw += pts
+			} else if cnt == 1 {
+				emotionRaw += pts * 0.35
+			}
+		}
 		for _, kw := range speechHypeKeywords {
-			if strings.Contains(low, kw) {
-				emotionRaw += 16
+			if containsWordOrPhrase(low, kw) {
+				addEmotion(kw, 18)
 			}
 		}
 		for _, kw := range reactionPayoffKeywords {
-			if strings.Contains(low, kw) {
-				emotionRaw += 14
+			if containsWordOrPhrase(low, kw) {
+				addEmotion(kw, 16)
 			}
 		}
 		if strings.Contains(txt, "!") {
 			emotionRaw += 8
 		}
 
-		// 3. Conflict / Action / Fail (crash, police, death, gunfight, chase)
+		// 3. Conflict / Action / Fail (crash, police, death, gunfight, chase, jumpscare)
 		for _, kw := range conflictKeywords {
-			if strings.Contains(low, kw) {
-				conflictRaw += 28
+			if containsWordOrPhrase(low, kw) {
+				cnt := seenConflict[kw]
+				seenConflict[kw] = cnt + 1
+				if cnt == 0 {
+					conflictRaw += 28
+				} else if cnt == 1 {
+					conflictRaw += 10
+				}
 			}
 		}
 
 		// 4. Quotable punchiness (short punchy Indonesian lines, boast->payoff contrast)
 		if wc >= 3 && wc <= 11 {
-			hasPunch := strings.ContainsAny(txt, "!?")
-			if !hasPunch {
-				for _, kw := range setupBoastKeywords {
-					if strings.Contains(low, kw) {
-						hasPunch = true
-						break
-					}
-				}
-			}
-			if !hasPunch {
-				for _, kw := range reactionPayoffKeywords {
-					if strings.Contains(low, kw) {
-						hasPunch = true
-						break
-					}
-				}
-			}
+			hasPunch := strings.ContainsAny(txt, "!?") || containsAnySub(low, setupBoastKeywords) || containsAnySub(low, reactionPayoffKeywords)
 			if hasPunch {
 				quotableRaw += 24
 			} else {
 				quotableRaw += 6
 			}
 		}
+
+		// Track temporal setup -> conflict/reaction order
+		if containsAnySub(low, setupBoastKeywords) && c.Start < earliestSetup {
+			earliestSetup = c.Start
+		}
+		if (containsAnySub(low, conflictKeywords) || containsAnySub(low, reactionPayoffKeywords)) && c.Start > latestPayoff {
+			latestPayoff = c.Start
+		}
 	}
 
-	// Setup -> Payoff contrast bonus (e.g. boast followed by conflict/reaction in the same window!)
-	hasSetup, hasConflict, hasReaction := false, false, false
-	for _, c := range windowCues {
-		low := " " + strings.ToLower(c.Text) + " "
-		if containsAnySub(low, setupBoastKeywords) {
-			hasSetup = true
-		}
-		if containsAnySub(low, conflictKeywords) {
-			hasConflict = true
-		}
-		if containsAnySub(low, reactionPayoffKeywords) {
-			hasReaction = true
-		}
-	}
-	if hasSetup && (hasConflict || hasReaction) {
+	// Setup -> Payoff contrast bonus ONLY when setup actually precedes payoff!
+	if !math.IsInf(earliestSetup, 1) && !math.IsInf(latestPayoff, -1) && earliestSetup < latestPayoff {
 		hookRaw += 25
 		quotableRaw += 25
+	}
+
+	// Dampen [musik]-dominated BRB / waiting screens
+	if len(windowCues) > 0 && musikCues*2 >= len(windowCues) {
+		hookRaw *= 0.35
+		emotionRaw *= 0.35
+		conflictRaw *= 0.35
+		quotableRaw *= 0.35
 	}
 
 	bd := model.ViralityBreakdown{
@@ -208,16 +225,29 @@ func buildViralityGrid(dur int, cues []model.TranscriptCue) []float64 {
 }
 
 // expandSetupPayoffArc widens a peak into a full comedic/action setup -> peak -> payoff arc,
-// clamped to [20s, 45s], and synthesizes a crisp 1-line ArcReason!
+// honoring user MinDurationSec/MaxDurationSec (default [20s, 45s]), and synthesizes a crisp 1-line ArcReason!
 func expandSetupPayoffArc(
 	peakSec int,
 	earliestSetupHint int,
 	dur int,
 	cues []model.TranscriptCue,
 	chatGrid, audioGrid, smooth []float64,
+	minArcCfg, maxArcCfg int,
 ) (arcStart int, arcEnd int, reason string) {
-	const minArc = 20
-	const maxArc = 45
+	minArc := 20
+	if minArcCfg >= 10 && minArcCfg < 20 {
+		minArc = minArcCfg
+	} else if minArcCfg > 20 && minArcCfg <= 45 {
+		minArc = minArcCfg
+	}
+	// Tight comedy/hype Setup->Payoff arcs default to <=45s so punchlines stay snappy (while respecting tighter user MaxDurationSec < 45!).
+	maxArc := 45
+	if maxArcCfg >= 15 && maxArcCfg < 45 {
+		maxArc = maxArcCfg
+	}
+	if maxArc < minArc {
+		maxArc = minArc
+	}
 
 	left := peakSec - 10
 	if earliestSetupHint >= 0 && earliestSetupHint < left && peakSec-earliestSetupHint <= 30 {
@@ -362,7 +392,7 @@ func containsAnySub(haystack string, list []string) bool {
 
 func firstMatchingSub(haystack string, list []string) string {
 	for _, kw := range list {
-		if strings.Contains(haystack, kw) {
+		if containsWordOrPhrase(haystack, kw) {
 			return strings.TrimSpace(kw)
 		}
 	}
@@ -421,7 +451,7 @@ func ClassifyMomentType(transcript, arcReason string, sampleChats []string) stri
 	scoreOf := func(kws []string) int {
 		n := 0
 		for _, kw := range kws {
-			if strings.Contains(hay, kw) {
+			if containsWordOrPhrase(hay, kw) {
 				n++
 			}
 		}
@@ -429,10 +459,10 @@ func ClassifyMomentType(transcript, arcReason string, sampleChats []string) stri
 	}
 
 	crashKws := []string{"nabrak", "tabrak", "kecelakaan", "kelindes", "ketabrak", "kebalik", "meledak", "ledak", "nyangkut", "crash", "boom", "mental", "hancur"}
-	failKws := []string{"mati", "tewas", "kalah", "gagal", "wasted", "busted", "jatuh", "kecebur", "tamat", "riwayat", "ketangkap", "tangkap", "kepung", "tembak", "baku tembak", "polisi"}
-	victoryKws := []string{"menang", "clutch", "booyah", "juara", "berhasil", "lolos", "selamat", " gg ", "victory", "ez banget", "finish"}
-	twistKws := []string{"ternyata", "plot twist", "kok bisa", "apaan tuh", "tiba-tiba", "gak nyangka", "ga nyangka", "kaget", "bisa-bisanya", "no way"}
-	memeKws := []string{"wkwk", "kwkw", "ngakak", "kocak", "lucu", "badut", "alasan", "bruh", "lawak", "haha", "njir", "bjir"}
+	failKws := []string{"mati", "tewas", "kalah", "gagal", "wasted", "busted", "jatuh", "kecebur", "tamat", "riwayat", "ketangkap", "tangkap", "kepung", "tembak", "baku tembak", "polisi", "blunder", "choke"}
+	victoryKws := []string{"menang", "clutch", "booyah", "juara", "berhasil", "lolos", "selamat", "gg", "victory", "ez banget", "finish", "epic comeback", "savage"}
+	twistKws := []string{"ternyata", "plot twist", "kok bisa", "apaan tuh", "tiba-tiba", "gak nyangka", "ga nyangka", "kaget", "bisa-bisanya", "no way", "jumpscare", "instan karma"}
+	memeKws := []string{"wkwk", "kwkw", "awok", "ngakak", "kocak", "lucu", "badut", "alasan", "bruh", "lawak", "haha", "njir", "bjir"}
 
 	scores := []struct {
 		kind  string

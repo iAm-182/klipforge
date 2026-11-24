@@ -26,7 +26,7 @@ type FacecamDetectResult struct {
 
 func isSplitFacecamLayout(mode string) bool {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "facecam_top_neon", "facecam_top_float", "facecam_top_ribbon", "facecam_top_clean", "gaming_cinema", "split_custom":
+	case "facecam_auto", "facecam_top_neon", "facecam_top_float", "facecam_top_ribbon", "facecam_top_clean", "gaming_cinema", "split_custom":
 		return true
 	default:
 		return false
@@ -43,6 +43,39 @@ func applyProjectFacecamDefault(layout *model.LayoutConfig, proj *model.Project)
 	if layout.FacecamBox.W <= 0.05 || layout.FacecamBox.H <= 0.05 {
 		layout.FacecamBox = *proj.FacecamBox
 	}
+}
+
+// ResolveAutoLayout upgrades `cropMode == "facecam_auto"` cleanly:
+// uses cached project FacecamBox (or runs live YuNet detection) -> `facecam_top_neon`,
+// falling back gracefully to `face_track` when no webcam corner face exists!
+func ResolveAutoLayout(ctx context.Context, layout *model.LayoutConfig, proj *model.Project, sourcePath string, clipDur float64) {
+	if layout == nil {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(layout.CropMode), "facecam_auto") {
+		if proj != nil && proj.FacecamBox != nil && proj.FacecamBox.W > 0.05 {
+			layout.FacecamBox = *proj.FacecamBox
+			layout.CropMode = "facecam_top_neon"
+			return
+		}
+		preview := ""
+		if proj != nil {
+			preview = proj.PreviewFrame
+		}
+		if res, err := DetectProjectFacecam(ctx, sourcePath, preview, clipDur); err == nil && res != nil && res.Found {
+			layout.FacecamBox = res.FacecamBox
+			layout.CropMode = "facecam_top_neon"
+			if proj != nil {
+				cp := res.FacecamBox
+				proj.FacecamBox = &cp
+				proj.FacecamCorner = res.Corner
+			}
+			return
+		}
+		layout.CropMode = "face_track"
+		return
+	}
+	applyProjectFacecamDefault(layout, proj)
 }
 
 // ComputeFacecamBoxFromDetections estimates a clean 16:10 webcam crop box from multi-frame face detections.

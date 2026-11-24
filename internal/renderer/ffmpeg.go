@@ -202,19 +202,13 @@ func RenderClip(ctx context.Context, in RenderInput) (MediaInfo, error) {
 
 	// Calculate effective main clip duration after speed / speedRamp adjustment
 	rawMainDur := in.ClipDuration
-	if rawMainDur <= 0 || (in.SeekStart == 0 && srcInfo.Duration > 0 && srcInfo.Duration < rawMainDur+2) {
+	if rawMainDur <= 0 || (in.SeekStart == 0 && srcInfo.Duration > 0 && srcInfo.Duration < rawMainDur) {
 		rawMainDur = srcInfo.Duration
 	}
 	if rawMainDur <= 0 {
 		rawMainDur = 30
 	}
-	var activeRamp *model.SpeedRamp
-	if in.SpeedRamp != nil && rawMainDur >= 1.5 {
-		r := ClampSpeedRamp(*in.SpeedRamp, rawMainDur)
-		if math.Abs(r.FromSpeed-r.ToSpeed) > 0.02 || math.Abs(r.FromSpeed-1.0) > 0.02 {
-			activeRamp = &r
-		}
-	}
+	activeRamp := ResolveActiveSpeedRamp(in.SpeedRamp, rawMainDur)
 	effectiveMainDur := rawMainDur / speed
 	if activeRamp != nil {
 		effectiveMainDur = activeRamp.AtSec/activeRamp.FromSpeed + (rawMainDur-activeRamp.AtSec)/activeRamp.ToSpeed
@@ -232,12 +226,12 @@ func RenderClip(ctx context.Context, in RenderInput) (MediaInfo, error) {
 	var args []string
 	args = append(args, "-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats")
 
-	// Input 0: Main source clip
+	// Input 0: Main source clip (always pass -t when rawMainDur > 0 so tail trims stay frame-exact even when SeekStart == 0!)
 	if in.SeekStart > 0 {
 		args = append(args, "-ss", fmt.Sprintf("%.3f", in.SeekStart))
 	}
-	if in.ClipDuration > 0 && in.SeekStart > 0 {
-		args = append(args, "-t", fmt.Sprintf("%.3f", in.ClipDuration))
+	if rawMainDur > 0 {
+		args = append(args, "-t", fmt.Sprintf("%.3f", rawMainDur))
 	}
 	args = append(args, "-i", in.SourcePath)
 
@@ -251,8 +245,11 @@ func RenderClip(ctx context.Context, in RenderInput) (MediaInfo, error) {
 	if hasWM {
 		wmIdx = nextInputIdx
 		nextInputIdx++
-		if strings.EqualFold(filepath.Ext(in.Watermark.FilePath), ".gif") {
+		wmExt := strings.ToLower(filepath.Ext(in.Watermark.FilePath))
+		if wmExt == ".gif" {
 			args = append(args, "-ignore_loop", "0")
+		} else if wmExt == ".mov" || wmExt == ".webm" {
+			args = append(args, "-stream_loop", "-1")
 		}
 		args = append(args, "-i", in.Watermark.FilePath)
 	}
@@ -280,43 +277,56 @@ func RenderClip(ctx context.Context, in RenderInput) (MediaInfo, error) {
 	// ================= VIDEO FILTERGRAPH (Main Clip Only) =================
 	var filters []string
 
-	// 1. Frame/Crop main video [0:v] -> [main_v0] (supports dynamic AI face_track 9:16 reframing!)
-	if in.Layout.CropMode == "face_track" {
+	// 0. Normalize [0:v] timestamps upfront (and cap 60fps->30fps early when no slow-mo/ramp so layout/blur runs 2x faster!)
+	preV := "[0:v]"
+	if activeRamp == nil && speed >= 0.99 {
+		filters = append(filters, "[0:v]setpts=PTS-STARTPTS,fps=30[v_norm]")
+	} else {
+		filters = append(filters, "[0:v]setpts=PTS-STARTPTS[v_norm]")
+	}
+	preV = "[v_norm]"
+
+	// 1. Frame/Crop main video -> [main_v0] (supports dynamic AI face_track & facecam_auto 9:16 reframing!)
+	effLayout := in.Layout
+	if strings.EqualFold(strings.TrimSpace(effLayout.CropMode), "facecam_auto") {
+		effLayout.CropMode = "facecam_top_neon"
+	}
+	if effLayout.CropMode == "face_track" {
 		dets := DetectFacesInVideo(ctx, in.SourcePath, in.SeekStart, rawMainDur)
 		if len(dets) > 0 {
 			track := SmoothFaceTrack(dets, rawMainDur, 4.0)
-			filters = append(filters, BuildFaceTrackFilter(track, srcInfo.Width, srcInfo.Height, outW, outH, "[0:v]", "[main_v0]"))
+			filters = append(filters, BuildFaceTrackFilter(track, srcInfo.Width, srcInfo.Height, outW, outH, preV, "[main_v0]"))
 		} else {
-			// Graceful fallback to center 9:16 crop when no face is found or OpenCV is unavailable
-			fallbackLayout := in.Layout
+			fallbackLayout := effLayout
 			fallbackLayout.CropMode = "center"
-			filters = append(filters, buildLayoutFilter(fallbackLayout, outW, outH, "[0:v]", "[main_v0]"))
+			filters = append(filters, buildLayoutFilter(fallbackLayout, outW, outH, preV, "[main_v0]"))
 		}
 	} else {
-		filters = append(filters, buildLayoutFilter(in.Layout, outW, outH, "[0:v]", "[main_v0]"))
+		filters = append(filters, buildLayoutFilter(effLayout, outW, outH, preV, "[main_v0]"))
 	}
 	curV := "[main_v0]"
 
-	// 2. Speed / SpeedRamp adjustment + normalize timestamps BEFORE time-based FX
+	// 2. Speed / SpeedRamp adjustment + exact video duration trim so Outro never desyncs!
 	if activeRamp != nil {
 		filters = append(filters, fmt.Sprintf(
 			"%ssetpts=PTS-STARTPTS,split=2[vr_a][vr_b];"+
 				"[vr_a]trim=start=0:end=%.3f,setpts=(PTS-STARTPTS)/%.4f[vr_1];"+
 				"[vr_b]trim=start=%.3f:end=%.3f,setpts=(PTS-STARTPTS)/%.4f[vr_2];"+
-				"[vr_1][vr_2]concat=n=2:v=1:a=0,fps=30[main_vspd]",
+				"[vr_1][vr_2]concat=n=2:v=1:a=0,fps=30,trim=0:%.3f,setpts=PTS-STARTPTS[main_vspd]",
 			curV,
 			activeRamp.AtSec, activeRamp.FromSpeed,
 			activeRamp.AtSec, rawMainDur, activeRamp.ToSpeed,
+			effectiveMainDur,
 		))
 	} else if math.Abs(speed-1.0) > 0.005 {
-		filters = append(filters, fmt.Sprintf("%ssetpts=(PTS-STARTPTS)/%.4f,fps=30[main_vspd]", curV, speed))
+		filters = append(filters, fmt.Sprintf("%ssetpts=(PTS-STARTPTS)/%.4f,fps=30,trim=0:%.3f,setpts=PTS-STARTPTS[main_vspd]", curV, speed, effectiveMainDur))
 	} else {
-		filters = append(filters, fmt.Sprintf("%ssetpts=PTS-STARTPTS,fps=30[main_vspd]", curV))
+		filters = append(filters, fmt.Sprintf("%strim=0:%.3f,setpts=PTS-STARTPTS,fps=30[main_vspd]", curV, effectiveMainDur))
 	}
 	curV = "[main_vspd]"
 
 	// 3. Video FX: Color Grade, Sharpen, Dynamic Motion, Per-Segment Zoom Punch & Entry Transition
-	if fxFilter, outLabel := buildVideoFXFilter(curV, outW, outH, effectiveMainDur, speed, in.VideoFX); fxFilter != "" {
+	if fxFilter, outLabel := buildVideoFXFilter(curV, outW, outH, effectiveMainDur, speed, activeRamp, in.VideoFX); fxFilter != "" {
 		filters = append(filters, fxFilter)
 		curV = outLabel
 	}
@@ -405,7 +415,8 @@ func RenderClip(ctx context.Context, in RenderInput) (MediaInfo, error) {
 	}
 
 	if !hasBGM && len(validSFX) == 0 {
-		filters = append(filters, "[voice_raw]acopy[main_a]")
+		// Always apply true-peak safe limiter (level=disabled) so VocalEnhance +2.5dB boost never clips AAC!
+		filters = append(filters, "[voice_raw]alimiter=limit=0.891:attack=5:release=50:level=disabled[main_a]")
 	} else {
 		var mixInputs []string
 
@@ -439,7 +450,11 @@ func RenderClip(ctx context.Context, in RenderInput) (MediaInfo, error) {
 			if sfxVol <= 0.05 || sfxVol > 2.0 {
 				sfxVol = 0.85
 			}
-			atSec := sfx.AtSec / speed
+			if srcInfo.HasAudio {
+				// Keep voice clarity & prevent +9 dBFS intermodulation when loud SFX sums over screams
+				sfxVol *= 0.82
+			}
+			atSec := MapTimeWithRamp(sfx.AtSec, speed, activeRamp)
 			if atSec < 0 {
 				atSec = 0
 			}
@@ -456,7 +471,7 @@ func RenderClip(ctx context.Context, in RenderInput) (MediaInfo, error) {
 		}
 
 		filters = append(filters, fmt.Sprintf(
-			"%samix=inputs=%d:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95:attack=5:release=50,asetpts=PTS-STARTPTS[main_a]",
+			"%samix=inputs=%d:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.891:attack=5:release=50:level=disabled,asetpts=PTS-STARTPTS[main_a]",
 			strings.Join(mixInputs, ""), len(mixInputs),
 		))
 	}
@@ -528,7 +543,7 @@ func RenderClip(ctx context.Context, in RenderInput) (MediaInfo, error) {
 	return ProbeMedia(ctx, in.FFprobePath, in.OutputPath)
 }
 
-func buildVideoFXFilter(inLabel string, outW, outH int, dur, speed float64, fx model.VideoFXConfig) (string, string) {
+func buildVideoFXFilter(inLabel string, outW, outH int, dur, speed float64, ramp *model.SpeedRamp, fx model.VideoFXConfig) (string, string) {
 	var chain []string
 
 	// 1. Color grading look (ReaCut / FilmCraft-inspired)
@@ -546,7 +561,7 @@ func buildVideoFXFilter(inLabel string, outW, outH int, dur, speed float64, fx m
 	}
 
 	// 2. Dynamic viral motion FX
-	peakT := fx.PeakOffsetSec / speed
+	peakT := MapTimeWithRamp(fx.PeakOffsetSec, speed, ramp)
 	if peakT <= 0.2 || peakT >= dur-0.5 {
 		peakT = dur * 0.38
 	}
@@ -606,13 +621,34 @@ func ClampSpeedRamp(r model.SpeedRamp, rawDur float64) model.SpeedRamp {
 	if rawDur < 1.0 {
 		rawDur = 1.0
 	}
-	if out.AtSec < 0.4 {
+	if out.AtSec <= 0.05 {
+		out.FromSpeed = out.ToSpeed
 		out.AtSec = 0.4
-	}
-	if out.AtSec > rawDur-0.4 {
+	} else if out.AtSec >= rawDur-0.05 {
+		out.ToSpeed = out.FromSpeed
 		out.AtSec = math.Max(0.4, rawDur-0.4)
+	} else {
+		if out.AtSec < 0.4 {
+			out.AtSec = 0.4
+		}
+		if out.AtSec > rawDur-0.4 {
+			out.AtSec = math.Max(0.4, rawDur-0.4)
+		}
 	}
 	return out
+}
+
+// ResolveActiveSpeedRamp is the single source of truth shared by RenderClip and RenderCompilation
+// so ASS subtitle mapping, SFX placement, and FFmpeg video/audio speed ramps never diverge!
+func ResolveActiveSpeedRamp(r *model.SpeedRamp, rawDur float64) *model.SpeedRamp {
+	if r == nil || rawDur < 1.5 {
+		return nil
+	}
+	clamped := ClampSpeedRamp(*r, rawDur)
+	if math.Abs(clamped.FromSpeed-clamped.ToSpeed) > 0.02 || math.Abs(clamped.FromSpeed-1.0) > 0.02 {
+		return &clamped
+	}
+	return nil
 }
 
 // MapTimeWithRamp maps a segment-relative raw timestamp (seconds) into effective playback time after speed/speedRamp.
@@ -1119,6 +1155,18 @@ func findBoldFont() string {
 			if fileExists(p) {
 				return p
 			}
+		}
+		return ""
+	}
+	for _, p := range []string{
+		"/usr/share/fonts/truetype/anton/Anton-Regular.ttf",
+		"/usr/share/fonts/truetype/msttcorefonts/Impact.ttf",
+		"/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+		"/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+		"/System/Library/Fonts/Supplemental/Impact.ttf",
+	} {
+		if fileExists(p) {
+			return p
 		}
 	}
 	return ""

@@ -22,9 +22,10 @@ type InstagramReelInput struct {
 }
 
 type InstagramReelResult struct {
-	ContainerID string `json:"containerId"`
-	MediaID     string `json:"mediaId"`
-	Status      string `json:"status"`
+	ContainerID  string `json:"containerId"`
+	MediaID      string `json:"mediaId"`
+	PublishedURL string `json:"publishedUrl,omitempty"`
+	Status       string `json:"status"`
 }
 
 // UploadInstagramReel publishes an approved clip as an Instagram Reel via the official Instagram Graph API
@@ -69,12 +70,48 @@ func UploadInstagramReel(ctx context.Context, in InstagramReelInput) (InstagramR
 		return InstagramReelResult{}, fmt.Errorf("Instagram tidak mengembalikan container ID")
 	}
 
+	// Step 1b: Poll container readiness when Meta processes video asynchronously (prevents 9007 errors in production)
+	base := strings.TrimRight(InstagramGraphBaseURL, "/")
+	for attempt := 0; attempt < 12; attempt++ {
+		stURL := fmt.Sprintf("%s/%s?fields=status_code,status&access_token=%s", base, url.PathEscape(c1.ID), url.QueryEscape(strings.TrimSpace(in.AccessToken)))
+		stReq, err := http.NewRequestWithContext(ctx, http.MethodGet, stURL, nil)
+		if err != nil {
+			break
+		}
+		stResp, err := client.Do(stReq)
+		if err != nil {
+			break
+		}
+		stRaw, _ := io.ReadAll(io.LimitReader(stResp.Body, 2048))
+		stResp.Body.Close()
+		if stResp.StatusCode >= 300 {
+			break // Mock or unsupported status probe -> proceed straight to publish
+		}
+		var stData struct {
+			StatusCode string `json:"status_code"`
+			Status     string `json:"status"`
+		}
+		_ = json.Unmarshal(stRaw, &stData)
+		code := strings.ToUpper(strings.TrimSpace(stData.StatusCode))
+		if code == "" || code == "FINISHED" || code == "PUBLISHED" {
+			break
+		}
+		if code == "ERROR" || code == "EXPIRED" {
+			return InstagramReelResult{}, fmt.Errorf("Instagram container gagal diproses (%s): %s", code, strings.TrimSpace(stData.Status))
+		}
+		select {
+		case <-ctx.Done():
+			return InstagramReelResult{}, ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+
 	// Step 2: Publish container
 	form2 := url.Values{}
 	form2.Set("creation_id", c1.ID)
 	form2.Set("access_token", strings.TrimSpace(in.AccessToken))
 
-	u2 := fmt.Sprintf("%s/%s/media_publish", strings.TrimRight(InstagramGraphBaseURL, "/"), url.PathEscape(in.IGUserID))
+	u2 := fmt.Sprintf("%s/%s/media_publish", base, url.PathEscape(in.IGUserID))
 	req2, err := http.NewRequestWithContext(ctx, http.MethodPost, u2, strings.NewReader(form2.Encode()))
 	if err != nil {
 		return InstagramReelResult{}, err
@@ -94,9 +131,29 @@ func UploadInstagramReel(ctx context.Context, in InstagramReelInput) (InstagramR
 	}
 	_ = json.Unmarshal(raw2, &c2)
 
+	// Step 3: Best-effort permalink fetch
+	permalink := ""
+	if c2.ID != "" {
+		pURL := fmt.Sprintf("%s/%s?fields=permalink&access_token=%s", base, url.PathEscape(c2.ID), url.QueryEscape(strings.TrimSpace(in.AccessToken)))
+		if pReq, err := http.NewRequestWithContext(ctx, http.MethodGet, pURL, nil); err == nil {
+			if pResp, err := client.Do(pReq); err == nil {
+				pRaw, _ := io.ReadAll(io.LimitReader(pResp.Body, 2048))
+				pResp.Body.Close()
+				if pResp.StatusCode < 300 {
+					var pData struct {
+						Permalink string `json:"permalink"`
+					}
+					_ = json.Unmarshal(pRaw, &pData)
+					permalink = strings.TrimSpace(pData.Permalink)
+				}
+			}
+		}
+	}
+
 	return InstagramReelResult{
-		ContainerID: c1.ID,
-		MediaID:     c2.ID,
-		Status:      "published",
+		ContainerID:  c1.ID,
+		MediaID:      c2.ID,
+		PublishedURL: permalink,
+		Status:       "published",
 	}, nil
 }

@@ -20,10 +20,11 @@ const JianyingSchemaVersion = "jianying-draft-5.9.0"
 
 // ExportInput bundles everything needed to serialize a RenderJob into an editable Jianying/CapCut desktop draft.
 type ExportInput struct {
-	Job         *model.RenderJob
-	Cues        []model.TranscriptCue
-	AudioLookup func(assetID string) (filePath string, name string, duration float64, ok bool)
-	OutDir      string
+	Job           *model.RenderJob
+	Cues          []model.TranscriptCue
+	AudioLookup   func(assetID string) (filePath string, name string, duration float64, ok bool)
+	ProjectLookup func(projectID string) (localVideoPath string, durationSec float64)
+	OutDir        string
 }
 
 type jyTimerange struct {
@@ -88,12 +89,59 @@ func ExportJianyingDraft(in ExportInput) (*model.JianyingDraftInfo, map[string]i
 	videoTrack := jyTrack{ID: makeUID("trk-vid", 1), Type: "video", Name: "Main Video"}
 	audioBGMTrack := jyTrack{ID: makeUID("trk-bgm", 2), Type: "audio", Name: "BGM"}
 	audioSFXTrack := jyTrack{ID: makeUID("trk-sfx", 3), Type: "audio", Name: "SFX"}
-	textTrack := jyTrack{ID: makeUID("trk-txt", 4), Type: "text", Name: "Subtitles & Hooks"}
+	hookTrack := jyTrack{ID: makeUID("trk-hook", 4), Type: "text", Name: "Hook Overlays"}
+	subTrack := jyTrack{ID: makeUID("trk-sub", 5), Type: "text", Name: "Subtitles"}
 
 	var cursorUS int64 = 0
 	segCounter := 0
 
-	addVideoSeg := func(path, name string, srcStartSec, durSec, speed float64, zoomScale float64, overlayText string, endSfxID string, endSfxOffset float64) {
+	addSFXCue := func(sfxID string, atUS int64, vol float64) {
+		if sfxID == "" || in.AudioLookup == nil {
+			return
+		}
+		fpath, aname, adur, ok := in.AudioLookup(sfxID)
+		if !ok {
+			return
+		}
+		if adur <= 0 {
+			adur = 1.2
+		}
+		if vol <= 0 {
+			vol = 0.95
+		}
+		sfxIdx := len(audioSFXTrack.Segments) + 1
+		aID := makeUID("mat-sfx", sfxIdx)
+		sfxDurUS := secToUS(adur)
+		audiosMat = append(audiosMat, map[string]interface{}{
+			"id":       aID,
+			"name":     aname,
+			"path":     fpath,
+			"type":     "sound",
+			"duration": sfxDurUS,
+		})
+		if atUS < 0 {
+			atUS = 0
+		}
+		audioSFXTrack.Segments = append(audioSFXTrack.Segments, jySegment{
+			ID:              makeUID("seg-sfx", sfxIdx),
+			MaterialID:      aID,
+			SourceTimerange: jyTimerange{Start: 0, Duration: sfxDurUS},
+			TargetTimerange: jyTimerange{Start: atUS, Duration: sfxDurUS},
+			Speed:           1.0,
+			Volume:          vol,
+			ExtraRefs:       []string{},
+		})
+	}
+
+	type mappedWindow struct {
+		vodStart float64
+		vodEnd   float64
+		targetUS int64
+		speed    float64
+	}
+	var windows []mappedWindow
+
+	addVideoSeg := func(path, name string, matDurSec, srcStartSec, durSec, speed, zoomScale float64, overlayText, endSfxID string, endSfxOffset, vodStart, vodEnd float64) {
 		if durSec <= 0 {
 			durSec = 10
 		}
@@ -105,6 +153,10 @@ func ExportJianyingDraft(in ExportInput) (*model.JianyingDraftInfo, map[string]i
 		spdID := makeUID("mat-spd", segCounter)
 		effDurUS := secToUS(durSec / speed)
 		srcDurUS := secToUS(durSec)
+		matDurUS := secToUS(matDurSec)
+		if matDurUS < secToUS(srcStartSec)+srcDurUS {
+			matDurUS = secToUS(srcStartSec) + srcDurUS
+		}
 
 		videosMat = append(videosMat, map[string]interface{}{
 			"id":            matID,
@@ -113,7 +165,7 @@ func ExportJianyingDraft(in ExportInput) (*model.JianyingDraftInfo, map[string]i
 			"type":          "video",
 			"width":         outW,
 			"height":        outH,
-			"duration":      srcDurUS,
+			"duration":      matDurUS,
 		})
 		speedsMat = append(speedsMat, map[string]interface{}{
 			"id":    spdID,
@@ -138,6 +190,15 @@ func ExportJianyingDraft(in ExportInput) (*model.JianyingDraftInfo, map[string]i
 			},
 		})
 
+		if vodEnd > vodStart {
+			windows = append(windows, mappedWindow{
+				vodStart: vodStart,
+				vodEnd:   vodEnd,
+				targetUS: cursorUS,
+				speed:    speed,
+			})
+		}
+
 		if strings.TrimSpace(overlayText) != "" {
 			tID := makeUID("mat-txt", segCounter)
 			textsMat = append(textsMat, map[string]interface{}{
@@ -150,47 +211,27 @@ func ExportJianyingDraft(in ExportInput) (*model.JianyingDraftInfo, map[string]i
 			if ovDur > 4_000_000 {
 				ovDur = 4_000_000
 			}
-			textTrack.Segments = append(textTrack.Segments, jySegment{
+			hookTrack.Segments = append(hookTrack.Segments, jySegment{
 				ID:              makeUID("seg-txt", segCounter),
 				MaterialID:      tID,
 				SourceTimerange: jyTimerange{Start: 0, Duration: ovDur},
 				TargetTimerange: jyTimerange{Start: cursorUS, Duration: ovDur},
 				Speed:           1.0,
 				Volume:          1.0,
+				ExtraRefs:       []string{},
 			})
 		}
 
-		if endSfxID != "" && in.AudioLookup != nil {
-			if fpath, aname, adur, ok := in.AudioLookup(endSfxID); ok {
-				if adur <= 0 {
-					adur = 1.2
-				}
-				aID := makeUID("mat-sfx", segCounter)
-				sfxDurUS := secToUS(adur)
-				audiosMat = append(audiosMat, map[string]interface{}{
-					"id":       aID,
-					"name":     aname,
-					"path":     fpath,
-					"type":     "sound",
-					"duration": sfxDurUS,
-				})
-				off := endSfxOffset
-				if off <= 0 {
-					off = 1.0
-				}
-				atUS := cursorUS + effDurUS - secToUS(off)
-				if atUS < cursorUS {
-					atUS = cursorUS
-				}
-				audioSFXTrack.Segments = append(audioSFXTrack.Segments, jySegment{
-					ID:              makeUID("seg-sfx", segCounter),
-					MaterialID:      aID,
-					SourceTimerange: jyTimerange{Start: 0, Duration: sfxDurUS},
-					TargetTimerange: jyTimerange{Start: atUS, Duration: sfxDurUS},
-					Speed:           1.0,
-					Volume:          0.95,
-				})
+		if endSfxID != "" {
+			off := endSfxOffset
+			if off <= 0 {
+				off = 1.0
 			}
+			atUS := cursorUS + effDurUS - secToUS(off)
+			if atUS < cursorUS {
+				atUS = cursorUS
+			}
+			addSFXCue(endSfxID, atUS, 0.95)
 		}
 
 		cursorUS += effDurUS
@@ -215,11 +256,23 @@ func ExportJianyingDraft(in ExportInput) (*model.JianyingDraftInfo, map[string]i
 			if lbl == "" {
 				lbl = fmt.Sprintf("Segment %d", idx+1)
 			}
+			segDur := seg.EndSec - seg.StartSec
 			srcPath := in.Job.OutputPath
+			srcStart := float64(cursorUS) / 1_000_000.0
+			matDur := math.Max(in.Job.FinalDuration, srcStart+segDur)
+			if in.ProjectLookup != nil && seg.ProjectID != "" {
+				if localPath, vodDur := in.ProjectLookup(seg.ProjectID); localPath != "" {
+					srcPath = localPath
+					srcStart = seg.StartSec
+					matDur = math.Max(vodDur, seg.EndSec)
+				}
+			}
 			if srcPath == "" {
 				srcPath = fmt.Sprintf("segment_%d.mp4", idx+1)
+				srcStart = 0
+				matDur = segDur
 			}
-			addVideoSeg(srcPath, lbl, seg.StartSec, seg.EndSec-seg.StartSec, spd, zScale, ovTxt, seg.EndSFXID, seg.EndSFXOffset)
+			addVideoSeg(srcPath, lbl, matDur, srcStart, segDur, spd, zScale, ovTxt, seg.EndSFXID, seg.EndSFXOffset, seg.StartSec, seg.EndSec)
 		}
 	} else {
 		dur := in.Job.FinalDuration
@@ -240,16 +293,46 @@ func ExportJianyingDraft(in ExportInput) (*model.JianyingDraftInfo, map[string]i
 		if spd <= 0 {
 			spd = 1.0
 		}
-		addVideoSeg(srcPath, in.Job.Title, 0, dur, spd, 1.0, in.Job.Options.HookText, "", 0)
+		addVideoSeg(srcPath, in.Job.Title, dur, 0, dur, spd, 1.0, in.Job.Options.HookText, "", 0, in.Job.Options.StartSec, in.Job.Options.EndSec)
+
+		// Export single-clip SFX cues (or auto-selected SFX from AutoEdit)
+		if len(in.Job.Options.AudioFX.SFXCues) > 0 {
+			for _, cue := range in.Job.Options.AudioFX.SFXCues {
+				at := cue.AtSec
+				if cue.AtPeak {
+					at = in.Job.Options.VideoFX.PeakOffsetSec
+					if at <= 0 {
+						at = dur * 0.4
+					}
+				}
+				addSFXCue(cue.AssetID, secToUS(at/spd), cue.Volume)
+			}
+		} else if in.Job.AutoEdit != nil && in.Job.AutoEdit.SFXID != "" {
+			peak := in.Job.Options.VideoFX.PeakOffsetSec
+			if peak <= 0 {
+				peak = dur * 0.4
+			}
+			addSFXCue(in.Job.AutoEdit.SFXID, secToUS(peak/spd), 0.95)
+		}
 	}
 
-	// Optional BGM track spanning full timeline
+	// Optional BGM track spanning full timeline (looped cleanly without exceeding audio material duration!)
 	bgmID := in.Job.Options.AudioFX.BGMAssetID
+	bgmVol := in.Job.Options.AudioFX.BGMVolume
 	if bgmID == "" && in.Job.CompileOpts != nil {
 		bgmID = in.Job.CompileOpts.AudioFX.BGMAssetID
+		if bgmVol <= 0 {
+			bgmVol = in.Job.CompileOpts.AudioFX.BGMVolume
+		}
 	}
 	if bgmID == "" && in.Job.AppliedPlan != nil {
 		bgmID = in.Job.AppliedPlan.BGMAssetID
+	}
+	if bgmVol <= 0 && in.Job.CompileOpts != nil && in.Job.CompileOpts.AudioFX.BGMVolume > 0 {
+		bgmVol = in.Job.CompileOpts.AudioFX.BGMVolume
+	}
+	if bgmVol <= 0 {
+		bgmVol = 0.18
 	}
 	if bgmID != "" && in.AudioLookup != nil && cursorUS > 0 {
 		if fpath, aname, adur, ok := in.AudioLookup(bgmID); ok {
@@ -257,61 +340,101 @@ func ExportJianyingDraft(in ExportInput) (*model.JianyingDraftInfo, map[string]i
 				adur = 16
 			}
 			aID := makeUID("mat-bgm", 1)
+			bgmMatDurUS := secToUS(adur)
 			audiosMat = append(audiosMat, map[string]interface{}{
 				"id":       aID,
 				"name":     aname,
 				"path":     fpath,
 				"type":     "music",
-				"duration": secToUS(adur),
+				"duration": bgmMatDurUS,
 			})
-			vol := in.Job.Options.AudioFX.BGMVolume
-			if vol <= 0 {
-				vol = 0.18
+			var bgmCursor int64 = 0
+			loopIdx := 0
+			for bgmCursor < cursorUS {
+				loopIdx++
+				chunk := cursorUS - bgmCursor
+				if bgmMatDurUS > 0 && chunk > bgmMatDurUS {
+					chunk = bgmMatDurUS
+				}
+				audioBGMTrack.Segments = append(audioBGMTrack.Segments, jySegment{
+					ID:              makeUID("seg-bgm", loopIdx),
+					MaterialID:      aID,
+					SourceTimerange: jyTimerange{Start: 0, Duration: chunk},
+					TargetTimerange: jyTimerange{Start: bgmCursor, Duration: chunk},
+					Speed:           1.0,
+					Volume:          bgmVol,
+					ExtraRefs:       []string{},
+				})
+				bgmCursor += chunk
+				if chunk <= 0 {
+					break
+				}
 			}
-			audioBGMTrack.Segments = append(audioBGMTrack.Segments, jySegment{
-				ID:              makeUID("seg-bgm", 1),
-				MaterialID:      aID,
-				SourceTimerange: jyTimerange{Start: 0, Duration: cursorUS},
-				TargetTimerange: jyTimerange{Start: 0, Duration: cursorUS},
-				Speed:           1.0,
-				Volume:          vol,
-			})
 		}
 	}
 
-	// Optional Subtitle cues onto Text track
-	clipStart := in.Job.Options.StartSec
-	clipEnd := in.Job.Options.EndSec
+	// Optional Subtitle cues sliced accurately per mapped window (supports compilations + speed scaling!)
 	subIdx := 0
-	for _, cue := range in.Cues {
-		if clipEnd > clipStart && (cue.End <= clipStart || cue.Start >= clipEnd) {
-			continue
+	if len(windows) > 0 {
+		for _, win := range windows {
+			for _, cue := range in.Cues {
+				if cue.End <= win.vodStart || cue.Start >= win.vodEnd {
+					continue
+				}
+				relS := math.Max(0, cue.Start-win.vodStart) / win.speed
+				relE := math.Min(win.vodEnd-win.vodStart, cue.End-win.vodStart) / win.speed
+				if relE <= relS+0.05 {
+					continue
+				}
+				subIdx++
+				tID := makeUID("mat-sub", subIdx)
+				textsMat = append(textsMat, map[string]interface{}{
+					"id":        tID,
+					"type":      "subtitle",
+					"speaker":   cue.Speaker,
+					"content":   fmt.Sprintf(`{"text":%q,"styles":[{"size":8.0,"fill":{"content":{"solid":{"color":[1,1,1]}}}}]}`, strings.TrimSpace(cue.Text)),
+					"font_size": 8.0,
+				})
+				subTrack.Segments = append(subTrack.Segments, jySegment{
+					ID:              makeUID("seg-sub", subIdx),
+					MaterialID:      tID,
+					SourceTimerange: jyTimerange{Start: 0, Duration: secToUS(relE - relS)},
+					TargetTimerange: jyTimerange{Start: win.targetUS + secToUS(relS), Duration: secToUS(relE - relS)},
+					Speed:           1.0,
+					Volume:          1.0,
+					ExtraRefs:       []string{},
+				})
+			}
 		}
-		relS := cue.Start - clipStart
-		relE := cue.End - clipStart
-		if relS < 0 {
-			relS = 0
+	} else {
+		for _, cue := range in.Cues {
+			if cue.End <= cue.Start+0.05 || secToUS(cue.Start) >= cursorUS {
+				continue
+			}
+			relS := math.Max(0, cue.Start)
+			relE := math.Min(float64(cursorUS)/1_000_000.0, cue.End)
+			if relE <= relS+0.05 {
+				continue
+			}
+			subIdx++
+			tID := makeUID("mat-sub", subIdx)
+			textsMat = append(textsMat, map[string]interface{}{
+				"id":        tID,
+				"type":      "subtitle",
+				"speaker":   cue.Speaker,
+				"content":   fmt.Sprintf(`{"text":%q,"styles":[{"size":8.0,"fill":{"content":{"solid":{"color":[1,1,1]}}}}]}`, strings.TrimSpace(cue.Text)),
+				"font_size": 8.0,
+			})
+			subTrack.Segments = append(subTrack.Segments, jySegment{
+				ID:              makeUID("seg-sub", subIdx),
+				MaterialID:      tID,
+				SourceTimerange: jyTimerange{Start: 0, Duration: secToUS(relE - relS)},
+				TargetTimerange: jyTimerange{Start: secToUS(relS), Duration: secToUS(relE - relS)},
+				Speed:           1.0,
+				Volume:          1.0,
+				ExtraRefs:       []string{},
+			})
 		}
-		if relE <= relS+0.05 {
-			continue
-		}
-		subIdx++
-		tID := makeUID("mat-sub", subIdx)
-		textsMat = append(textsMat, map[string]interface{}{
-			"id":        tID,
-			"type":      "subtitle",
-			"speaker":   cue.Speaker,
-			"content":   fmt.Sprintf(`{"text":%q,"styles":[{"size":8.0,"fill":{"content":{"solid":{"color":[1,1,1]}}}}]}`, strings.TrimSpace(cue.Text)),
-			"font_size": 8.0,
-		})
-		textTrack.Segments = append(textTrack.Segments, jySegment{
-			ID:              makeUID("seg-sub", subIdx),
-			MaterialID:      tID,
-			SourceTimerange: jyTimerange{Start: 0, Duration: secToUS(relE - relS)},
-			TargetTimerange: jyTimerange{Start: secToUS(relS), Duration: secToUS(relE - relS)},
-			Speed:           1.0,
-			Volume:          1.0,
-		})
 	}
 
 	tracks := []jyTrack{videoTrack}
@@ -321,8 +444,11 @@ func ExportJianyingDraft(in ExportInput) (*model.JianyingDraftInfo, map[string]i
 	if len(audioSFXTrack.Segments) > 0 {
 		tracks = append(tracks, audioSFXTrack)
 	}
-	if len(textTrack.Segments) > 0 {
-		tracks = append(tracks, textTrack)
+	if len(hookTrack.Segments) > 0 {
+		tracks = append(tracks, hookTrack)
+	}
+	if len(subTrack.Segments) > 0 {
+		tracks = append(tracks, subTrack)
 	}
 
 	totalSegs := 0

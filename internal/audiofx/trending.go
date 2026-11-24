@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -313,8 +314,9 @@ func (l *Library) FetchTrendingSounds(ctx context.Context, category, customQuery
 		args = append(args, "--js-runtimes", "node")
 	}
 	if settings.CookiesFile != "" {
-		if _, err := os.Stat(settings.CookiesFile); err == nil {
-			args = append(args, "--cookies", settings.CookiesFile)
+		if tmpC, cleanC := cloneTempCookies(settings.CookiesFile); tmpC != "" {
+			defer cleanC()
+			args = append(args, "--cookies", tmpC)
 		}
 	}
 
@@ -446,8 +448,9 @@ func (l *Library) ImportSoundFromURL(ctx context.Context, rawURL, name, kind, ca
 		ytArgs = append(ytArgs, "--ffmpeg-location", dir)
 	}
 	if settings.CookiesFile != "" {
-		if _, err := os.Stat(settings.CookiesFile); err == nil {
-			ytArgs = append(ytArgs, "--cookies", settings.CookiesFile)
+		if tmpC, cleanC := cloneTempCookies(settings.CookiesFile); tmpC != "" {
+			defer cleanC()
+			ytArgs = append(ytArgs, "--cookies", tmpC)
 		}
 	} else if settings.CookiesBrowser != "" {
 		ytArgs = append(ytArgs, "--cookies-from-browser", settings.CookiesBrowser)
@@ -470,8 +473,11 @@ func (l *Library) ImportSoundFromURL(ctx context.Context, rawURL, name, kind, ca
 	rawPath := matches[0]
 
 	ext := ".mp3"
+	afChain := "loudnorm=I=-14:TP=-1.5:LRA=11"
 	if kind == "sfx" {
 		ext = ".wav"
+		// Sub-second SFX (Vine Boom, Metal Pipe) distort under 3s EBU R128 loudnorm; use peak-safe limiter instead!
+		afChain = "alimiter=limit=0.92:attack=3:release=40:level=disabled"
 	}
 	normPath := filepath.Join(tmpDir, "normalized"+ext)
 	ffArgs := []string{
@@ -480,7 +486,7 @@ func (l *Library) ImportSoundFromURL(ctx context.Context, rawURL, name, kind, ca
 		"-vn",
 		"-t", fmt.Sprintf("%.2f", maxDurSec),
 		"-ar", "48000", "-ac", "2",
-		"-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
+		"-af", afChain,
 	}
 	if kind == "bgm" {
 		ffArgs = append(ffArgs, "-c:a", "libmp3lame", "-b:a", "192k")
@@ -493,6 +499,8 @@ func (l *Library) ImportSoundFromURL(ctx context.Context, rawURL, name, kind, ca
 	if err := ffCmd.Run(); err != nil {
 		return nil, fmt.Errorf("ffmpeg konversi audio gagal: %s", strings.TrimSpace(ffErr.String()))
 	}
+
+	actualDur := probeAudioDurationSec(cctx, st.FFprobePath, normPath, kind, maxDurSec)
 
 	f, err := os.Open(normPath)
 	if err != nil {
@@ -512,5 +520,57 @@ func (l *Library) ImportSoundFromURL(ctx context.Context, rawURL, name, kind, ca
 		cleanCat = "TikTok Trend"
 	}
 
-	return l.AddUpload(kind, cleanName, cleanCat, "tiktok_trend"+ext, f, maxDurSec)
+	return l.AddUpload(kind, cleanName, cleanCat, "tiktok_trend"+ext, f, actualDur)
+}
+
+func cloneTempCookies(cookiesPath string) (string, func()) {
+	noop := func() {}
+	p := strings.TrimSpace(cookiesPath)
+	if p == "" {
+		return "", noop
+	}
+	data, err := os.ReadFile(p)
+	if err != nil || len(bytes.TrimSpace(data)) == 0 {
+		if bak, berr := os.ReadFile(p + ".good"); berr == nil && len(bytes.TrimSpace(bak)) > 0 {
+			data = bak
+		} else {
+			return "", noop
+		}
+	}
+	tmp, err := os.CreateTemp("", "kf-audio-cookie-*.txt")
+	if err != nil {
+		return p, noop
+	}
+	tp := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tp)
+		return p, noop
+	}
+	_ = tmp.Close()
+	_ = os.Chmod(tp, 0o600)
+	return tp, func() { _ = os.Remove(tp) }
+}
+
+func probeAudioDurationSec(ctx context.Context, ffprobePath, mediaPath, kind string, fallback float64) float64 {
+	if ffprobePath != "" {
+		out, err := exec.CommandContext(ctx, ffprobePath,
+			"-v", "error",
+			"-show_entries", "format=duration",
+			"-of", "default=noprint_wrappers=1:nokey=1",
+			mediaPath,
+		).Output()
+		if err == nil {
+			if d, perr := strconv.ParseFloat(strings.TrimSpace(string(out)), 64); perr == nil && d > 0.05 {
+				return d
+			}
+		}
+	}
+	// Exact PCM WAV duration fallback (48kHz stereo 16-bit = 192,000 bytes/sec)
+	if kind == "sfx" {
+		if fi, err := os.Stat(mediaPath); err == nil && fi.Size() > 44 {
+			return float64(fi.Size()-44) / 192000.0
+		}
+	}
+	return fallback
 }

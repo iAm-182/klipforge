@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"klipforge/internal/analyzer"
@@ -31,9 +32,26 @@ type WorkerPool struct {
 	Audio   *audiofx.Library
 	Broker  *events.Broker
 
-	queue   chan string
-	mu      sync.Mutex
-	cancels map[string]context.CancelFunc
+	queue              chan string
+	mu                 sync.Mutex
+	cancels            map[string]context.CancelFunc
+	jobSeq             atomic.Uint64
+	whisperUnavailable atomic.Bool
+}
+
+func resolveAutoEncoder(requested string, encoders []string) string {
+	req := strings.TrimSpace(requested)
+	if req != "" && !strings.EqualFold(req, "auto") {
+		return req
+	}
+	for _, preferred := range []string{"h264_nvenc", "h264_qsv", "h264_amf"} {
+		for _, avail := range encoders {
+			if strings.EqualFold(strings.TrimSpace(avail), preferred) {
+				return preferred
+			}
+		}
+	}
+	return "libx264"
 }
 
 func NewWorkerPool(st *store.Store, d *deps.Manager, yt *youtube.Client, audioLib *audiofx.Library, broker *events.Broker) *WorkerPool {
@@ -127,15 +145,25 @@ func (wp *WorkerPool) EnqueueWithReview(opts model.RenderOptions, reviewStatus, 
 
 	campName := "Custom"
 	campID := ""
+	var forbidden []string
 	if camp != nil {
 		campName = camp.Name
 		campID = camp.ID
+		forbidden = camp.ForbiddenWords
 	}
 
-	jobID := fmt.Sprintf("job-%d", time.Now().UnixNano())
+	jobID := fmt.Sprintf("job-%d-%d", time.Now().UnixNano(), wp.jobSeq.Add(1))
 	title := strings.TrimSpace(opts.Title)
 	if title == "" {
 		title = fmt.Sprintf("Clip %s", formatRange(opts.StartSec, opts.EndSec))
+	}
+	if len(forbidden) > 0 {
+		if analyzer.ContainsForbiddenWord(title, forbidden) {
+			return nil, fmt.Errorf("title mengandung kata terlarang campaign: %q", title)
+		}
+		if strings.TrimSpace(opts.HookText) != "" && analyzer.ContainsForbiddenWord(opts.HookText, forbidden) {
+			return nil, fmt.Errorf("hookText mengandung kata terlarang campaign: %q", opts.HookText)
+		}
 	}
 
 	caption, hashtags := buildPostKit(title, opts.HookText, camp)
@@ -157,6 +185,10 @@ func (wp *WorkerPool) EnqueueWithReview(opts model.RenderOptions, reviewStatus, 
 		Compliance:   compliance,
 		ReviewStatus: reviewStatus,
 		AutopilotID:  autopilotID,
+		CreatedByID:  opts.ActorID,
+		CreatedBy:    opts.ActorName,
+		CreatedVia:   opts.ActorVia,
+		BoardColumn:  opts.InitialBoard,
 		CreatedAt:    time.Now(),
 	}
 
@@ -176,13 +208,13 @@ func (wp *WorkerPool) Cancel(jobID string) {
 	if ok {
 		cancel()
 	}
-	if job, exists := wp.Store.GetJob(jobID); exists {
-		if job.Status == "queued" || job.Status == "downloading" || job.Status == "rendering" {
-			job.Status = "canceled"
-			job.Stage = "Dibatalkan pengguna"
-			_ = wp.Store.SaveJob(job)
-			wp.Broker.Publish("job_update", job)
+	if updated, exists := wp.Store.UpdateJob(jobID, func(j *model.RenderJob) {
+		if j.Status == "queued" || j.Status == "downloading" || j.Status == "rendering" {
+			j.Status = "canceled"
+			j.Stage = "Dibatalkan pengguna"
 		}
+	}); exists && updated.Status == "canceled" {
+		wp.Broker.Publish("job_update", updated)
 	}
 }
 
@@ -221,7 +253,13 @@ func (wp *WorkerPool) EnqueueCompilation(opts model.CompileOptions) (*model.Rend
 	if camp != nil {
 		forbidden = camp.ForbiddenWords
 	}
+	if len(forbidden) > 0 && strings.TrimSpace(opts.Title) != "" && analyzer.ContainsForbiddenWord(opts.Title, forbidden) {
+		return nil, fmt.Errorf("title kompilasi mengandung kata terlarang campaign: %q", opts.Title)
+	}
 	for i, seg := range opts.Segments {
+		if len(forbidden) > 0 && strings.TrimSpace(seg.Label) != "" && analyzer.ContainsForbiddenWord(seg.Label, forbidden) {
+			return nil, fmt.Errorf("segmen #%d label mengandung kata terlarang campaign: %q", i+1, seg.Label)
+		}
 		if seg.TextOverlay != nil && strings.TrimSpace(seg.TextOverlay.Text) != "" {
 			if analyzer.ContainsForbiddenWord(seg.TextOverlay.Text, forbidden) {
 				return nil, fmt.Errorf("segmen #%d textOverlay mengandung kata terlarang campaign: %q", i+1, seg.TextOverlay.Text)
@@ -259,7 +297,7 @@ func (wp *WorkerPool) EnqueueCompilation(opts model.CompileOptions) (*model.Rend
 		title = fmt.Sprintf("Top %d Viral Moments", len(opts.Segments))
 	}
 
-	jobID := fmt.Sprintf("comp-%d", time.Now().UnixNano())
+	jobID := fmt.Sprintf("comp-%d-%d", time.Now().UnixNano(), wp.jobSeq.Add(1))
 	caption, hashtags := buildPostKit(title, title, camp)
 
 	// Build compliance evaluation
@@ -284,6 +322,11 @@ func (wp *WorkerPool) EnqueueCompilation(opts model.CompileOptions) (*model.Rend
 	}
 
 	optsCopy := opts
+	var initialAutoEdit *model.AutoEditDecision
+	if opts.InitialPlan != nil && opts.InitialPlan.AutoEdit != nil {
+		aeCopy := *opts.InitialPlan.AutoEdit
+		initialAutoEdit = &aeCopy
+	}
 	job := &model.RenderJob{
 		ID:           jobID,
 		JobType:      "compilation",
@@ -293,12 +336,18 @@ func (wp *WorkerPool) EnqueueCompilation(opts model.CompileOptions) (*model.Rend
 		CampaignName: campName,
 		Title:        title,
 		CompileOpts:  &optsCopy,
+		AppliedPlan:  opts.InitialPlan,
+		AutoEdit:     initialAutoEdit,
 		Status:       "queued",
 		Stage:        fmt.Sprintf("Antrean Top-%d Kompilasi (%d klip)...", len(opts.Segments), len(opts.Segments)),
 		Progress:     0,
 		PostCaption:  caption,
 		HashtagLine:  hashtags,
 		Compliance:   comp,
+		CreatedByID:  opts.ActorID,
+		CreatedBy:    opts.ActorName,
+		CreatedVia:   opts.ActorVia,
+		BoardColumn:  opts.InitialBoard,
 		CreatedAt:    time.Now(),
 	}
 
@@ -329,7 +378,7 @@ func (wp *WorkerPool) EnqueuePostEdit(opts model.PostEditOptions) (*model.Render
 	if opts.TrimEndSec > 0 && opts.TrimEndSec <= opts.TrimStartSec+0.5 {
 		return nil, fmt.Errorf("durasi potong tidak valid: End (%.1fs) harus lebih besar dari Start (%.1fs)", opts.TrimEndSec, opts.TrimStartSec)
 	}
-	if opts.Speed < 0.75 || opts.Speed > 1.5 {
+	if opts.Speed < 0.50 || opts.Speed > 2.00 {
 		opts.Speed = 1.0
 	}
 
@@ -338,7 +387,7 @@ func (wp *WorkerPool) EnqueuePostEdit(opts model.PostEditOptions) (*model.Render
 		title = srcJob.Title + " (Edit)"
 	}
 
-	jobID := fmt.Sprintf("edit-%d", time.Now().UnixNano())
+	jobID := fmt.Sprintf("edit-%d-%d", time.Now().UnixNano(), wp.jobSeq.Add(1))
 	optsCopy := opts
 	comp := srcJob.Compliance
 	comp.HasValueAdd = true
@@ -360,6 +409,10 @@ func (wp *WorkerPool) EnqueuePostEdit(opts model.PostEditOptions) (*model.Render
 		PostCaption:  srcJob.PostCaption,
 		HashtagLine:  srcJob.HashtagLine,
 		Compliance:   comp,
+		CreatedByID:  opts.ActorID,
+		CreatedBy:    opts.ActorName,
+		CreatedVia:   opts.ActorVia,
+		BoardColumn:  opts.InitialBoard,
 		CreatedAt:    time.Now(),
 	}
 
@@ -420,7 +473,7 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 	opts := job.Options
 	clipDur := opts.EndSec - opts.StartSec
 	speed := opts.VideoFX.Speed
-	if speed < 0.75 || speed > 1.50 {
+	if speed < 0.50 || speed > 2.00 {
 		speed = 1.0
 	}
 	sourcePath := ""
@@ -452,6 +505,8 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 		seekStart = 0
 	}
 
+	depSt := wp.Deps.GetStatus()
+
 	// Step 1b (B3.2 & B3.3): Optional Scene-Cut Snapping + Silence Trim (NEVER trims inside peakSec window!)
 	relPeak := opts.VideoFX.PeakOffsetSec
 	if relPeak <= 0.5 || relPeak >= clipDur-0.5 {
@@ -459,23 +514,42 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 	}
 	var detectedCuts []float64
 	if opts.SceneSnap && sourcePath != "" {
-		if scRes, err := analyzer.DetectSceneCuts(ctx, settings.SceneDetectBin, wp.Deps.GetStatus().FFmpegPath, sourcePath); err == nil && len(scRes.Cuts) > 0 {
-			detectedCuts = scRes.Cuts
-			ns, ne, snapped := analyzer.SnapBoundariesToScenes(seekStart, seekStart+clipDur, seekStart+relPeak, scRes.Cuts, 3.0, 8.0)
+		var cuts []float64
+		engine := ""
+		if seekStart > 0 {
+			if cached := wp.loadProjectScenes(proj); len(cached) > 0 {
+				cuts = cached
+				engine = "cached_scenes"
+			} else if scRes, err := analyzer.DetectSceneCutsWindow(ctx, settings.SceneDetectBin, depSt.FFmpegPath, sourcePath, seekStart, clipDur); err == nil && len(scRes.Cuts) > 0 {
+				cuts = scRes.Cuts
+				engine = scRes.Engine
+			}
+		} else if scRes, err := analyzer.DetectSceneCuts(ctx, settings.SceneDetectBin, depSt.FFmpegPath, sourcePath); err == nil && len(scRes.Cuts) > 0 {
+			cuts = scRes.Cuts
+			engine = scRes.Engine
+		}
+		if len(cuts) > 0 {
+			detectedCuts = cuts
+			ns, ne, snapped := analyzer.SnapBoundariesToScenes(seekStart, seekStart+clipDur, seekStart+relPeak, cuts, 3.0, 8.0)
 			if snapped {
 				deltaStart := ns - seekStart
 				seekStart = ns
 				clipDur = ne - ns
 				opts.StartSec += deltaStart
 				opts.EndSec = opts.StartSec + clipDur
-				wp.Broker.Log("worker", "info", fmt.Sprintf("[W%d] Scene-Snap (%s): batas klip diselaraskan ke cut nyata [%.1f-%.1fs]", workerID, scRes.Engine, seekStart, seekStart+clipDur))
+				relPeak -= deltaStart
+				if relPeak <= 0.3 || relPeak >= clipDur-0.3 {
+					relPeak = clipDur * 0.45
+				}
+				opts.VideoFX.PeakOffsetSec = relPeak
+				wp.Broker.Log("worker", "info", fmt.Sprintf("[W%d] Scene-Snap (%s): batas klip diselaraskan ke cut nyata [%.1f-%.1fs]", workerID, engine, seekStart, seekStart+clipDur))
 			}
 		}
 	}
 	if opts.SilenceTrim && sourcePath != "" {
 		var segEnergy []float64
 		if seekStart == 0 {
-			if e, err := analyzer.AnalyzeAudioEnergy(ctx, wp.Deps.GetStatus().FFmpegPath, sourcePath, clipDur); err == nil {
+			if e, err := analyzer.AnalyzeAudioEnergy(ctx, depSt.FFmpegPath, sourcePath, clipDur); err == nil {
 				segEnergy = e
 			}
 		} else {
@@ -491,9 +565,21 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 				clipDur = ne - ns
 				opts.StartSec += deltaStart
 				opts.EndSec = opts.StartSec + clipDur
+				relPeak -= deltaStart
+				if relPeak <= 0.3 || relPeak >= clipDur-0.3 {
+					relPeak = clipDur * 0.45
+				}
+				opts.VideoFX.PeakOffsetSec = relPeak
 				wp.Broker.Log("worker", "info", fmt.Sprintf("[W%d] Silence-Trim: %s", workerID, reason))
 			}
 		}
+	}
+
+	// Step 1c: Resolve auto layout (facecam_auto -> facecam_top_neon / face_track) BEFORE generating ASS so subtitle positioning matches!
+	hadCachedBox := proj.FacecamBox != nil
+	ResolveAutoLayout(ctx, &opts.Layout, proj, sourcePath, clipDur)
+	if !hadCachedBox && proj.FacecamBox != nil {
+		_ = wp.Store.SaveProject(proj)
 	}
 
 	// Step 2: Generate ASS Viral Word-by-Word Karaoke Subtitles + Animated Hook Banner (zero tofu boxes!)
@@ -510,6 +596,8 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 				cues = parsed
 			}
 		}
+		// Optional local Whisper sidecar word-timing upgrade (cached negative when absent!)
+		cues = wp.maybeTranscribeWordTimings(ctx, depSt.FFmpegPath, sourcePath, workDir, seekStart, clipDur, opts.StartSec, opts.EndSec, cues)
 	}
 	if len(cues) > 0 || strings.TrimSpace(opts.HookText) != "" {
 		wp.updateJob(job, "rendering", "Menyiapkan Karaoke Subtitles & Animated Hook (.ASS)...", 36, "")
@@ -554,7 +642,10 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 		}
 		decCopy := dec
 		job.AutoEdit = &decCopy
-		_ = wp.Store.SaveJob(job)
+		wp.Store.UpdateJob(job.ID, func(j *model.RenderJob) {
+			c := decCopy
+			j.AutoEdit = &c
+		})
 	}
 
 	bgmPath := ""
@@ -603,26 +694,30 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 	)
 	outPath := filepath.Join(outDir, fileName)
 
-	wp.updateJob(job, "rendering", "Rendering FFmpeg (FX + BGM/SFX + Watermark + Outro)...", 40, "")
 	nowStart := time.Now()
-	job.WorkerID = workerID
-	if job.StartedAt == nil {
-		job.StartedAt = &nowStart
+	if updated, ok := wp.Store.UpdateJob(job.ID, func(j *model.RenderJob) {
+		j.Status = "rendering"
+		j.Stage = "Rendering FFmpeg (FX + BGM/SFX + Watermark + Outro)..."
+		j.Progress = 40
+		j.WorkerID = workerID
+		if j.StartedAt == nil {
+			t := nowStart
+			j.StartedAt = &t
+		}
+		j.BoardColumn = "render"
+	}); ok {
+		job = updated
+		wp.Broker.Publish("job_update", updated)
 	}
-	job.BoardColumn = "render"
-	_ = wp.Store.SaveJob(job)
-	wp.Broker.Publish("job_update", job)
 
 	peekCtx, stopPeek := context.WithCancel(ctx)
-	go wp.runPeekLoop(peekCtx, job, sourcePath, seekStart, clipDur)
+	go wp.runPeekLoop(peekCtx, job.ID, sourcePath, seekStart, clipDur)
 	defer stopPeek()
 
 	wp.Broker.Log("worker", "info", fmt.Sprintf("[W%d] Rendering %s (BGM:%v, SFX:%d, Color:%s, Motion:%s)",
 		workerID, fileName, bgmPath != "", len(resolvedSFX), opts.VideoFX.ColorPreset, opts.VideoFX.MotionPreset))
 
-	applyProjectFacecamDefault(&opts.Layout, proj)
-
-	depSt := wp.Deps.GetStatus()
+	encoder := resolveAutoEncoder(opts.Encoder, depSt.Encoders)
 	info, err := RenderClip(ctx, RenderInput{
 		FFmpegPath:   depSt.FFmpegPath,
 		FFprobePath:  depSt.FFprobePath,
@@ -645,7 +740,7 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 		Watermark:    wmCfg,
 		Intro:        introCfg,
 		Outro:        outroCfg,
-		Encoder:      opts.Encoder,
+		Encoder:      encoder,
 		Preset:       opts.Preset,
 		CRF:          opts.CRF,
 		OnProgress: func(pct float64, speed string) {
@@ -663,39 +758,63 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 		wp.failJob(job, err.Error())
 		return
 	}
+	stopPeek()
 
 	var size int64
 	if fi, err := os.Stat(outPath); err == nil {
 		size = fi.Size()
 	}
-	now := time.Now()
-	job.Status = "done"
-	job.Stage = "Selesai & siap upload!"
-	job.Progress = 100
-	job.OutputPath = outPath
-	job.OutputFile = fileName
-	job.FileSizeBytes = size
-	job.FinalDuration = info.Duration
-	job.CompletedAt = &now
-	if job.ReviewStatus == "" {
-		job.ReviewStatus = "pending_review"
-	}
-	if job.BoardColumn == "" || job.BoardColumn == "render" || job.BoardColumn == "kandidat" {
-		job.BoardColumn = "review"
-	}
-	wp.grabPeekFrameOnce(ctx, job, outPath, math.Max(0.5, info.Duration*0.35))
-	// B3.2 Cover Picker: sharpest face-present frame near peakSec inside the same shot!
+	peekPath, peekURL, hasPeek := wp.GrabPeekFrameOnce(ctx, job.ID, outPath, math.Max(0.5, info.Duration*0.35))
+	// B3.2 Cover Picker: sharpest face-present frame near peakSec inside the same shot (mapped to clip-relative time!)
+	var coverPath, coverURL string
 	coverDir := filepath.Join(wp.Store.DataDir, "covers")
 	_ = os.MkdirAll(coverDir, 0o755)
-	coverPath := filepath.Join(coverDir, sanitizeFilename(job.ID)+".jpg")
-	shotS, shotE := analyzer.ShotBoundsAround(math.Min(info.Duration, relPeak), info.Duration, detectedCuts)
-	if covRes, err := PickSharpestCoverFrame(ctx, depSt.FFmpegPath, outPath, shotS, shotE, math.Min(info.Duration-0.5, relPeak), coverPath); err == nil && covRes.OK {
-		job.CoverFramePath = coverPath
-		job.CoverFrameURL = fmt.Sprintf("/api/jobs/%s/cover", job.ID)
+	candCover := filepath.Join(coverDir, sanitizeFilename(job.ID)+".jpg")
+	var relCuts []float64
+	for _, c := range detectedCuts {
+		rc := (c - seekStart) / speed
+		if rc > 0.2 && rc < info.Duration-0.2 {
+			relCuts = append(relCuts, rc)
+		}
 	}
-	job.Compliance = evaluateCompliance(opts, camp)
-	_ = wp.Store.SaveJob(job)
-	wp.Broker.Publish("job_update", job)
+	effPeak := math.Min(math.Max(0.5, info.Duration-0.5), relPeak/speed)
+	shotS, shotE := analyzer.ShotBoundsAround(effPeak, info.Duration, relCuts)
+	if covRes, err := PickSharpestCoverFrame(ctx, depSt.FFmpegPath, outPath, shotS, shotE, effPeak, candCover); err == nil && covRes.OK {
+		coverPath = candCover
+		coverURL = fmt.Sprintf("/api/jobs/%s/cover", job.ID)
+	}
+
+	now := time.Now()
+	compliance := evaluateCompliance(opts, camp)
+	if updated, ok := wp.Store.UpdateJob(job.ID, func(j *model.RenderJob) {
+		j.Status = "done"
+		j.Stage = "Selesai & siap upload!"
+		j.Progress = 100
+		j.OutputPath = outPath
+		j.OutputFile = fileName
+		j.FileSizeBytes = size
+		j.FinalDuration = info.Duration
+		t := now
+		j.CompletedAt = &t
+		if j.ReviewStatus == "" {
+			j.ReviewStatus = "pending_review"
+		}
+		if j.BoardColumn == "" || j.BoardColumn == "render" || j.BoardColumn == "kandidat" {
+			j.BoardColumn = "review"
+		}
+		if hasPeek {
+			j.PeekFramePath = peekPath
+			j.PeekFrameURL = peekURL
+		}
+		if coverPath != "" {
+			j.CoverFramePath = coverPath
+			j.CoverFrameURL = coverURL
+		}
+		j.Compliance = compliance
+	}); ok {
+		job = updated
+		wp.Broker.Publish("job_update", updated)
+	}
 	wp.Broker.Log("worker", "success", fmt.Sprintf("Clip selesai: %s (%.1fs, %.2f MB)", fileName, info.Duration, float64(size)/(1024*1024)))
 	wp.notifyJobDone(job)
 }
@@ -729,6 +848,7 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 	// Cache resolved stream URLs & subtitles per project so a 5-clip Top-N only calls yt-dlp ONCE (prevents YouTube 403!)
 	streamCache := make(map[string]*youtube.StreamPair)
 	cuesCache := make(map[string][]model.TranscriptCue)
+	depSt := wp.Deps.GetStatus()
 
 	// Step 1: Download or map each segment (countdown rank = total - i, e.g. 5, 4, 3, 2, 1!)
 	for i, seg := range opts.Segments {
@@ -752,12 +872,16 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 			return
 		}
 
-		// Load project subtitles once if available
+		// Load project subtitles once if available (prefer speaker-diarized cues B3.4!)
 		var segCues []model.TranscriptCue
 		if cachedCues, exists := cuesCache[proj.ID]; exists {
 			segCues = cachedCues
 		} else {
-			if proj.SubtitlePath != "" && fileExists(proj.SubtitlePath) {
+			diarPath := filepath.Join(wp.Store.ProjectDir(proj.ID), "diarized_cues.json")
+			if raw, err := os.ReadFile(diarPath); err == nil {
+				_ = json.Unmarshal(raw, &segCues)
+			}
+			if len(segCues) == 0 && proj.SubtitlePath != "" && fileExists(proj.SubtitlePath) {
 				if parsed, err := youtube.ParseSubtitleFile(proj.SubtitlePath); err == nil {
 					segCues = parsed
 				}
@@ -813,6 +937,72 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 			seekStart = 0
 		}
 
+		segStart := seg.StartSec
+		segEnd := seg.EndSec
+		segDur := segEnd - segStart
+		segPeakRel := segDur * 0.45
+
+		// Optional Scene-Snap + Silence-Trim per compilation segment (same offline engine as single clips!)
+		if opts.SceneSnap && srcPath != "" {
+			var cuts []float64
+			if seekStart > 0 {
+				if cached := wp.loadProjectScenes(proj); len(cached) > 0 {
+					cuts = cached
+				} else if scRes, err := analyzer.DetectSceneCutsWindow(ctx, settings.SceneDetectBin, depSt.FFmpegPath, srcPath, seekStart, segDur); err == nil {
+					cuts = scRes.Cuts
+				}
+			} else if scRes, err := analyzer.DetectSceneCuts(ctx, settings.SceneDetectBin, depSt.FFmpegPath, srcPath); err == nil {
+				cuts = scRes.Cuts
+			}
+			if len(cuts) > 0 {
+				ns, ne, snapped := analyzer.SnapBoundariesToScenes(seekStart, seekStart+segDur, seekStart+segPeakRel, cuts, 3.0, 5.0)
+				if snapped {
+					deltaStart := ns - seekStart
+					seekStart = ns
+					segDur = ne - ns
+					segStart += deltaStart
+					segEnd = segStart + segDur
+					segPeakRel = math.Max(0.5, segPeakRel-deltaStart)
+				}
+			}
+		}
+		if opts.SilenceTrim && srcPath != "" {
+			var segEnergy []float64
+			if seekStart == 0 {
+				if e, err := analyzer.AnalyzeAudioEnergy(ctx, depSt.FFmpegPath, srcPath, segDur); err == nil {
+					segEnergy = e
+				}
+			} else if raw, err := os.ReadFile(filepath.Join(wp.Store.ProjectDir(proj.ID), "audio_energy.json")); err == nil {
+				_ = json.Unmarshal(raw, &segEnergy)
+			}
+			if len(segEnergy) > 0 {
+				ns, ne, trimmed, _ := analyzer.TrimSilenceFromEnergy(segEnergy, seekStart, seekStart+segDur, seekStart+segPeakRel, analyzer.DefaultSilenceTrimConfig())
+				if trimmed {
+					deltaStart := ns - seekStart
+					seekStart = ns
+					segDur = ne - ns
+					segStart += deltaStart
+					segEnd = segStart + segDur
+				}
+			}
+		}
+
+		// Optional local Whisper sidecar word-timing upgrade per segment
+		if opts.Subtitles.Enabled {
+			segCues = wp.maybeTranscribeWordTimings(ctx, depSt.FFmpegPath, srcPath, workDir, seekStart, segDur, segStart, segEnd, segCues)
+		}
+
+		// Per-segment layout + facecam_auto resolution (respects seg.CropMode and each segment's project FacecamBox!)
+		segLayout := opts.Layout
+		if strings.TrimSpace(seg.CropMode) != "" {
+			segLayout.CropMode = strings.TrimSpace(seg.CropMode)
+		}
+		hadBox := proj.FacecamBox != nil
+		ResolveAutoLayout(ctx, &segLayout, proj, srcPath, segDur)
+		if !hadBox && proj.FacecamBox != nil {
+			_ = wp.Store.SaveProject(proj)
+		}
+
 		segEndSFXID := strings.TrimSpace(seg.EndSFXID)
 		segBGMAssetID := strings.TrimSpace(seg.BGMAssetID)
 		if wp.Audio != nil && opts.AudioFX.SFXAutoPreset == "auto_by_moment" && strings.TrimSpace(seg.MomentType) != "" {
@@ -830,6 +1020,12 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 			if job.AutoEdit == nil {
 				decCopy := dec
 				job.AutoEdit = &decCopy
+				wp.Store.UpdateJob(job.ID, func(j *model.RenderJob) {
+					if j.AutoEdit == nil {
+						c := decCopy
+						j.AutoEdit = &c
+					}
+				})
 			}
 		}
 
@@ -849,12 +1045,12 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 		resolved = append(resolved, ResolvedCompileSegment{
 			SourcePath:   srcPath,
 			SeekStart:    seekStart,
-			ClipDuration: seg.EndSec - seg.StartSec,
+			ClipDuration: segDur,
 			RankNumber:   rankNum,
 			Label:        lbl,
 			Cues:         segCues,
-			OrigStart:    seg.StartSec,
-			OrigEnd:      seg.EndSec,
+			OrigStart:    segStart,
+			OrigEnd:      segEnd,
 			EndSFXPath:   endSfxPath,
 			EndSFXOffset: seg.EndSFXOffset,
 			Speed:        seg.Speed,
@@ -864,6 +1060,7 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 			Filter:       seg.Filter,
 			Transition:   seg.Transition,
 			BGMPath:      segBGMPath,
+			Layout:       segLayout,
 		})
 	}
 
@@ -908,27 +1105,31 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 	outPath := filepath.Join(outDir, fileName)
 
 	nowStart := time.Now()
-	job.WorkerID = workerID
-	if job.StartedAt == nil {
-		job.StartedAt = &nowStart
+	if updated, ok := wp.Store.UpdateJob(job.ID, func(j *model.RenderJob) {
+		j.WorkerID = workerID
+		if j.StartedAt == nil {
+			t := nowStart
+			j.StartedAt = &t
+		}
+		j.BoardColumn = "render"
+	}); ok {
+		job = updated
+		wp.Broker.Publish("job_update", updated)
 	}
-	job.BoardColumn = "render"
-	_ = wp.Store.SaveJob(job)
-	wp.Broker.Publish("job_update", job)
+	var stopPeek context.CancelFunc = func() {}
 	if len(resolved) > 0 {
-		peekCtx, stopPeek := context.WithCancel(ctx)
-		go wp.runPeekLoop(peekCtx, job, resolved[0].SourcePath, resolved[0].SeekStart, resolved[0].ClipDuration)
+		var peekCtx context.Context
+		peekCtx, stopPeek = context.WithCancel(ctx)
+		go wp.runPeekLoop(peekCtx, job.ID, resolved[0].SourcePath, resolved[0].SeekStart, resolved[0].ClipDuration)
 		defer stopPeek()
 	}
 
-	if len(opts.Segments) > 0 {
-		if firstProj, ok := wp.Store.GetProject(opts.Segments[0].ProjectID); ok {
-			applyProjectFacecamDefault(&opts.Layout, firstProj)
-		}
+	if len(resolved) > 0 {
+		opts.Layout = resolved[0].Layout
 	}
 
 	wp.Broker.Log("worker", "info", fmt.Sprintf("[W%d] Rendering Kompilasi %s (%d klip)", workerID, fileName, total))
-	depSt := wp.Deps.GetStatus()
+	encoder := resolveAutoEncoder(opts.Encoder, depSt.Encoders)
 	info, err := RenderCompilation(ctx, CompileInput{
 		FFmpegPath:     depSt.FFmpegPath,
 		FFprobePath:    depSt.FFprobePath,
@@ -950,7 +1151,7 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 		BumperSFXPath:  bumperSfxPath,
 		Watermark:      wmCfg,
 		Outro:          outroCfg,
-		Encoder:        opts.Encoder,
+		Encoder:        encoder,
 		Preset:         opts.Preset,
 		CRF:            opts.CRF,
 		OnProgress: func(pct float64, stage string) {
@@ -968,32 +1169,56 @@ func (wp *WorkerPool) processCompilationJob(workerID int, job *model.RenderJob) 
 		wp.failJob(job, err.Error())
 		return
 	}
+	stopPeek()
 
 	var size int64
 	if fi, err := os.Stat(outPath); err == nil {
 		size = fi.Size()
 	}
+	peekPath, peekURL, hasPeek := wp.GrabPeekFrameOnce(ctx, job.ID, outPath, math.Max(0.5, info.Duration*0.30))
+	var coverPath, coverURL string
+	coverDir := filepath.Join(wp.Store.DataDir, "covers")
+	_ = os.MkdirAll(coverDir, 0o755)
+	candCover := filepath.Join(coverDir, sanitizeFilename(job.ID)+".jpg")
+	coverPeak := math.Max(0.5, info.Duration*0.35)
+	if covRes, err := PickSharpestCoverFrame(ctx, depSt.FFmpegPath, outPath, 0, info.Duration, coverPeak, candCover); err == nil && covRes.OK {
+		coverPath = candCover
+		coverURL = fmt.Sprintf("/api/jobs/%s/cover", job.ID)
+	}
+
 	now := time.Now()
-	job.Status = "done"
-	job.Stage = fmt.Sprintf("Kompilasi Top-%d selesai & siap upload!", total)
+	doneStage := fmt.Sprintf("Kompilasi Top-%d selesai & siap upload!", total)
 	if opts.Mode == "edit_script" {
-		job.Stage = fmt.Sprintf("Edit-Script (%d segmen) selesai & siap upload!", total)
+		doneStage = fmt.Sprintf("Edit-Script (%d segmen) selesai & siap upload!", total)
 	}
-	job.Progress = 100
-	job.OutputPath = outPath
-	job.OutputFile = fileName
-	job.FileSizeBytes = size
-	job.FinalDuration = info.Duration
-	job.CompletedAt = &now
-	if job.ReviewStatus == "" {
-		job.ReviewStatus = "pending_review"
+	if updated, ok := wp.Store.UpdateJob(job.ID, func(j *model.RenderJob) {
+		j.Status = "done"
+		j.Stage = doneStage
+		j.Progress = 100
+		j.OutputPath = outPath
+		j.OutputFile = fileName
+		j.FileSizeBytes = size
+		j.FinalDuration = info.Duration
+		t := now
+		j.CompletedAt = &t
+		if j.ReviewStatus == "" {
+			j.ReviewStatus = "pending_review"
+		}
+		if j.BoardColumn == "" || j.BoardColumn == "render" || j.BoardColumn == "kandidat" {
+			j.BoardColumn = "review"
+		}
+		if hasPeek {
+			j.PeekFramePath = peekPath
+			j.PeekFrameURL = peekURL
+		}
+		if coverPath != "" {
+			j.CoverFramePath = coverPath
+			j.CoverFrameURL = coverURL
+		}
+	}); ok {
+		job = updated
+		wp.Broker.Publish("job_update", updated)
 	}
-	if job.BoardColumn == "" || job.BoardColumn == "render" || job.BoardColumn == "kandidat" {
-		job.BoardColumn = "review"
-	}
-	wp.grabPeekFrameOnce(ctx, job, outPath, math.Max(0.5, info.Duration*0.30))
-	_ = wp.Store.SaveJob(job)
-	wp.Broker.Publish("job_update", job)
 	wp.Broker.Log("worker", "success", fmt.Sprintf("Kompilasi selesai: %s (%.1fs, %.2f MB)", fileName, info.Duration, float64(size)/(1024*1024)))
 	wp.notifyJobDone(job)
 }
@@ -1063,6 +1288,9 @@ func (wp *WorkerPool) processPostEditJob(workerID int, job *model.RenderJob) {
 		cp := *opts.Watermark
 		if cp.FilePath == "" && camp != nil && camp.Watermark.FilePath != "" {
 			cp.FilePath = camp.Watermark.FilePath
+		} else if cp.FilePath != "" {
+			// Security: confine user/agent-supplied watermark path strictly inside Store.AssetsDir!
+			cp.FilePath = filepath.Join(wp.Store.AssetsDir, filepath.Base(cp.FilePath))
 		}
 		if cp.FilePath != "" && fileExists(cp.FilePath) {
 			wmCfg = &cp
@@ -1078,11 +1306,26 @@ func (wp *WorkerPool) processPostEditJob(workerID int, job *model.RenderJob) {
 	fileName := fmt.Sprintf("%s_edit_%s.mp4", sanitizeFilename(job.Title), job.ID[len(job.ID)-5:])
 	outPath := filepath.Join(outDir, fileName)
 
-	wp.updateJob(job, "rendering", "Memproses Edit Manual (Trim / +SFX / Watermark)...", 12, "")
+	nowStart := time.Now()
+	if updated, ok := wp.Store.UpdateJob(job.ID, func(j *model.RenderJob) {
+		j.Status = "rendering"
+		j.Stage = "Memproses Edit Manual (Trim / +SFX / Watermark)..."
+		j.Progress = 12
+		j.WorkerID = workerID
+		if j.StartedAt == nil {
+			t := nowStart
+			j.StartedAt = &t
+		}
+		j.BoardColumn = "render"
+	}); ok {
+		job = updated
+		wp.Broker.Publish("job_update", updated)
+	}
 	wp.Broker.Log("worker", "info", fmt.Sprintf("[W%d] Post-Edit %s (trim=%.1f-%.1fs, +%d SFX, wm=%v)",
 		workerID, fileName, opts.TrimStartSec, opts.TrimEndSec, len(resolvedSFX), wmCfg != nil))
 
 	depSt := wp.Deps.GetStatus()
+	encoder := resolveAutoEncoder(settings.DefaultEncoder, depSt.Encoders)
 	info, err := RenderPostEdit(ctx, PostEditInput{
 		FFmpegPath:     depSt.FFmpegPath,
 		FFprobePath:    depSt.FFprobePath,
@@ -1101,8 +1344,10 @@ func (wp *WorkerPool) processPostEditJob(workerID int, job *model.RenderJob) {
 		BGMFadeInSec:   opts.BGMFadeInSec,
 		BGMFadeOutSec:  opts.BGMFadeOutSec,
 		BGMAutoDuck:    opts.BGMAutoDuck,
+		AudioNorm:      opts.AudioNorm,
+		VocalEnhance:   opts.VocalEnhance,
 		Speed:          opts.Speed,
-		Encoder:        settings.DefaultEncoder,
+		Encoder:        encoder,
 		Preset:         settings.DefaultPreset,
 		CRF:            settings.DefaultCRF,
 		OnProgress: func(pct float64, speed string) {
@@ -1125,17 +1370,32 @@ func (wp *WorkerPool) processPostEditJob(workerID int, job *model.RenderJob) {
 	if fi, err := os.Stat(outPath); err == nil {
 		size = fi.Size()
 	}
+	peekPath, peekURL, hasPeek := wp.GrabPeekFrameOnce(ctx, job.ID, outPath, math.Max(0.5, info.Duration*0.30))
 	now := time.Now()
-	job.Status = "done"
-	job.Stage = fmt.Sprintf("Edit manual selesai (+%d SFX) & siap upload!", len(resolvedSFX))
-	job.Progress = 100
-	job.OutputPath = outPath
-	job.OutputFile = fileName
-	job.FileSizeBytes = size
-	job.FinalDuration = info.Duration
-	job.CompletedAt = &now
-	_ = wp.Store.SaveJob(job)
-	wp.Broker.Publish("job_update", job)
+	if updated, ok := wp.Store.UpdateJob(job.ID, func(j *model.RenderJob) {
+		j.Status = "done"
+		j.Stage = fmt.Sprintf("Edit manual selesai (+%d SFX) & siap upload!", len(resolvedSFX))
+		j.Progress = 100
+		j.OutputPath = outPath
+		j.OutputFile = fileName
+		j.FileSizeBytes = size
+		j.FinalDuration = info.Duration
+		t := now
+		j.CompletedAt = &t
+		if j.ReviewStatus == "" {
+			j.ReviewStatus = "pending_review"
+		}
+		if j.BoardColumn == "" || j.BoardColumn == "render" || j.BoardColumn == "kandidat" {
+			j.BoardColumn = "review"
+		}
+		if hasPeek {
+			j.PeekFramePath = peekPath
+			j.PeekFrameURL = peekURL
+		}
+	}); ok {
+		job = updated
+		wp.Broker.Publish("job_update", updated)
+	}
 	wp.Broker.Log("worker", "success", fmt.Sprintf("Post-Edit selesai: %s (%.1fs, %.2f MB)", fileName, info.Duration, float64(size)/(1024*1024)))
 	wp.notifyJobDone(job)
 }
@@ -1220,19 +1480,117 @@ func (wp *WorkerPool) PeekFramePath(jobID string) string {
 	return filepath.Join(dir, sanitizeFilename(jobID)+".jpg")
 }
 
-func (wp *WorkerPool) grabPeekFrameOnce(ctx context.Context, job *model.RenderJob, mediaPath string, seekSec float64) bool {
-	if job == nil || mediaPath == "" || !fileExists(mediaPath) {
-		return false
+func (wp *WorkerPool) loadProjectScenes(proj *model.Project) []float64 {
+	if proj == nil {
+		return nil
+	}
+	raw, err := os.ReadFile(filepath.Join(wp.Store.ProjectDir(proj.ID), "scenes.json"))
+	if err != nil {
+		return nil
+	}
+	var wrapped struct {
+		Cuts []float64 `json:"cuts"`
+	}
+	if json.Unmarshal(raw, &wrapped) == nil && len(wrapped.Cuts) > 0 {
+		return wrapped.Cuts
+	}
+	var plain []float64
+	if json.Unmarshal(raw, &plain) == nil && len(plain) > 0 {
+		return plain
+	}
+	return nil
+}
+
+func cuesHaveWordTimingsInRange(cues []model.TranscriptCue, start, end float64) bool {
+	for _, c := range cues {
+		if c.End < start || c.Start > end {
+			continue
+		}
+		if len(c.Words) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// maybeTranscribeWordTimings upgrades clip-window VTT cues with true word timestamps from local Whisper
+// when installed, preserving speaker labels and caching unavailability so absent sidecars cost zero overhead.
+func (wp *WorkerPool) maybeTranscribeWordTimings(
+	ctx context.Context,
+	ffmpegPath, mediaPath, workDir string,
+	seekStart, clipDur, origStart, origEnd float64,
+	existing []model.TranscriptCue,
+) []model.TranscriptCue {
+	if wp.whisperUnavailable.Load() || ffmpegPath == "" || mediaPath == "" || clipDur <= 0.5 {
+		return existing
+	}
+	if cuesHaveWordTimingsInRange(existing, origStart, origEnd) {
+		return existing
+	}
+	wavPath := filepath.Join(workDir, fmt.Sprintf("whisper_%d.wav", wp.jobSeq.Add(1)))
+	defer os.Remove(wavPath)
+	cctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	args := []string{"-y", "-hide_banner", "-loglevel", "error"}
+	if seekStart > 0 {
+		args = append(args, "-ss", fmt.Sprintf("%.3f", seekStart))
+	}
+	args = append(args,
+		"-t", fmt.Sprintf("%.3f", clipDur),
+		"-i", mediaPath,
+		"-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+		wavPath,
+	)
+	if err := exec.CommandContext(cctx, ffmpegPath, args...).Run(); err != nil {
+		return existing
+	}
+	res, err := analyzer.TranscribeWordTimings(ctx, wavPath, origStart, origEnd, "id")
+	if err != nil || res == nil {
+		return existing
+	}
+	if res.Engine == "fallback_vtt" {
+		wp.whisperUnavailable.Store(true)
+		return existing
+	}
+	if len(res.Cues) == 0 {
+		return existing
+	}
+	// Preserve diarized speaker labels by maximum timestamp overlap with existing cues
+	for i := range res.Cues {
+		bestSpk := ""
+		bestOverlap := 0.0
+		for _, ec := range existing {
+			if ec.Speaker == "" {
+				continue
+			}
+			ov := math.Min(res.Cues[i].End, ec.End) - math.Max(res.Cues[i].Start, ec.Start)
+			if ov > bestOverlap {
+				bestOverlap = ov
+				bestSpk = ec.Speaker
+			}
+		}
+		if bestSpk != "" {
+			res.Cues[i].Speaker = bestSpk
+		}
+	}
+	return res.Cues
+}
+
+// GrabPeekFrameOnce extracts a 360px JPEG thumbnail atomically via .tmp rename and returns (path, url, ok).
+// Never mutates caller's RenderJob pointer so concurrent goroutines stay 100% race-free!
+func (wp *WorkerPool) GrabPeekFrameOnce(ctx context.Context, jobID, mediaPath string, seekSec float64) (string, string, bool) {
+	if jobID == "" || mediaPath == "" || !fileExists(mediaPath) {
+		return "", "", false
 	}
 	ff := wp.Deps.GetStatus().FFmpegPath
 	if ff == "" {
-		return false
+		return "", "", false
 	}
 	if seekSec < 0 {
 		seekSec = 0
 	}
-	dest := wp.PeekFramePath(job.ID)
-	tmp := dest + ".tmp.jpg"
+	dest := wp.PeekFramePath(jobID)
+	tmp := dest + fmt.Sprintf(".%d.tmp.jpg", wp.jobSeq.Add(1))
 	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	args := []string{
@@ -1246,25 +1604,23 @@ func (wp *WorkerPool) grabPeekFrameOnce(ctx context.Context, job *model.RenderJo
 	}
 	if err := exec.CommandContext(cctx, ff, args...).Run(); err != nil {
 		_ = os.Remove(tmp)
-		return false
+		return "", "", false
 	}
 	if fi, err := os.Stat(tmp); err != nil || fi.Size() < 256 {
 		_ = os.Remove(tmp)
-		return false
+		return "", "", false
 	}
 	if err := os.Rename(tmp, dest); err != nil {
 		_ = os.Remove(tmp)
-		return false
+		return "", "", false
 	}
-	job.PeekFramePath = dest
-	job.PeekFrameURL = fmt.Sprintf("/api/jobs/%s/peek", job.ID)
-	return true
+	return dest, fmt.Sprintf("/api/jobs/%s/peek", jobID), true
 }
 
 // runPeekLoop grabs a mid-render still frame immediately (3s) and every 30s while FFmpeg encodes,
 // so the Beranda "Sedang render" panel can show a live current-frame peek thumbnail!
-func (wp *WorkerPool) runPeekLoop(ctx context.Context, job *model.RenderJob, sourcePath string, seekStart, clipDur float64) {
-	if sourcePath == "" || !fileExists(sourcePath) {
+func (wp *WorkerPool) runPeekLoop(ctx context.Context, jobID, sourcePath string, seekStart, clipDur float64) {
+	if jobID == "" || sourcePath == "" || !fileExists(sourcePath) {
 		return
 	}
 	grab := func(frac float64) {
@@ -1275,12 +1631,12 @@ func (wp *WorkerPool) runPeekLoop(ctx context.Context, job *model.RenderJob, sou
 			frac = 0.92
 		}
 		at := seekStart + clipDur*frac
-		if wp.grabPeekFrameOnce(ctx, job, sourcePath, at) {
-			if latest, ok := wp.Store.GetJob(job.ID); ok {
-				latest.PeekFramePath = job.PeekFramePath
-				latest.PeekFrameURL = job.PeekFrameURL
-				_ = wp.Store.SaveJob(latest)
-				wp.Broker.Publish("job_update", latest)
+		if dest, url, ok := wp.GrabPeekFrameOnce(ctx, jobID, sourcePath, at); ok {
+			if updated, exists := wp.Store.UpdateJob(jobID, func(j *model.RenderJob) {
+				j.PeekFramePath = dest
+				j.PeekFrameURL = url
+			}); exists {
+				wp.Broker.Publish("job_update", updated)
 			}
 		}
 	}
@@ -1301,7 +1657,7 @@ func (wp *WorkerPool) runPeekLoop(ctx context.Context, job *model.RenderJob, sou
 			return
 		case <-ticker.C:
 			frac := 0.5
-			if latest, ok := wp.Store.GetJob(job.ID); ok && latest.Progress > 0 {
+			if latest, ok := wp.Store.GetJob(jobID); ok && latest.Progress > 0 {
 				frac = latest.Progress / 100.0
 			}
 			grab(frac)
@@ -1310,14 +1666,19 @@ func (wp *WorkerPool) runPeekLoop(ctx context.Context, job *model.RenderJob, sou
 }
 
 func (wp *WorkerPool) updateJob(job *model.RenderJob, status, stage string, progress float64, speed string) {
-	job.Status = status
-	job.Stage = stage
-	job.Progress = progress
-	if speed != "" {
-		job.Speed = speed
+	if job == nil {
+		return
 	}
-	_ = wp.Store.SaveJob(job)
-	wp.Broker.Publish("job_update", job)
+	if updated, ok := wp.Store.UpdateJob(job.ID, func(j *model.RenderJob) {
+		j.Status = status
+		j.Stage = stage
+		j.Progress = progress
+		if speed != "" {
+			j.Speed = speed
+		}
+	}); ok {
+		wp.Broker.Publish("job_update", updated)
+	}
 }
 
 func (wp *WorkerPool) notifyJobDone(job *model.RenderJob) {
@@ -1331,11 +1692,17 @@ func (wp *WorkerPool) notifyJobDone(job *model.RenderJob) {
 }
 
 func (wp *WorkerPool) failJob(job *model.RenderJob, errMsg string) {
-	job.Status = "error"
-	job.Stage = "Gagal render"
-	job.Error = errMsg
-	_ = wp.Store.SaveJob(job)
-	wp.Broker.Publish("job_update", job)
+	if job == nil {
+		return
+	}
+	if updated, ok := wp.Store.UpdateJob(job.ID, func(j *model.RenderJob) {
+		j.Status = "error"
+		j.Stage = "Gagal render"
+		j.Error = errMsg
+	}); ok {
+		job = updated
+		wp.Broker.Publish("job_update", updated)
+	}
 	wp.Broker.Log("worker", "error", fmt.Sprintf("Render gagal (%s): %s", job.Title, errMsg))
 	if wh := strings.TrimSpace(wp.Store.GetSettings().NotifyWebhookURL); wh != "" {
 		go notify.Send(wh, "render_error",

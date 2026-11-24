@@ -3,18 +3,44 @@ package renderer
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"unicode"
 
 	"klipforge/internal/model"
 )
 
+// resolveASSFontAndScaleX avoids wide DejaVu Sans overflow on Linux servers when Windows Impact is absent:
+// uses Anton (OFL Impact metric twin) if installed, else condensed Liberation Sans (ScaleX=82).
+func resolveASSFontAndScaleX(requested string) (string, int) {
+	req := strings.TrimSpace(requested)
+	if req == "" {
+		req = "Impact"
+	}
+	if runtime.GOOS == "windows" {
+		return req, 100
+	}
+	if strings.EqualFold(req, "Impact") {
+		if fileExists("/usr/share/fonts/truetype/anton/Anton-Regular.ttf") {
+			return "Anton", 100
+		}
+		if fileExists("/usr/share/fonts/truetype/msttcorefonts/Impact.ttf") {
+			return "Impact", 100
+		}
+		return "Liberation Sans", 82
+	}
+	if strings.EqualFold(req, "Arial") {
+		return "Liberation Sans", 94
+	}
+	return req, 100
+}
+
 // GenerateASS creates a pro TikTok/CapCut-style ASS subtitle + animated Hook Title overlay file.
 // Uses YouTube's word-level timestamps when available for TRUE word-by-word karaoke highlighting
 // with pop-in bounce animation, plus a sleek Hook Title banner (white-ribbon black text when cropMode=="facecam_top_ribbon",
 // or 4.8s animated viral headline otherwise — zero emoji tofu boxes!).
 func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, outW, outH int, style model.SubtitleStyle, hookText, cropMode, destPath string) (int, error) {
-	if speed <= 0.5 || speed > 2.0 {
+	if speed < 0.50 || speed > 2.0 {
 		speed = 1.0
 	}
 	cleanHook := StripUnsupportedEmojis(strings.TrimSpace(hookText))
@@ -22,10 +48,9 @@ func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, 
 		return 0, nil
 	}
 
-	fontName := style.FontName
-	if fontName == "" {
-		fontName = "Impact"
-	}
+	fontName, fontScaleX := resolveASSFontAndScaleX(style.FontName)
+	impactName, impactScaleX := resolveASSFontAndScaleX("Impact")
+	arialName, arialScaleX := resolveASSFontAndScaleX("Arial")
 	fontSize := style.FontSize
 	if fontSize <= 0 {
 		fontSize = 68
@@ -110,8 +135,8 @@ func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, 
 	sb.WriteString("[V4+ Styles]\n")
 	sb.WriteString("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
 	sb.WriteString(fmt.Sprintf(
-		"Style: Viral,%s,%d,%s,%s,%s,%s,-1,0,0,0,100,100,1,0,%d,%d,%d,%d,56,56,%d,1\n",
-		fontName, scaledSize, baseColor, highlightColor, outlineColor, backColor, borderStyle, outline, shadow, alignment, marginV,
+		"Style: Viral,%s,%d,%s,%s,%s,%s,-1,0,0,0,%d,100,1,0,%d,%d,%d,%d,56,56,%d,1\n",
+		fontName, scaledSize, baseColor, highlightColor, outlineColor, backColor, fontScaleX, borderStyle, outline, shadow, alignment, marginV,
 	))
 	// Hook Banner Style tailored cleanly to the chosen layout (100% ATM Original Branding!):
 	// - "facecam_top_neon": Crisp electric white/yellow text centered inside the Dark Vice Neon Bar!
@@ -127,8 +152,8 @@ func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, 
 			barFont = 30
 		}
 		sb.WriteString(fmt.Sprintf(
-			"Style: HookBanner,Impact,%d,&H00FFFFFF,&H0000EAFF,&H00000000,&H00000000,-1,0,0,0,100,100,1.5,0,1,3,1,5,36,36,0,1\n\n",
-			barFont,
+			"Style: HookBanner,%s,%d,&H00FFFFFF,&H0000EAFF,&H00000000,&H00000000,-1,0,0,0,%d,100,1.5,0,1,3,1,5,36,36,0,1\n\n",
+			impactName, barFont, impactScaleX,
 		))
 	} else if isFloat {
 		flFont := int(float64(outW) * 0.058)
@@ -136,8 +161,8 @@ func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, 
 			flFont = 32
 		}
 		sb.WriteString(fmt.Sprintf(
-			"Style: HookBanner,Impact,%d,&H0000EAFF,&H00FFFFFF,&H00000000,&HAA000000,-1,0,0,0,100,100,1.5,0,1,9,4,5,48,48,0,1\n\n",
-			flFont,
+			"Style: HookBanner,%s,%d,&H0000EAFF,&H00FFFFFF,&H00000000,&HAA000000,-1,0,0,0,%d,100,1.5,0,1,9,4,5,48,48,0,1\n\n",
+			impactName, flFont, impactScaleX,
 		))
 	} else if isRibbon {
 		ribFont := int(float64(outW) * 0.062)
@@ -145,13 +170,13 @@ func GenerateASS(cues []model.TranscriptCue, clipStart, clipEnd, speed float64, 
 			ribFont = 32
 		}
 		sb.WriteString(fmt.Sprintf(
-			"Style: HookBanner,Arial,%d,&H00111111,&H00111111,&H00FFFFFF,&H00000000,-1,0,0,0,100,100,1.2,0,1,0,0,5,36,36,0,1\n\n",
-			ribFont,
+			"Style: HookBanner,%s,%d,&H00111111,&H00111111,&H00FFFFFF,&H00000000,-1,0,0,0,%d,100,1.2,0,1,0,0,5,36,36,0,1\n\n",
+			arialName, ribFont, arialScaleX,
 		))
 	} else {
 		sb.WriteString(fmt.Sprintf(
-			"Style: HookBanner,%s,%d,&H0000EAFF,&H00FFFFFF,&H00000000,&HAA000000,-1,0,0,0,100,100,1.5,0,1,8,4,8,64,64,%d,1\n\n",
-			fontName, hookFontSize, hookMarginV,
+			"Style: HookBanner,%s,%d,&H0000EAFF,&H00FFFFFF,&H00000000,&HAA000000,-1,0,0,0,%d,100,1.5,0,1,8,4,8,64,64,%d,1\n\n",
+			fontName, hookFontSize, fontScaleX, hookMarginV,
 		))
 	}
 

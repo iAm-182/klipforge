@@ -80,7 +80,20 @@ func RunSAUSidecar(ctx context.Context, in SAUUploadInput) (string, error) {
 		args = append(args, "--desc", capTxt)
 	}
 	if len(in.Tags) > 0 {
-		args = append(args, "--tags", strings.Join(in.Tags, ","))
+		capLow := strings.ToLower(in.Caption)
+		var missingTags []string
+		for _, t := range in.Tags {
+			clean := strings.TrimPrefix(strings.TrimSpace(t), "#")
+			if clean == "" {
+				continue
+			}
+			if !strings.Contains(capLow, "#"+strings.ToLower(clean)) {
+				missingTags = append(missingTags, clean)
+			}
+		}
+		if len(missingTags) > 0 {
+			args = append(args, "--tags", strings.Join(missingTags, ","))
+		}
 	}
 	if in.ScheduledAt != nil && in.ScheduledAt.After(time.Now()) {
 		args = append(args, "--schedule", in.ScheduledAt.Format("2006-01-02 15:04"))

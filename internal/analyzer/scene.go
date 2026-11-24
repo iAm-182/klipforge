@@ -37,7 +37,7 @@ func DetectSceneCuts(ctx context.Context, sceneDetectBin, ffmpegPath, mediaPath 
 	// 1. Try PySceneDetect sidecar first (Breakthrough/PySceneDetect BSD-3 CLI)
 	sdBin := resolveSceneDetectBin(sceneDetectBin)
 	if sdBin != "" {
-		if cuts, err := runPySceneDetect(ctx, sdBin, mediaPath); err == nil {
+		if cuts, err := runPySceneDetect(ctx, sdBin, mediaPath); err == nil && cuts != nil {
 			return SceneCutResult{Cuts: cuts, Engine: "pyscenedetect"}, nil
 		}
 	}
@@ -60,17 +60,30 @@ func DetectSceneCuts(ctx context.Context, sceneDetectBin, ffmpegPath, mediaPath 
 
 func resolveSceneDetectBin(configured string) string {
 	if c := strings.TrimSpace(configured); c != "" {
+		if _, err := os.Stat(c); err == nil {
+			if abs, aerr := filepath.Abs(c); aerr == nil {
+				return abs
+			}
+			return c
+		}
 		if p, err := exec.LookPath(c); err == nil {
 			return p
 		}
-		if _, err := os.Stat(c); err == nil {
-			return c
+	}
+	for _, rel := range []string{
+		"/data/workspace/klipforge/.venv/bin/scenedetect",
+		"/app/.venv/bin/scenedetect",
+		".venv/bin/scenedetect",
+		".venv/Scripts/scenedetect.exe",
+	} {
+		if abs, err := filepath.Abs(rel); err == nil {
+			if fi, serr := os.Stat(abs); serr == nil && !fi.IsDir() {
+				return abs
+			}
 		}
 	}
-	for _, cand := range []string{"scenedetect", "/data/workspace/klipforge/.venv/bin/scenedetect"} {
-		if p, err := exec.LookPath(cand); err == nil {
-			return p
-		}
+	if p, err := exec.LookPath("scenedetect"); err == nil {
+		return p
 	}
 	return ""
 }
@@ -84,11 +97,13 @@ func runPySceneDetect(ctx context.Context, bin, mediaPath string) ([]float64, er
 
 	cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	// Use `list-scenes -s -q` (--skip-cuts --quiet) so `*-Scenes.csv` IS written cleanly!
+	// (Note: `-n` suppresses CSV output and would falsely return 0 cuts.)
 	cmd := exec.CommandContext(cctx, bin,
 		"-i", mediaPath,
 		"-o", tmpDir,
 		"detect-content", "-t", "27",
-		"list-scenes", "-n",
+		"list-scenes", "-s", "-q",
 	)
 	if err := cmd.Run(); err != nil {
 		return nil, err
@@ -96,7 +111,7 @@ func runPySceneDetect(ctx context.Context, bin, mediaPath string) ([]float64, er
 
 	matches, _ := filepath.Glob(filepath.Join(tmpDir, "*-Scenes.csv"))
 	if len(matches) == 0 {
-		return nil, nil
+		return nil, fmt.Errorf("pyscenedetect did not produce Scenes.csv")
 	}
 	f, err := os.Open(matches[0])
 	if err != nil {
@@ -110,7 +125,7 @@ func runPySceneDetect(ctx context.Context, bin, mediaPath string) ([]float64, er
 	if err != nil {
 		return nil, err
 	}
-	var cuts []float64
+	cuts := make([]float64, 0)
 	for _, row := range rows {
 		if len(row) < 4 {
 			continue
@@ -122,6 +137,56 @@ func runPySceneDetect(ctx context.Context, bin, mediaPath string) ([]float64, er
 	}
 	sort.Float64s(cuts)
 	return dedupCuts(cuts, 0.4), nil
+}
+
+// DetectSceneCutsWindow scans only a local time window [startSec-5, startSec+durSec+5] of a long VOD
+// so single-clip rendering never wastes minutes scanning a 4-hour MP4, and maps cut timestamps back to VOD time.
+func DetectSceneCutsWindow(ctx context.Context, sceneDetectBin, ffmpegPath, mediaPath string, startSec, durSec float64) (SceneCutResult, error) {
+	if startSec <= 0 && durSec <= 0 {
+		return DetectSceneCuts(ctx, sceneDetectBin, ffmpegPath, mediaPath)
+	}
+	if ffmpegPath == "" {
+		if p, err := exec.LookPath("ffmpeg"); err == nil {
+			ffmpegPath = p
+		}
+	}
+	if ffmpegPath == "" {
+		return DetectSceneCuts(ctx, sceneDetectBin, ffmpegPath, mediaPath)
+	}
+	winStart := startSec - 5.0
+	if winStart < 0 {
+		winStart = 0
+	}
+	winDur := durSec + 10.0
+	if winDur < 12.0 {
+		winDur = 12.0
+	}
+	cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	filter := "scale=320:-2,select='gt(scene,0.32)',showinfo"
+	cmd := exec.CommandContext(cctx, ffmpegPath,
+		"-hide_banner", "-nostats",
+		"-ss", fmt.Sprintf("%.2f", winStart),
+		"-t", fmt.Sprintf("%.2f", winDur),
+		"-i", mediaPath,
+		"-an", "-vf", filter,
+		"-f", "null", "-",
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+
+	cuts := make([]float64, 0)
+	sc := bufio.NewScanner(&stderr)
+	for sc.Scan() {
+		if m := ffPtsTimeRe.FindStringSubmatch(sc.Text()); len(m) == 2 {
+			if sec, err := strconv.ParseFloat(m[1], 64); err == nil && sec > 0.1 {
+				cuts = append(cuts, math.Round((winStart+sec)*100)/100)
+			}
+		}
+	}
+	sort.Float64s(cuts)
+	return SceneCutResult{Cuts: dedupCuts(cuts, 0.4), Engine: "ffmpeg_scene_window"}, nil
 }
 
 var ffPtsTimeRe = regexp.MustCompile(`pts_time:([0-9]+(?:\.[0-9]+)?)`)

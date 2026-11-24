@@ -34,22 +34,25 @@ type AnalysisResult struct {
 
 // Indonesian & global gaming streamer hype keywords (tailored for Windah Basudara & ID/EN gaming streams!).
 var hypeKeywords = []string{
-	"wkwk", "kwkw", "haha", "hehe", "ngakak", "kocak", "lucu",
+	"wkwk", "kwkw", "haha", "hehe", "awok", "ngakak", "kocak", "lucu",
 	"anjir", "njir", "bjir", "anjay", "gila", "parah", "buset", "waduh", "astaga", "ya ampun", "kaget",
-	"gg", "ez", "clutch", "epic", "peak", "gacor", "mantap", "keren", "sakit", "op ", "pro",
+	"gg", "ez", "clutch", "epic", "peak", "gacor", "mantap", "keren", "sakit", "op", "pro",
 	"omg", "wtf", "lmao", "lol", "bro", "bruh", "rip", "no way", "crazy", "insane", "goat",
-	"windah", "bocil", "kematian", "brando", "gta", "absen", "tamat", "panik", "kabur", "meledak",
+	"windah", "bocil", "kematian", "brando", "gta", "tamat", "panik", "kabur", "meledak",
+	"jumpscare", "setan", "hantu", "pocong", "kuntilanak", "savage", "blunder", "ngebug", "karma",
 	"😂", "🤣", "😭", "🔥", "💀", "😱", "🤯", "👏", "❤️",
 }
 
 // Speech reaction & panic keywords spoken by Indonesian/English gaming streamers (instant transcript hype!).
 var speechHypeKeywords = []string{
 	"anjir", "njir", "bjir", "anjay", "gila", "parah", "kaget", "panik", "tolong", "mati",
-	"aduh", "waduh", "astaga", "buset", "kabur", "polisi", "meledak", "tamat", "hancur",
+	"aduh", "waduh", "astaga", "astaghfirullah", "allahuakbar", "ya allah", "buset", "kabur", "polisi", "meledak", "tamat", "hancur",
 	"ngakak", "lucu", "kocak", "gokil", "mantap", "keren", "serius", "kacau", "sialan",
-	"bangsat", "woy", "woi", "wkwk", "haha", "gg", "epic", "clutch", "omg", "wtf", "oh my god",
+	"bangsat", "woy", "woi", "wkwk", "haha", "awok", "gg", "epic", "clutch", "omg", "wtf", "oh my god",
 	"no way", "crazy", "what the", "tertawa", "tepuk tangan", "wah", "eh eh", "jangan", "lari",
 	"nyetir", "nabrak", "jago", "wasted", "bocor", "pipa", "goblok", "anjing", "babi", "sumpah", "bocil",
+	"jumpscare", "setan", "hantu", "pocong", "kuntilanak", "merinding", "ilmu hitam", "curang",
+	"ngebug", "kena mental", "instan karma", "sombong", "blunder", "choke", "epic comeback", "savage", "wipeout",
 }
 
 // Indonesian streamer presence tokens vs English cutscene dialogue tokens (prevents quiet English cutscenes from topping the list!).
@@ -194,12 +197,16 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 	}
 
 	// 4. Populate Instant Transcript Hype grid (speech burst velocity + panic/funny reaction keywords!)
+	primarySpeaker := strings.TrimSpace(in.PrimarySpeaker)
+	if primarySpeaker == "" {
+		primarySpeaker = "SPEAKER_0"
+	}
 	if hasTranscript {
 		rawSpeech := make([]float64, dur)
 		for _, cue := range in.Transcript {
 			s := clampInt(int(math.Floor(cue.Start)), 0, dur-1)
 			e := clampInt(int(math.Ceil(cue.End)), s+1, dur)
-			score := scoreTranscriptCue(cue)
+			score := scoreTranscriptCue(cue, primarySpeaker)
 			span := float64(e - s)
 			if span < 1 {
 				span = 1
@@ -300,6 +307,24 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 		}
 		if activeHigh >= 2 {
 			score = math.Min(1.0, score*1.16)
+		}
+
+		// Offline Acoustic Jumpscare / Crash Contrast: quiet pause (<0.28) immediately before sudden scream/explosion (>=0.78)
+		if hasAudio && i >= 4 {
+			preSum := 0.0
+			for p := i - 4; p < i; p++ {
+				preSum += audioGrid[p]
+			}
+			preMean := preSum / 4.0
+			peakAhead := audioGrid[i]
+			for f := i; f <= i+3 && f < dur; f++ {
+				if audioGrid[f] > peakAhead {
+					peakAhead = audioGrid[f]
+				}
+			}
+			if preMean < 0.28 && peakAhead >= 0.78 {
+				score = math.Min(1.0, score+0.18)
+			}
 		}
 
 		if i < skipIntro && (!hasChat || chatGrid[i] < 0.65) && (!hasAudio || audioGrid[i] < 0.70) {
@@ -475,13 +500,10 @@ func extractCandidates(
 			break
 		}
 
-		// Expand into setup->payoff arc clamped to 20-45s!
-		left, right, arcReason := expandSetupPayoffArc(pk.sec, pk.earliestSetupHint, dur, transcript, chat, audio, smooth)
-
-		// Respect user-configured MaxDurationSec if explicitly tighter/wider than 45s while preserving arc bounds
-		if cfg.MaxDurationSec >= 20 && cfg.MaxDurationSec <= 45 && float64(right-left) > cfg.MaxDurationSec {
-			right = clampInt(left+int(cfg.MaxDurationSec), pk.sec+6, dur)
-		}
+		// Expand into setup->payoff arc honoring user MinDurationSec/MaxDurationSec (default 20-45s)!
+		minArcCfg := int(math.Round(cfg.MinDurationSec))
+		maxArcCfg := int(math.Round(cfg.MaxDurationSec))
+		left, right, arcReason := expandSetupPayoffArc(pk.sec, pk.earliestSetupHint, dur, transcript, chat, audio, smooth, minArcCfg, maxArcCfg)
 
 		// Optional scene-cut boundary snapping (B3.2): snap arcStart/arcEnd to nearest shot cut while protecting peakSec!
 		sceneSnapped := false
@@ -593,7 +615,7 @@ func scoreChatMessage(msg youtube.ChatMessage) float64 {
 	}
 	lower := strings.ToLower(msg.Text)
 	for _, kw := range hypeKeywords {
-		if strings.Contains(lower, kw) {
+		if containsWordOrPhrase(lower, kw) {
 			w += 1.0
 			break
 		}
@@ -623,10 +645,14 @@ func scoreChatMessage(msg youtube.ChatMessage) float64 {
 	return w
 }
 
-func scoreTranscriptCue(cue model.TranscriptCue) float64 {
+func scoreTranscriptCue(cue model.TranscriptCue, primarySpeaker string) float64 {
 	txt := strings.TrimSpace(cue.Text)
 	if txt == "" {
 		return 0
+	}
+	lower := strings.ToLower(txt)
+	if lower == "[musik]" || lower == "[music]" || strings.TrimSpace(strings.ReplaceAll(lower, "[musik]", "")) == "" {
+		return 0.15
 	}
 	words := strings.Fields(txt)
 	dur := math.Max(0.4, cue.End-cue.Start)
@@ -634,18 +660,20 @@ func scoreTranscriptCue(cue model.TranscriptCue) float64 {
 	// Base weight from rapid speech intensity
 	score := math.Min(2.5, wps*0.45)
 
-	lower := " " + strings.ToLower(txt) + " "
 	kwHits := 0
 	for _, kw := range speechHypeKeywords {
-		if strings.Contains(lower, kw) {
+		if containsWordOrPhrase(lower, kw) {
 			kwHits++
 		}
 	}
 	score += float64(kwHits) * 1.8
 
 	// Use real diarized Speaker turns (B3.4 sherpa-onnx) when available; fall back to keyword heuristic otherwise.
+	if primarySpeaker == "" {
+		primarySpeaker = "SPEAKER_0"
+	}
 	if cue.Speaker != "" {
-		if cue.Speaker == "SPEAKER_0" {
+		if cue.Speaker == primarySpeaker {
 			score = score*1.35 + 1.2
 		} else if kwHits == 0 {
 			score *= 0.30
@@ -654,13 +682,13 @@ func scoreTranscriptCue(cue model.TranscriptCue) float64 {
 		// Boost genuine Indonesian streamer commentary vs English NPC/cutscene dialogue!
 		indoHits := 0
 		for _, tk := range indoStreamerTokens {
-			if strings.Contains(lower, tk) {
+			if containsWordOrPhrase(lower, tk) {
 				indoHits++
 			}
 		}
 		engHits := 0
 		for _, tk := range englishCutsceneTokens {
-			if strings.Contains(lower, tk) {
+			if containsWordOrPhrase(lower, tk) {
 				engHits++
 			}
 		}
@@ -775,19 +803,86 @@ func ContainsForbiddenWord(text string, forbidden []string) bool {
 }
 
 func containsForbiddenWord(text string, forbidden []string) bool {
-	low := " " + strings.ToLower(text) + " "
+	low := strings.ToLower(text)
 	for _, bw := range defaultBannedHookWords {
-		if strings.Contains(low, bw) {
+		if containsWordOrPhrase(low, bw) {
 			return true
 		}
 	}
 	for _, fw := range forbidden {
 		w := strings.TrimSpace(strings.ToLower(fw))
-		if w != "" && strings.Contains(low, w) {
+		if w != "" && containsWordOrPhrase(low, w) {
 			return true
 		}
 	}
 	return false
+}
+
+// containsWordOrPhrase performs rune-boundary-aware keyword/phrase matching so short Indonesian/gaming
+// tokens never falsely match inside unrelated words (e.g. "gg" != "enggak", "cok" != "Ucok", "lah" != "masalah").
+// Laugh prefixes ("wkwk", "kwkw", "haha", "hehe", "awok") still match elongated forms like "wkwkwkwk" / "hahaha".
+func containsWordOrPhrase(textLower, term string) bool {
+	t := strings.TrimSpace(strings.ToLower(term))
+	if t == "" || textLower == "" {
+		return false
+	}
+	// Non-alphanumeric terms (e.g. emojis) match directly
+	hasAlphaNum := false
+	for _, r := range t {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			hasAlphaNum = true
+			break
+		}
+	}
+	if !hasAlphaNum {
+		return strings.Contains(textLower, t)
+	}
+	allowSuffixPrefix := t == "wkwk" || t == "kwkw" || t == "haha" || t == "hehe" || t == "awok"
+
+	off := 0
+	for off < len(textLower) {
+		idx := strings.Index(textLower[off:], t)
+		if idx < 0 {
+			return false
+		}
+		start := off + idx
+		end := start + len(t)
+
+		leftOK := true
+		if start > 0 {
+			r := lastRuneBefore(textLower[:start])
+			if unicode.IsLetter(r) || unicode.IsDigit(r) {
+				leftOK = false
+			}
+		}
+		rightOK := true
+		if !allowSuffixPrefix && end < len(textLower) {
+			r := firstRuneOf(textLower[end:])
+			if unicode.IsLetter(r) || unicode.IsDigit(r) {
+				rightOK = false
+			}
+		}
+		if leftOK && rightOK {
+			return true
+		}
+		off = start + 1
+	}
+	return false
+}
+
+func lastRuneBefore(s string) rune {
+	var last rune
+	for _, r := range s {
+		last = r
+	}
+	return last
+}
+
+func firstRuneOf(s string) rune {
+	for _, r := range s {
+		return r
+	}
+	return 0
 }
 
 func cleanHookPhrase(raw string) string {
@@ -868,7 +963,7 @@ func suggestHookText(
 			if len(strings.Fields(phrase)) < 3 || containsForbiddenWord(phrase, forbiddenWords) {
 				continue
 			}
-			sc := scoreTranscriptCue(cue)
+			sc := scoreTranscriptCue(cue, "")
 			// Prefer cues closest to the actual peak second
 			dist := math.Abs((cue.Start+cue.End)/2.0 - peakSec)
 			sc += math.Max(0, 3.0-dist*0.25)

@@ -32,6 +32,7 @@ type ResolvedCompileSegment struct {
 	Filter      string
 	Transition  string // "", "cut", "fade", "zoom"
 	BGMPath     string // Optional per-segment BGM override
+	Layout      model.LayoutConfig
 }
 
 // CompileInput bundles everything needed to render an Auto Top-N Countdown, Rapid Compilation, or Edit-Script MP4.
@@ -122,15 +123,16 @@ func RenderCompilation(ctx context.Context, in CompileInput) (MediaInfo, error) 
 		// Avoid awkward fade-in mid-compilation unless segment specifically sets transition
 		vfx.FadeIn = (i == 0 && vfx.FadeIn && seg.Transition == "")
 
-		var segRamp *model.SpeedRamp
-		if seg.SpeedRamp != nil && seg.ClipDuration >= 1.5 {
-			r := ClampSpeedRamp(*seg.SpeedRamp, seg.ClipDuration)
-			segRamp = &r
+		segRamp := ResolveActiveSpeedRamp(seg.SpeedRamp, seg.ClipDuration)
+
+		segLayout := in.Layout
+		if strings.TrimSpace(seg.Layout.CropMode) != "" || strings.TrimSpace(seg.Layout.AspectRatio) != "" {
+			segLayout = seg.Layout
 		}
 
 		// Build ASS overlay for this segment (Top-N/Montage/Edit-Script + Segment TextOverlay + Karaoke Subtitles!)
 		segASS := filepath.Join(in.WorkDir, fmt.Sprintf("seg_%d.ass", i))
-		err := generateCompilationSegmentASS(in.Title, in.Mode, totalRanks, seg, in.AllRankLabels, revealedRanks, outW, outH, in.Layout.CropMode, in.Subtitles, vfx.Speed, segRamp, segASS)
+		err := generateCompilationSegmentASS(in.Title, in.Mode, totalRanks, seg, in.AllRankLabels, revealedRanks, outW, outH, segLayout.CropMode, in.Subtitles, vfx.Speed, segRamp, segASS)
 		if err != nil {
 			return MediaInfo{}, err
 		}
@@ -142,11 +144,10 @@ func RenderCompilation(ctx context.Context, in CompileInput) (MediaInfo, error) 
 				off = 1.1
 			}
 			rawAt := math.Max(0.2, seg.ClipDuration-off)
-			at := MapTimeWithRamp(rawAt, vfx.Speed, segRamp)
-			// Pass at*vfx.Speed because RenderClip divides sfx.AtSec by speed!
+			// RenderClip maps sfx.AtSec through MapTimeWithRamp(sfx.AtSec, speed, activeRamp) directly.
 			sfxCues = append(sfxCues, ResolvedSFX{
 				FilePath: seg.EndSFXPath,
-				AtSec:    at * vfx.Speed,
+				AtSec:    rawAt,
 				Volume:   1.05,
 			})
 		}
@@ -160,6 +161,15 @@ func RenderCompilation(ctx context.Context, in CompileInput) (MediaInfo, error) 
 		segWork := filepath.Join(in.WorkDir, fmt.Sprintf("w_%d", i))
 		_ = os.MkdirAll(segWork, 0o755)
 
+		preset := in.Preset
+		if preset == "" {
+			preset = "veryfast"
+		}
+		crf := in.CRF
+		if crf <= 0 {
+			crf = 19
+		}
+
 		_, err = RenderClip(ctx, RenderInput{
 			FFmpegPath:      in.FFmpegPath,
 			FFprobePath:     in.FFprobePath,
@@ -168,7 +178,7 @@ func RenderCompilation(ctx context.Context, in CompileInput) (MediaInfo, error) 
 			ClipDuration:    seg.ClipDuration,
 			OutputPath:      segOut,
 			WorkDir:         segWork,
-			Layout:          in.Layout,
+			Layout:          segLayout,
 			Subtitles:       in.Subtitles,
 			SubtitleFile:    segASS,
 			HookText:        "", // Handled cleanly inside segASS
@@ -185,8 +195,8 @@ func RenderCompilation(ctx context.Context, in CompileInput) (MediaInfo, error) 
 			Watermark:       in.Watermark,
 			Outro:           nil, // Outro appended ONCE cleanly at the very end!
 			Encoder:         in.Encoder,
-			Preset:          "veryfast",
-			CRF:             19,
+			Preset:          preset,
+			CRF:             crf,
 		})
 		if err != nil {
 			return MediaInfo{}, fmt.Errorf("gagal render segmen #%d: %w", seg.RankNumber, err)
@@ -271,6 +281,7 @@ func renderBlackBumper(ctx context.Context, in CompileInput, outW, outH int, dur
 	if fontSize < 34 {
 		fontSize = 34
 	}
+	bumpFont, bumpScaleX := resolveASSFontAndScaleX("Impact")
 	ass := fmt.Sprintf(`[Script Info]
 ScriptType: v4.00+
 PlayResX: %d
@@ -279,12 +290,12 @@ WrapStyle: 2
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Bumper,Impact,%d,&H0000EAFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,1,0,1,6,2,5,48,48,0,1
+Style: Bumper,%s,%d,&H0000EAFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,%d,100,1,0,1,6,2,5,48,48,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 Dialogue: 0,0:00:00.00,%s,Bumper,,0,0,0,,{\fscx112\fscy112\t(0,160,\fscx100\fscy100)}%s
-`, outW, outH, fontSize, formatASSTime(dur), sanitizeASSText(strings.ReplaceAll(wrapText(cleanTitle, 24), "\n", `\N`)))
+`, outW, outH, bumpFont, fontSize, bumpScaleX, formatASSTime(dur), sanitizeASSText(strings.ReplaceAll(wrapText(cleanTitle, 24), "\n", `\N`)))
 	if err := os.WriteFile(bumperASS, []byte(ass), 0o644); err != nil {
 		return err
 	}
@@ -311,6 +322,12 @@ Dialogue: 0,0:00:00.00,%s,Bumper,,0,0,0,,{\fscx112\fscy112\t(0,160,\fscx100\fscy
 	if hasWM {
 		wmIdx = nextIdx
 		nextIdx++
+		wmExt := strings.ToLower(filepath.Ext(in.Watermark.FilePath))
+		if wmExt == ".gif" {
+			args = append(args, "-ignore_loop", "0")
+		} else if wmExt == ".mov" || wmExt == ".webm" {
+			args = append(args, "-stream_loop", "-1")
+		}
 		args = append(args, "-i", in.Watermark.FilePath)
 	}
 
@@ -323,7 +340,7 @@ Dialogue: 0,0:00:00.00,%s,Bumper,,0,0,0,,{\fscx112\fscy112\t(0,160,\fscx100\fscy
 		vOut = lbl
 	}
 	filters = append(filters, fmt.Sprintf("%sfps=30,setsar=1,format=yuv420p[out_v]", vOut))
-	filters = append(filters, fmt.Sprintf("[%d:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,apad=whole_dur=%.3f,atrim=0:%.3f,asetpts=PTS-STARTPTS[out_a]", audioIdx, dur, dur))
+	filters = append(filters, fmt.Sprintf("[%d:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,apad=whole_dur=%.3f,atrim=0:%.3f,alimiter=limit=0.891:attack=5:release=50:level=disabled,asetpts=PTS-STARTPTS[out_a]", audioIdx, dur, dur))
 
 	args = append(args,
 		"-filter_complex", strings.Join(filters, ";"),
@@ -385,10 +402,9 @@ func generateCompilationSegmentASS(
 	}
 
 	// Subtitle style params for word-by-word karaoke inside compile/edit-script segments
-	subFont := subStyle.FontName
-	if subFont == "" {
-		subFont = "Impact"
-	}
+	subFont, subScaleX := resolveASSFontAndScaleX(subStyle.FontName)
+	impactFont, impactScaleX := resolveASSFontAndScaleX("Impact")
+	arialFont, arialScaleX := resolveASSFontAndScaleX("Arial")
 	subSize := subStyle.FontSize
 	if subSize < 62 {
 		subSize = 66
@@ -452,16 +468,16 @@ func generateCompilationSegmentASS(
 	sb.WriteString("[V4+ Styles]\n")
 	sb.WriteString("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n")
 	sb.WriteString(fmt.Sprintf(
-		"Style: Viral,%s,%d,%s,%s,&H00000000,&H90000000,-1,0,0,0,100,100,1,0,1,7,3,%d,56,56,%d,1\n",
-		subFont, scaledSub, subBaseColor, subHighColor, subAlign, subMarginV,
+		"Style: Viral,%s,%d,%s,%s,&H00000000,&H90000000,-1,0,0,0,%d,100,1,0,1,7,3,%d,56,56,%d,1\n",
+		subFont, scaledSub, subBaseColor, subHighColor, subScaleX, subAlign, subMarginV,
 	))
 	sb.WriteString(fmt.Sprintf(
-		"Style: TopList,Impact,%d,&H00FFFFFF,&H0000EAFF,&H00000000,&H99000000,-1,0,0,0,100,100,1.2,0,1,7,3,7,40,40,%d,1\n",
-		listFontSize, listTopY,
+		"Style: TopList,%s,%d,&H00FFFFFF,&H0000EAFF,&H00000000,&H99000000,-1,0,0,0,%d,100,1.2,0,1,7,3,7,40,40,%d,1\n",
+		impactFont, listFontSize, impactScaleX, listTopY,
 	))
 	sb.WriteString(fmt.Sprintf(
-		"Style: MontageTitle,Arial,%d,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0.5,0,1,5,2,5,48,48,0,1\n",
-		montageFontSize,
+		"Style: MontageTitle,%s,%d,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,%d,100,0.5,0,1,5,2,5,48,48,0,1\n",
+		arialFont, montageFontSize, arialScaleX,
 	))
 	ribFont := int(float64(outW) * 0.054)
 	barColor := "&H00FFFFFF"
@@ -471,8 +487,8 @@ func generateCompilationSegmentASS(
 		barOutline = 0
 	}
 	sb.WriteString(fmt.Sprintf(
-		"Style: RibbonTitle,Impact,%d,%s,%s,&H00000000,&H00000000,-1,0,0,0,100,100,1.2,0,1,%d,0,5,32,32,0,1\n",
-		ribFont, barColor, barColor, barOutline,
+		"Style: RibbonTitle,%s,%d,%s,%s,&H00000000,&H00000000,-1,0,0,0,%d,100,1.2,0,1,%d,0,5,32,32,0,1\n",
+		impactFont, ribFont, barColor, barColor, impactScaleX, barOutline,
 	))
 	// Per-segment CapCut-style TextOverlay style
 	ovColor := "&H0000EAFF"
@@ -491,8 +507,8 @@ func generateCompilationSegmentASS(
 		}
 	}
 	sb.WriteString(fmt.Sprintf(
-		"Style: SegOverlay,Impact,%d,%s,&H00FFFFFF,&H00000000,%s,-1,0,0,0,100,100,1.4,0,%d,8,4,8,56,56,%d,1\n\n",
-		overlayFontSize, ovColor, ovBack, ovBorderStyle, int(float64(outH)*0.095),
+		"Style: SegOverlay,%s,%d,%s,&H00FFFFFF,&H00000000,%s,-1,0,0,0,%d,100,1.4,0,%d,8,4,8,56,56,%d,1\n\n",
+		impactFont, overlayFontSize, ovColor, ovBack, impactScaleX, ovBorderStyle, int(float64(outH)*0.095),
 	))
 
 	sb.WriteString("[Events]\n")
