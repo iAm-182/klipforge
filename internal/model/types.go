@@ -313,6 +313,10 @@ type RenderOptions struct {
 	Encoder      string          `json:"encoder"` // auto, libx264, h264_qsv, h264_nvenc, h264_amf
 	Preset       string          `json:"preset"`  // ultrafast, veryfast, fast, medium
 	CRF          int             `json:"crf"`     // default 20
+	ActorID      string          `json:"-"`
+	ActorName    string          `json:"-"`
+	ActorVia     string          `json:"-"`
+	InitialBoard string          `json:"-"`
 }
 
 // SpeedRamp defines a per-segment speed transition (e.g. normal 1.0x ramping into 0.5x slow-mo).
@@ -397,6 +401,7 @@ type CompileSegment struct {
 	TextOverlay  *SegmentTextOverlay `json:"textOverlay,omitempty"`  // Optional per-segment hook text line
 	Filter       string              `json:"filter,omitempty"`       // Optional color preset override
 	Transition   string              `json:"transition,omitempty"`   // cut (default), fade, zoom
+	CropMode     string              `json:"cropMode,omitempty"`     // Optional per-segment framing override (e.g. face_track, facecam_top_neon, facecam_auto)
 }
 
 // CompileOptions configures an Auto Top-N Countdown (5->1) or Rapid Compilation render.
@@ -420,6 +425,11 @@ type CompileOptions struct {
 	Encoder          string           `json:"encoder"`
 	Preset           string           `json:"preset"`
 	CRF              int              `json:"crf"`
+	ActorID          string           `json:"-"`
+	ActorName        string           `json:"-"`
+	ActorVia         string           `json:"-"`
+	InitialPlan      *AppliedEditPlan `json:"-"`
+	InitialBoard     string           `json:"-"`
 }
 
 // AudioPreset stores a reusable 1-click SFX + BGM moment combo (built-in or user-saved!).
@@ -451,8 +461,14 @@ type PostEditOptions struct {
 	BGMFadeInSec  float64          `json:"bgmFadeInSec"`  // Custom BGM fade-in seconds (default 0.35)
 	BGMFadeOutSec float64          `json:"bgmFadeOutSec"` // Custom BGM fade-out seconds (default 0.85)
 	BGMAutoDuck   bool             `json:"bgmAutoDuck"`
+	AudioNorm     bool             `json:"audioNorm,omitempty"`
+	VocalEnhance  bool             `json:"vocalEnhance,omitempty"`
 	Speed         float64          `json:"speed"`               // Optional 1.0 - 1.20
 	Watermark     *WatermarkConfig `json:"watermark,omitempty"` // Optional manual drag-and-drop watermark placement!
+	ActorID       string           `json:"-"`
+	ActorName     string           `json:"-"`
+	ActorVia      string           `json:"-"`
+	InitialBoard  string           `json:"-"`
 }
 
 // PublishChecklist tracks the 4 mandatory MotionKlip SOP checks before a clip is Siap Posting.

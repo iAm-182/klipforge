@@ -8,7 +8,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/klipforge .
 # Stage 2: Production Linux VPS runtime with FFmpeg + yt-dlp + Node.js JS runtime + fonts
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl ffmpeg python3 nodejs fonts-dejavu-core fonts-liberation \
+    ca-certificates curl ffmpeg python3 nodejs fonts-dejavu-core fonts-liberation fonts-anton \
     && curl -sL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
     && chmod +x /usr/local/bin/yt-dlp \
     && rm -rf /var/lib/apt/lists/*

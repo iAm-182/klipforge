@@ -179,6 +179,9 @@ func (sc *Scheduler) RunRule(ruleID string) {
 		}
 
 		rule.ProcessedVideoIDs = append(rule.ProcessedVideoIDs, vid.ID)
+		if len(rule.ProcessedVideoIDs) > 500 {
+			rule.ProcessedVideoIDs = rule.ProcessedVideoIDs[len(rule.ProcessedVideoIDs)-500:]
+		}
 	}
 
 	rule.LastStatus = fmt.Sprintf("Sukses! %d VOD baru diproses → %d klip masuk Review Inbox (Menunggu Approval Anda).", len(matched), totalQueued)
@@ -274,12 +277,18 @@ func buildCampaignRenderOptions(proj *model.Project, cand model.ClipCandidate, c
 		EndSec:      cand.EndSec,
 		HookText:    cand.HookText,
 		AudioNorm:   true,
+		SceneSnap:   true,
+		SilenceTrim: true,
+		PickCover:   true,
 	}
 	if camp != nil {
 		opts.CampaignID = camp.ID
 		opts.Layout = camp.DefaultLayout
 		opts.Subtitles = camp.DefaultSubtitles
 		opts.AudioFX = camp.DefaultAudioFX
+		if opts.AudioFX.SFXAutoPreset == "" {
+			opts.AudioFX.SFXAutoPreset = "auto_by_moment"
+		}
 		opts.VideoFX = camp.DefaultVideoFX
 		opts.AudioNorm = camp.DefaultAudioNorm
 		opts.UseWatermark = camp.Watermark.Enabled
@@ -289,10 +298,16 @@ func buildCampaignRenderOptions(proj *model.Project, cand model.ClipCandidate, c
 		opts.Layout = model.LayoutConfig{
 			AspectRatio: "9:16",
 			Resolution:  "1080p",
-			CropMode:    "blur_bg",
+			CropMode:    "face_track",
 		}
 		opts.Subtitles = model.SubtitleStyle{
-			Enabled: true, Preset: "viral-yellow", FontName: "Impact", FontSize: 58, Position: "bottom", MaxWordsPerRow: 4, Uppercase: true,
+			Enabled: true, Preset: "karaoke", FontName: "Impact", FontSize: 64, Position: "bottom", MaxWordsPerRow: 3, Uppercase: true,
+		}
+		opts.AudioFX = model.AudioFXConfig{
+			BGMVolume:     0.18,
+			AutoDuck:      true,
+			VocalEnhance:  true,
+			SFXAutoPreset: "auto_by_moment",
 		}
 	}
 	opts.VideoFX.PeakOffsetSec = cand.PeakSec - cand.StartSec

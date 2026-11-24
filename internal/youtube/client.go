@@ -48,7 +48,7 @@ func NewClient(d *deps.Manager) *Client {
 	return &Client{Deps: d}
 }
 
-func (c *Client) baseArgs(settings model.AppSettings) []string {
+func (c *Client) baseArgs(settings model.AppSettings) ([]string, func()) {
 	args := []string{
 		"--no-playlist",
 		"--no-warnings",
@@ -59,14 +59,16 @@ func (c *Client) baseArgs(settings model.AppSettings) []string {
 	if dir := c.Deps.FFmpegDir(); dir != "" {
 		args = append(args, "--ffmpeg-location", dir)
 	}
+	cleanup := func() {}
 	if settings.CookiesFile != "" {
-		if _, err := os.Stat(settings.CookiesFile); err == nil {
-			args = append(args, "--cookies", settings.CookiesFile)
+		if tmpCookie, clean := CloneReadOnlyCookies(settings.CookiesFile); tmpCookie != "" {
+			args = append(args, "--cookies", tmpCookie)
+			cleanup = clean
 		}
 	} else if settings.CookiesBrowser != "" {
 		args = append(args, "--cookies-from-browser", settings.CookiesBrowser)
 	}
-	return args
+	return args, cleanup
 }
 
 // FetchChannelVideos quickly lists the latest N videos/streams from a YouTube channel URL using --flat-playlist (~3s).
@@ -89,8 +91,9 @@ func (c *Client) FetchChannelVideos(ctx context.Context, channelURL string, limi
 		args = append(args, "--js-runtimes", "node")
 	}
 	if settings.CookiesFile != "" {
-		if _, err := os.Stat(settings.CookiesFile); err == nil {
-			args = append(args, "--cookies", settings.CookiesFile)
+		if tmpCookie, clean := CloneReadOnlyCookies(settings.CookiesFile); tmpCookie != "" {
+			defer clean()
+			args = append(args, "--cookies", tmpCookie)
 		}
 	}
 	cmd := exec.CommandContext(ctx, ytBin, args...)
@@ -139,7 +142,9 @@ func (c *Client) FetchMetadata(ctx context.Context, videoURL string, settings mo
 		return nil, fmt.Errorf("yt-dlp tidak ditemukan")
 	}
 
-	args := append(c.baseArgs(settings),
+	base, cleanCookies := c.baseArgs(settings)
+	defer cleanCookies()
+	args := append(base,
 		"-J",
 		"--skip-download",
 		videoURL,
@@ -262,10 +267,12 @@ func (c *Client) FetchMetadata(ctx context.Context, videoURL string, settings mo
 	return meta, nil
 }
 
-// DownloadLiveChat downloads the YouTube live chat replay JSON into destDir with proper Windows process-tree timeout.
+// DownloadLiveChat downloads the YouTube live chat replay JSON into destDir with cross-platform process-tree timeout.
 func (c *Client) DownloadLiveChat(ctx context.Context, videoURL, destDir string, settings model.AppSettings) (string, error) {
 	outTmpl := filepath.Join(destDir, "source.%(ext)s")
-	args := append(c.baseArgs(settings),
+	base, cleanCookies := c.baseArgs(settings)
+	defer cleanCookies()
+	args := append(base,
 		"--skip-download",
 		"--write-subs",
 		"--sub-langs", "live_chat",
@@ -274,6 +281,7 @@ func (c *Client) DownloadLiveChat(ctx context.Context, videoURL, destDir string,
 	)
 
 	cmd := exec.Command(c.Deps.GetStatus().YtDlpPath, args...)
+	prepareCmdProcessGroup(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
@@ -289,10 +297,7 @@ func (c *Client) DownloadLiveChat(ctx context.Context, videoURL, destDir string,
 			return "", fmt.Errorf("download live chat gagal: %s", strings.TrimSpace(stderr.String()))
 		}
 	case <-ctx.Done():
-		// Kill entire process tree on Windows so PyInstaller yt-dlp child doesn't linger!
-		if cmd.Process != nil {
-			_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run()
-		}
+		killProcessTree(cmd)
 		<-done
 		return "", fmt.Errorf("download live chat melebihi batas waktu (VOD terlalu besar)")
 	}
@@ -310,7 +315,9 @@ func (c *Client) DownloadSubtitles(ctx context.Context, videoURL, destDir, lang 
 		lang = "id,en"
 	}
 	outTmpl := filepath.Join(destDir, "subs.%(ext)s")
-	args := append(c.baseArgs(settings),
+	base, cleanCookies := c.baseArgs(settings)
+	defer cleanCookies()
+	args := append(base,
 		"--skip-download",
 		"--sub-langs", lang,
 		"--sub-format", "vtt/srt/best",
@@ -435,7 +442,8 @@ func (c *Client) ResolveStreamPair(ctx context.Context, videoURL string, setting
 	}
 	var lastErr error
 	for _, fmtSel := range formats {
-		args := append(c.baseArgs(settings),
+		base, cleanCookies := c.baseArgs(settings)
+		args := append(base,
 			"-f", fmtSel,
 			"-g",
 			videoURL,
@@ -444,7 +452,9 @@ func (c *Client) ResolveStreamPair(ctx context.Context, videoURL string, setting
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
+		runErr := cmd.Run()
+		cleanCookies()
+		if runErr != nil {
 			lastErr = fmt.Errorf("%s", strings.TrimSpace(stderr.String()))
 			continue
 		}
@@ -517,6 +527,7 @@ func (c *Client) CutSectionFromStreams(ctx context.Context, pair *StreamPair, st
 	defer cancel()
 
 	cmd := exec.Command(ffBin, args...)
+	prepareCmdProcessGroup(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
@@ -536,9 +547,7 @@ func (c *Client) CutSectionFromStreams(ctx context.Context, pair *StreamPair, st
 			return fmt.Errorf("ffmpeg direct slice gagal: %s", msg)
 		}
 	case <-sliceCtx.Done():
-		if cmd.Process != nil {
-			_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run()
-		}
+		killProcessTree(cmd)
 		<-done
 		_ = os.Remove(destMP4)
 		return fmt.Errorf("ffmpeg direct slice timeout (koneksi stream YouTube melambat)")
@@ -598,7 +607,8 @@ func (c *Client) DownloadSection(ctx context.Context, videoURL string, startSec,
 			}
 		}
 		_ = os.Remove(destMP4)
-		args := append(c.baseArgs(settings),
+		base, cleanCookies := c.baseArgs(settings)
+		args := append(base,
 			"-f", att.fmtSel,
 			"--merge-output-format", "mp4",
 			"--download-sections", section,
@@ -613,6 +623,7 @@ func (c *Client) DownloadSection(ctx context.Context, videoURL string, startSec,
 		args = append(args, "-o", destMP4, videoURL)
 
 		err := c.runDownloadCmd(ctx, args, onProgress)
+		cleanCookies()
 		if err == nil {
 			if fi, statErr := os.Stat(destMP4); statErr == nil && fi.Size() > 4096 {
 				return nil
@@ -626,7 +637,9 @@ func (c *Client) DownloadSection(ctx context.Context, videoURL string, startSec,
 
 // DownloadFullVideo downloads the full source MP4 video locally for instant scrubbing, audio analysis & fast re-renders.
 func (c *Client) DownloadFullVideo(ctx context.Context, videoURL, destMP4 string, settings model.AppSettings, onProgress func(pct float64, line string)) error {
-	args := append(c.baseArgs(settings),
+	base, cleanCookies := c.baseArgs(settings)
+	defer cleanCookies()
+	args := append(base,
 		"-f", formatSelector(settings.DownloadQuality),
 		"--merge-output-format", "mp4",
 		"--retries", "10",
@@ -642,7 +655,9 @@ func (c *Client) DownloadFullVideo(ctx context.Context, videoURL, destMP4 string
 // DownloadAudioOnly downloads the lightest fast audio track (<=64kbps opus/m4a) for ultra-fast audio scream peak analysis!
 func (c *Client) DownloadAudioOnly(ctx context.Context, videoURL, destPath string, settings model.AppSettings) (string, error) {
 	outTmpl := strings.TrimSuffix(destPath, filepath.Ext(destPath)) + ".%(ext)s"
-	args := append(c.baseArgs(settings),
+	base, cleanCookies := c.baseArgs(settings)
+	defer cleanCookies()
+	args := append(base,
 		"-f", "ba[abr<=64]/worstaudio/ba[ext=m4a]/bestaudio",
 		"-o", outTmpl,
 		videoURL,
@@ -653,8 +668,8 @@ func (c *Client) DownloadAudioOnly(ctx context.Context, videoURL, destPath strin
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("download audio gagal: %s", strings.TrimSpace(stderr.String()))
 	}
-	base := strings.TrimSuffix(destPath, filepath.Ext(destPath))
-	matches, _ := filepath.Glob(base + ".*")
+	basePath := strings.TrimSuffix(destPath, filepath.Ext(destPath))
+	matches, _ := filepath.Glob(basePath + ".*")
 	if len(matches) > 0 {
 		return matches[0], nil
 	}
@@ -662,7 +677,8 @@ func (c *Client) DownloadAudioOnly(ctx context.Context, videoURL, destPath strin
 }
 
 func (c *Client) runDownloadCmd(ctx context.Context, args []string, onProgress func(pct float64, line string)) error {
-	cmd := exec.CommandContext(ctx, c.Deps.GetStatus().YtDlpPath, args...)
+	cmd := exec.Command(c.Deps.GetStatus().YtDlpPath, args...)
+	prepareCmdProcessGroup(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -673,6 +689,15 @@ func (c *Client) runDownloadCmd(ctx context.Context, args []string, onProgress f
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+
+	stopKill := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			killProcessTree(cmd)
+		case <-stopKill:
+		}
+	}()
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 32*1024), 512*1024)
@@ -692,10 +717,15 @@ func (c *Client) runDownloadCmd(ctx context.Context, args []string, onProgress f
 		}
 	}
 
-	if err := cmd.Wait(); err != nil {
+	waitErr := cmd.Wait()
+	close(stopKill)
+	if waitErr != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg == "" {
-			errMsg = err.Error()
+			errMsg = waitErr.Error()
 		}
 		return fmt.Errorf("yt-dlp download gagal: %s", errMsg)
 	}

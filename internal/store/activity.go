@@ -7,12 +7,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"klipforge/internal/model"
 )
 
 const maxActivityInMemory = 1000
+
+var actSeq atomic.Uint64
 
 func (s *Store) activityPath() string {
 	return filepath.Join(s.DataDir, "activity.jsonl")
@@ -50,7 +53,7 @@ func (s *Store) AppendActivity(ent model.ActivityEntry) model.ActivityEntry {
 		ent.Timestamp = time.Now()
 	}
 	if ent.ID == "" {
-		ent.ID = fmt.Sprintf("act-%d", time.Now().UnixNano())
+		ent.ID = fmt.Sprintf("act-%d-%d", time.Now().UnixNano(), actSeq.Add(1))
 	}
 	if ent.Level == "" {
 		ent.Level = "info"
@@ -64,7 +67,7 @@ func (s *Store) AppendActivity(ent model.ActivityEntry) model.ActivityEntry {
 	}
 
 	p := s.activityPath()
-	// Compact file if it grows past 4 MB so disk stays clean on VPS
+	// Compact file atomically if it grows past 4 MB so disk stays clean on VPS without truncation risk
 	if fi, err := os.Stat(p); err == nil && fi.Size() > 4*1024*1024 {
 		var buf strings.Builder
 		for _, item := range s.activity {
@@ -73,7 +76,7 @@ func (s *Store) AppendActivity(ent model.ActivityEntry) model.ActivityEntry {
 				buf.WriteByte('\n')
 			}
 		}
-		_ = os.WriteFile(p, []byte(buf.String()), 0o644)
+		_ = writeBytesAtomic(p, []byte(buf.String()), 0o644)
 	} else if b, err := json.Marshal(ent); err == nil {
 		if f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
 			_, _ = f.Write(append(b, '\n'))

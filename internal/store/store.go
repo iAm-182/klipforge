@@ -160,6 +160,12 @@ func (s *Store) loadAll() {
 					j.Status = "error"
 					j.Error = "Interrupted by server restart — click retry to re-render"
 				}
+				for idx := range j.PublishRecords {
+					if j.PublishRecords[idx].Status == "publishing" {
+						j.PublishRecords[idx].Status = "error"
+						j.PublishRecords[idx].Error = "Terputus saat server restart"
+					}
+				}
 				s.jobs[j.ID] = j
 			}
 		}
@@ -453,23 +459,129 @@ func (s *Store) ensureDefaultCampaigns() {
 	_ = s.saveCampaignsLocked()
 }
 
+func writeBytesAtomic(path string, b []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	_ = tmp.Sync()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	_ = os.Chmod(tmpPath, perm)
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := os.Rename(tmpPath, path); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		time.Sleep(time.Duration(attempt+1) * 20 * time.Millisecond)
+	}
+	_ = os.Remove(tmpPath)
+	return lastErr
+}
+
 func writeJSONAtomic(path string, v interface{}) error {
+	return writeJSONAtomicPerm(path, v, 0o644)
+}
+
+func writeJSONAtomicPerm(path string, v interface{}, perm os.FileMode) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	// Rotate rolling backups (.bak.2 -> .bak.3, .bak.1 -> .bak.2, current -> .bak.1)
+	// Rotate rolling backups atomically (.bak.2 -> .bak.3, .bak.1 -> .bak.2, current -> .bak.1)
 	if orig, err := os.ReadFile(path); err == nil && len(orig) > 2 {
 		_ = os.Remove(path + ".bak.3")
 		_ = os.Rename(path+".bak.2", path+".bak.3")
 		_ = os.Rename(path+".bak.1", path+".bak.2")
-		_ = os.WriteFile(path+".bak.1", orig, 0o644)
+		_ = writeBytesAtomic(path+".bak.1", orig, perm)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
+	return writeBytesAtomic(path, b, perm)
+}
+
+func cloneProject(p *model.Project) *model.Project {
+	if p == nil {
+		return nil
 	}
-	return os.Rename(tmp, path)
+	cp := *p
+	if p.Candidates != nil {
+		cp.Candidates = make([]model.ClipCandidate, len(p.Candidates))
+		copy(cp.Candidates, p.Candidates)
+	}
+	if p.Timeline != nil {
+		cp.Timeline = make([]model.TimelinePoint, len(p.Timeline))
+		copy(cp.Timeline, p.Timeline)
+	}
+	if p.Chapters != nil {
+		cp.Chapters = make([]model.Chapter, len(p.Chapters))
+		copy(cp.Chapters, p.Chapters)
+	}
+	if p.FacecamBox != nil {
+		fb := *p.FacecamBox
+		cp.FacecamBox = &fb
+	}
+	return &cp
+}
+
+func cloneJob(j *model.RenderJob) *model.RenderJob {
+	if j == nil {
+		return nil
+	}
+	cp := *j
+	if j.PublishRecords != nil {
+		cp.PublishRecords = make([]model.PublishRecord, len(j.PublishRecords))
+		copy(cp.PublishRecords, j.PublishRecords)
+	}
+	if j.CompileOpts != nil {
+		co := *j.CompileOpts
+		if j.CompileOpts.Segments != nil {
+			co.Segments = make([]model.CompileSegment, len(j.CompileOpts.Segments))
+			copy(co.Segments, j.CompileOpts.Segments)
+		}
+		cp.CompileOpts = &co
+	}
+	if j.PostEditOpts != nil {
+		pe := *j.PostEditOpts
+		if j.PostEditOpts.SFXCues != nil {
+			pe.SFXCues = make([]model.SFXCue, len(j.PostEditOpts.SFXCues))
+			copy(pe.SFXCues, j.PostEditOpts.SFXCues)
+		}
+		cp.PostEditOpts = &pe
+	}
+	if j.PublishKit != nil {
+		pk := *j.PublishKit
+		cp.PublishKit = &pk
+	}
+	if j.Draft != nil {
+		dr := *j.Draft
+		cp.Draft = &dr
+	}
+	return &cp
+}
+
+func (s *Store) removeJobArtifactsLocked(id string, j *model.RenderJob) {
+	if j != nil && j.OutputPath != "" {
+		_ = os.Remove(j.OutputPath)
+	}
+	_ = os.Remove(filepath.Join(s.DataDir, "peeks", id+".jpg"))
+	_ = os.Remove(filepath.Join(s.DataDir, "covers", id+".jpg"))
+	_ = os.Remove(filepath.Join(s.DataDir, "drafts", "klipforge_draft_"+id+".zip"))
+	if j != nil && j.Draft != nil && j.Draft.FilePath != "" {
+		_ = os.Remove(j.Draft.FilePath)
+	}
 }
 
 // DiskStats returns current free space on the output volume plus KlipForge storage usage.
@@ -509,7 +621,7 @@ func (s *Store) CleanupStorage(olderThanDays int) (deletedFiles int, freedBytes 
 				if fi, err := os.Stat(j.OutputPath); err == nil {
 					freedBytes += fi.Size()
 				}
-				_ = os.Remove(j.OutputPath)
+				s.removeJobArtifactsLocked(id, j)
 				delete(s.jobs, id)
 				deletedFiles++
 				changed = true
@@ -618,8 +730,7 @@ func (s *Store) ListProjects() []*model.Project {
 	defer s.mu.RUnlock()
 	list := make([]*model.Project, 0, len(s.projects))
 	for _, p := range s.projects {
-		cp := *p
-		list = append(list, &cp)
+		list = append(list, cloneProject(p))
 	}
 	sort.Slice(list, func(i, j int) bool {
 		return list[i].UpdatedAt.After(list[j].UpdatedAt)
@@ -634,8 +745,7 @@ func (s *Store) GetProject(id string) (*model.Project, bool) {
 	if !ok {
 		return nil, false
 	}
-	cp := *p
-	return &cp, true
+	return cloneProject(p), true
 }
 
 func (s *Store) SaveProject(p *model.Project) error {
@@ -646,8 +756,7 @@ func (s *Store) SaveProject(p *model.Project) error {
 		p.CreatedAt = now
 	}
 	p.UpdatedAt = now
-	cp := *p
-	s.projects[p.ID] = &cp
+	s.projects[p.ID] = cloneProject(p)
 	return s.saveProjectsLocked()
 }
 
@@ -666,8 +775,7 @@ func (s *Store) ListJobs() []*model.RenderJob {
 	defer s.mu.RUnlock()
 	list := make([]*model.RenderJob, 0, len(s.jobs))
 	for _, j := range s.jobs {
-		cp := *j
-		list = append(list, &cp)
+		list = append(list, cloneJob(j))
 	}
 	sort.Slice(list, func(i, j int) bool {
 		return list[i].CreatedAt.After(list[j].CreatedAt)
@@ -682,23 +790,34 @@ func (s *Store) GetJob(id string) (*model.RenderJob, bool) {
 	if !ok {
 		return nil, false
 	}
-	cp := *j
-	return &cp, true
+	return cloneJob(j), true
 }
 
 func (s *Store) SaveJob(j *model.RenderJob) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cp := *j
-	s.jobs[j.ID] = &cp
+	s.jobs[j.ID] = cloneJob(j)
 	return s.saveJobsLocked()
+}
+
+// UpdateJob atomically mutates a RenderJob under Store.mu.Lock() so concurrent worker/HTTP/peek updates never clobber each other!
+func (s *Store) UpdateJob(id string, fn func(*model.RenderJob)) (*model.RenderJob, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, ok := s.jobs[id]
+	if !ok {
+		return nil, false
+	}
+	fn(j)
+	_ = s.saveJobsLocked()
+	return cloneJob(j), true
 }
 
 func (s *Store) DeleteJob(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if j, ok := s.jobs[id]; ok && j.OutputPath != "" {
-		_ = os.Remove(j.OutputPath)
+	if j, ok := s.jobs[id]; ok {
+		s.removeJobArtifactsLocked(id, j)
 	}
 	delete(s.jobs, id)
 	return s.saveJobsLocked()
@@ -947,16 +1066,7 @@ func (s *Store) savePublishAccountsLocked() error {
 	sort.Slice(list, func(i, j int) bool {
 		return list[i].CreatedAt.Before(list[j].CreatedAt)
 	})
-	p := filepath.Join(s.DataDir, "publish_accounts.json")
-	b, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p)
+	return writeJSONAtomicPerm(filepath.Join(s.DataDir, "publish_accounts.json"), list, 0o600)
 }
 
 func (s *Store) ListPublishAccounts() []*model.PublishAccount {

@@ -517,3 +517,35 @@ func compactSingleLine(out, fallback string, maxLen int) string {
 	}
 	return s
 }
+
+// CloneReadOnlyCookies copies cookiesPath (falling back to cookiesPath+".good" if empty/truncated)
+// into a private temporary file so concurrent yt-dlp invocations (which rewrite --cookies on exit)
+// NEVER race on or corrupt the live cookies.txt file.
+func CloneReadOnlyCookies(cookiesPath string) (string, func()) {
+	noop := func() {}
+	p := strings.TrimSpace(cookiesPath)
+	if p == "" {
+		return "", noop
+	}
+	data, err := os.ReadFile(p)
+	if err != nil || len(bytes.TrimSpace(data)) == 0 {
+		if bak, bakErr := os.ReadFile(p + ".good"); bakErr == nil && len(bytes.TrimSpace(bak)) > 0 {
+			data = bak
+		} else {
+			return "", noop
+		}
+	}
+	tmp, err := os.CreateTemp("", "kf-ytcookie-*.txt")
+	if err != nil {
+		return p, noop
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return p, noop
+	}
+	_ = tmp.Close()
+	_ = os.Chmod(tmpPath, 0o600)
+	return tmpPath, func() { _ = os.Remove(tmpPath) }
+}
