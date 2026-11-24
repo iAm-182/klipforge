@@ -268,8 +268,8 @@
           <label class="check-inline" title="Hemat disk ~95% — download audio ringan <=64kbps dulu untuk cari momen arc, video dipotong hanya untuk klip pilihan!">
             <input type="checkbox" id="optAudioFirst" /> 🎧 Audio-First (Hemat Disk ~95%)
           </label>
-          <label class="check-inline" title="Berjalan di background tanpa memblokir scan (otomatis dilewati pada VOD >90 menit agar super cepat)">
-            <input type="checkbox" id="optIncludeChat" checked /> Live Chat Background (≤90m)
+          <label class="check-inline" title="Berjalan paralel di background (mendukung VOD livestream 3–5 jam via Innertube!) dengan anti-spam &amp; jendela reaksi telat">
+            <input type="checkbox" id="optIncludeChat" checked /> 💬 Live Chat Replay Paralel
           </label>
           <label class="check-inline" title="Download audio ringan untuk deteksi teriakan/tawa keras (otomatis aktif jika heatmap kosong)">
             <input type="checkbox" id="optIncludeAudio" /> Analisis Puncak Audio
@@ -342,6 +342,8 @@
             </div>
             <div class="proj-actions">
               <button class="btn btn-sm btn-accent" id="btnScanAudioFast" title="Download audio super ringan (<=64kbps) untuk cari momen teriakan/ketawa Windah secara akurat!">🔊 Scan Teriakan Audio (Cepat)</button>
+              <button class="btn btn-sm btn-secondary" id="btnScanLiveChat" title="Ambil Live Chat Replay YouTube secara paralel (cocok untuk VOD 3–5 jam!) &amp; hitung ulang skor momen">💬 Scan Live Chat</button>
+              <button class="btn btn-sm btn-secondary" id="btnSampleStoryboard" title="Buat contact-sheet visual 3x3 untuk inspeksi cepat momen VOD atau range manual">🖼️ Storyboard Visual</button>
               <button class="btn btn-sm btn-secondary" id="btnDetectScenes" title="Deteksi pergantian scene &amp; snap titik potong agar tidak tanggung">Snap Scene Cut</button>
               <button class="btn btn-sm btn-secondary" id="btnDiarizeProj" title="Pisahkan pembicara (Streamer vs NPC/Teman) di tiap kandidat">Diarisasi Speaker</button>
               <button class="btn btn-sm btn-secondary" id="btnToggleTuning">🎚️ Tuning Deteksi</button>
@@ -475,6 +477,7 @@
                     <option value="facecam_top_neon">🌴 Facecam Atas + Dark Vice Neon Bar (Signature ATM — Best!)</option>
                     <option value="facecam_top_float">⚡ Facecam Atas + Floating Viral Title (Tanpa Pita, Full-Bleed!)</option>
                     <option value="facecam_top_clean">🏆 Facecam Atas Bersih (Minimalis / Ideal Top-5)</option>
+                    <option value="face_track_smart">🧠 Smart Shot-Aware (YuNet Crop / Blur Fit per Shot!)</option>
                     <option value="face_track">🎯 Face-Track Auto-Follow 9:16 (AI Heavy Tripod Reframe!)</option>
                     <option value="gaming_cinema">🎬 Gaming Cinema (Full 16:9 Gameplay + Frame Facecam)</option>
                     <option value="blur_bg">🎥 Full 16:9 + Blur Background</option>
@@ -739,6 +742,7 @@
                 <option value="facecam_top_neon">🌴 Facecam Atas + Dark Vice Neon Bar (Signature ATM — Best!)</option>
                 <option value="facecam_top_float">⚡ Facecam Atas + Garis Cyan Neon (Tanpa Pita!)</option>
                 <option value="facecam_top_clean">🏆 Facecam Atas Bersih (Minimalis)</option>
+                <option value="face_track_smart">🧠 Smart Shot-Aware (YuNet Crop / Blur Fit)</option>
                 <option value="blur_bg">🎥 Full 16:9 + Blur Background</option>
                 <option value="gaming_cinema">🎮 Gaming Cinema (Full 16:9 + Frame Facecam)</option>
               </select>
@@ -1753,6 +1757,28 @@
         <button class="btn btn-xs btn-secondary" id="btnCopyPkReels" type="button">Salin Reels</button>
         <button class="btn btn-xs btn-primary" id="btnPkPublishIG" type="button">Publish Instagram Reels</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Vision Storyboard Contact-Sheet Modal (AutoClip Visual Scan + Quick Jump) -->
+  <div id="storyboardModal" class="b1-sheet-backdrop hidden">
+    <div class="b1-sheet-card" style="max-width:860px;">
+      <div class="card-head">
+        <div>
+          <h3>🖼️ Storyboard Visual Contact-Sheet</h3>
+          <div class="text-xs muted" id="sbMeta">Klik timestamp frame di bawah untuk lompat ke detik tersebut &amp; set range klip manual.</div>
+        </div>
+        <div class="head-actions">
+          <button class="btn btn-xs btn-secondary" id="btnSbFullVod" type="button">Full VOD (Top 9)</button>
+          <button class="btn btn-xs btn-secondary" id="btnSbManualRange" type="button">Range Manual</button>
+          <button class="btn btn-xs btn-ghost" id="btnCloseStoryboard" type="button">Tutup</button>
+        </div>
+      </div>
+      <div id="sbStatus" class="text-xs muted mt-8">Menyiapkan frame...</div>
+      <div class="mt-8" style="text-align:center;">
+        <img id="sbImage" class="sb-sheet-img hidden" src="" alt="Storyboard Contact Sheet" />
+      </div>
+      <div id="sbFramesBar" class="sb-frames-bar mt-12"></div>
     </div>
   </div>
 

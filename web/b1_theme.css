@@ -1089,3 +1089,17 @@ code, .mono, .kpi-val, .kpi-delta, .sla-badge, .strip-mono, .kanban-age, .peek-m
     max-height: 92vh;
   }
 }
+
+/* Vision Storyboard Contact-Sheet Modal */
+.sb-sheet-img {
+  max-width: 100%;
+  border-radius: 8px;
+  border: 1px solid var(--border-hi);
+  background: #0b0f1a;
+  display: inline-block;
+}
+.sb-frames-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}

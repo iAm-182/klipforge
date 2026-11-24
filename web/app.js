@@ -1341,6 +1341,15 @@
       } else if (mode === 'original') {
         const fitH = Math.round(ow * (ih / iw));
         oCtx.drawImage(state.previewImg, 0, (oh - fitH) / 2, ow, fitH);
+      } else if (mode === 'face_track_smart' || mode === 'face_track') {
+        drawCoverSlice(oCtx, state.previewImg, 0, 0, iw, ih, 0, 0, ow, oh);
+        oCtx.fillStyle = 'rgba(16, 185, 129, 0.88)';
+        oCtx.fillRect(6, 6, ow - 12, 16);
+        oCtx.fillStyle = '#062118';
+        oCtx.font = 'bold 8.5px Segoe UI';
+        oCtx.textAlign = 'center';
+        oCtx.fillText(mode === 'face_track_smart' ? 'SMART SHOT: CROP / FIT' : 'AI FACE-TRACK 9:16', ow / 2, 17);
+        oCtx.textAlign = 'left';
       } else {
         drawCoverSlice(oCtx, state.previewImg, 0, 0, iw, ih, 0, 0, ow, oh);
       }
@@ -1946,6 +1955,95 @@
       toast(e.message, 'err');
     }
   });
+
+  if ($('btnScanLiveChat')) {
+    $('btnScanLiveChat').addEventListener('click', async () => {
+      if (!state.activeProject) return;
+      try {
+        await api(`/api/projects/${encodeURIComponent(state.activeProject.id)}/scan-livechat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sync: false }),
+        });
+        toast('💬 Mengambil Live Chat Replay YouTube secara paralel (mendukung VOD 3–5 jam)...', 'info');
+      } catch (e) {
+        toast('Scan Live Chat gagal: ' + e.message, 'err');
+      }
+    });
+  }
+
+  function closeStoryboardModal() {
+    const m = $('storyboardModal');
+    if (m) m.classList.add('hidden');
+  }
+
+  async function openStoryboardModal(useManualRange) {
+    const proj = state.activeProject;
+    if (!proj) return;
+    const modal = $('storyboardModal');
+    const img = $('sbImage');
+    const st = $('sbStatus');
+    const bar = $('sbFramesBar');
+    if (!modal || !img || !st || !bar) return;
+
+    modal.classList.remove('hidden');
+    img.classList.add('hidden');
+    bar.innerHTML = '';
+    const payload = { count: 9, cols: 3 };
+    if (useManualRange) {
+      const s = Math.max(0, parseFloat($('manualStart')?.value) || 0);
+      const e = Math.max(s + 2, parseFloat($('manualEnd')?.value) || (s + 45));
+      payload.startSec = s;
+      payload.endSec = e;
+      st.textContent = `Mengekstrak 9 frame contact-sheet pada range ${fmtTime(s)} – ${fmtTime(e)}...`;
+    } else {
+      st.textContent = 'Mengekstrak 9 frame momen teratas sepanjang VOD menjadi contact-sheet 3×3...';
+    }
+    try {
+      const res = await api(`/api/projects/${encodeURIComponent(proj.id)}/storyboard`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      img.src = res.imageUrl + (res.imageUrl.includes('?') ? '&' : '?') + 't=' + Date.now();
+      img.classList.remove('hidden');
+      st.textContent = `Siap! Contact-sheet ${res.cols}×${res.rows} (${res.width}×${res.height}px) · ${(res.frames || []).length} frame. Klik timestamp untuk lompat & set range manual:`;
+      bar.innerHTML = (res.frames || []).map((f) =>
+        `<button type="button" class="btn btn-xs btn-secondary sb-jump-btn" data-sec="${Number(f.sec) || 0}">#${(f.index || 0) + 1} · ${escapeHtml(f.timeText || fmtTime(f.sec))}</button>`
+      ).join('');
+      bar.querySelectorAll('.sb-jump-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const sec = Math.max(0, Math.floor(parseFloat(btn.dataset.sec) || 0));
+          $('manualStart').value = Math.max(0, sec - 10);
+          $('manualEnd').value = Math.min(Math.floor(proj.durationSec || (sec + 30)), sec + 25);
+          setupPlayer(proj, sec, true);
+          closeStoryboardModal();
+          toast(`Lompat ke ${fmtTime(sec)} & range manual diset (${fmtTime(Math.max(0, sec - 10))} – ${fmtTime(sec + 25)})`, 'ok');
+        });
+      });
+    } catch (e) {
+      st.textContent = 'Gagal membuat storyboard: ' + e.message;
+      toast('Storyboard gagal: ' + e.message, 'err');
+    }
+  }
+
+  if ($('btnSampleStoryboard')) {
+    $('btnSampleStoryboard').addEventListener('click', () => openStoryboardModal(false));
+  }
+  if ($('btnSbFullVod')) {
+    $('btnSbFullVod').addEventListener('click', () => openStoryboardModal(false));
+  }
+  if ($('btnSbManualRange')) {
+    $('btnSbManualRange').addEventListener('click', () => openStoryboardModal(true));
+  }
+  if ($('btnCloseStoryboard')) {
+    $('btnCloseStoryboard').addEventListener('click', closeStoryboardModal);
+  }
+  if ($('storyboardModal')) {
+    $('storyboardModal').addEventListener('click', (e) => {
+      if (e.target === $('storyboardModal')) closeStoryboardModal();
+    });
+  }
 
   $('btnDownloadFullProj').addEventListener('click', async () => {
     if (!state.activeProject) return;
@@ -4170,6 +4268,9 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && $('postEditModal') && !$('postEditModal').classList.contains('hidden')) {
       closePostEditModal();
+    }
+    if (e.key === 'Escape' && $('storyboardModal') && !$('storyboardModal').classList.contains('hidden')) {
+      closeStoryboardModal();
     }
   });
   document.querySelectorAll('.pe-nudge').forEach((btn) => {
