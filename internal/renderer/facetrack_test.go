@@ -65,3 +65,36 @@ func TestSmoothFaceTrack_HeavyTripodAndFallback(t *testing.T) {
 		t.Fatalf("unexpected face_track FFmpeg filter: %s", flt)
 	}
 }
+
+func TestPlanAndBuildShotAwareReframe_MixedCropAndFit(t *testing.T) {
+	// Shot 1 (0..4s): face present on left -> "crop"
+	// Shot 2 (4..8s): no face (wide gameplay / menu) -> "fit" (blur_bg uncropped)
+	// Shot 3 (8..12s): face present on right -> "crop"
+	var dets []FaceDetection
+	for i := 0; i < 16; i++ {
+		dets = append(dets, FaceDetection{TimeSec: float64(i) * 0.25, CenterX: 0.25, Width: 0.14, Height: 0.20, Confidence: 0.9})
+	}
+	for i := 32; i < 48; i++ {
+		dets = append(dets, FaceDetection{TimeSec: float64(i) * 0.25, CenterX: 0.78, Width: 0.14, Height: 0.20, Confidence: 0.9})
+	}
+
+	shots := PlanShotAwareReframe(dets, []float64{4.0, 8.0}, 12.0)
+	if len(shots) != 3 {
+		t.Fatalf("expected 3 planned shots, got %d (%+v)", len(shots), shots)
+	}
+	if shots[0].Mode != "crop" || shots[1].Mode != "fit" || shots[2].Mode != "crop" {
+		t.Fatalf("expected [crop, fit, crop], got [%s, %s, %s]", shots[0].Mode, shots[1].Mode, shots[2].Mode)
+	}
+
+	flt := BuildShotAwareReframeFilter(shots, 1920, 1080, 1080, 1920, "[v_norm]", "[main_v0]")
+	for _, want := range []string{
+		"[v_norm]split=3[sh_in_0][sh_in_1][sh_in_2]",
+		"crop=608:1080:",
+		"boxblur=26:6[sf1_bg]",
+		"[sh_out_0][sh_out_1][sh_out_2]concat=n=3:v=1:a=0[main_v0]",
+	} {
+		if !strings.Contains(flt, want) {
+			t.Fatalf("expected shot-aware filter to contain %q, got:\n%s", want, flt)
+		}
+	}
+}

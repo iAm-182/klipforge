@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"klipforge/internal/analyzer"
 	"klipforge/internal/model"
 )
 
@@ -291,7 +292,20 @@ func RenderClip(ctx context.Context, in RenderInput) (MediaInfo, error) {
 	if strings.EqualFold(strings.TrimSpace(effLayout.CropMode), "facecam_auto") {
 		effLayout.CropMode = "facecam_top_neon"
 	}
-	if effLayout.CropMode == "face_track" {
+	if effLayout.CropMode == "face_track_smart" {
+		dets := DetectFacesInVideo(ctx, in.SourcePath, in.SeekStart, rawMainDur)
+		var relCuts []float64
+		if scRes, scErr := analyzer.DetectSceneCutsWindow(ctx, "", in.FFmpegPath, in.SourcePath, in.SeekStart, rawMainDur); scErr == nil {
+			for _, c := range scRes.Cuts {
+				rel := c - in.SeekStart
+				if rel > 0.8 && rel < rawMainDur-0.8 {
+					relCuts = append(relCuts, rel)
+				}
+			}
+		}
+		shots := PlanShotAwareReframe(dets, relCuts, rawMainDur)
+		filters = append(filters, BuildShotAwareReframeFilter(shots, srcInfo.Width, srcInfo.Height, outW, outH, preV, "[main_v0]"))
+	} else if effLayout.CropMode == "face_track" {
 		dets := DetectFacesInVideo(ctx, in.SourcePath, in.SeekStart, rawMainDur)
 		if len(dets) > 0 {
 			track := SmoothFaceTrack(dets, rawMainDur, 4.0)

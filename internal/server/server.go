@@ -296,7 +296,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/projects/analyze", s.handleAnalyzeProject)
 	mux.HandleFunc("POST /api/projects/{id}/reanalyze", s.handleReanalyzeProject)
 	mux.HandleFunc("GET /api/projects/{id}/search", s.handleSearchTranscript)
+	mux.HandleFunc("GET /api/projects/{id}/transcript-windows", s.handleGetTranscriptWindows)
 	mux.HandleFunc("POST /api/projects/{id}/scan-audio", s.handleScanAudioOnly)
+	mux.HandleFunc("POST /api/projects/{id}/scan-livechat", s.handleScanLiveChat)
+	mux.HandleFunc("POST /api/projects/{id}/storyboard", s.handleSampleStoryboard)
+	mux.HandleFunc("GET /api/projects/{id}/storyboard/{filename}", s.handleServeStoryboard)
 	mux.HandleFunc("POST /api/projects/{id}/download-full", s.handleDownloadFull)
 	mux.HandleFunc("POST /api/projects/{id}/grab-frame", s.handleGrabFrame)
 	mux.HandleFunc("POST /api/projects/{id}/verify-frames", s.handleVerifyCandidateFrames)
@@ -414,6 +418,8 @@ func isAgentAllowed(method, path string) bool {
 	if strings.HasPrefix(path, "/api/projects/") {
 		if strings.HasSuffix(path, "/reanalyze") ||
 			strings.HasSuffix(path, "/scan-audio") ||
+			strings.HasSuffix(path, "/scan-livechat") ||
+			strings.HasSuffix(path, "/storyboard") ||
 			strings.HasSuffix(path, "/verify-frames") ||
 			strings.HasSuffix(path, "/grab-frame") ||
 			strings.HasSuffix(path, "/detect-scenes") ||
@@ -1180,25 +1186,20 @@ func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat
 	// Capture Start + Peak verification frames for top 5 candidates in background (for human visual review BEFORE rendering!)
 	go s.captureCandidateFrames(proj.ID, 5, nil)
 
-	// ============ PHASE 2: NON-BLOCKING BACKGROUND LIVE CHAT (Smart Guard!) ============
-	// Live chat replay on viral 4-hour streams (14M+ views) has 10,000+ fragments & takes 20+ mins.
-	// So we only auto-download live chat in background for streams <= 90 mins (with strict 90s process-tree kill!).
-	if includeChat && meta.HasLiveChat {
-		if meta.Duration > 5400 {
-			s.Broker.Log("analyzer", "info", fmt.Sprintf("VOD berdurasi %.0f menit (sangat panjang) — Live Chat dilewati otomatis agar tidak lemot; deteksi memakai Heatmap + Transkrip Hype!", meta.Duration/60))
-			return
-		}
+	// ============ PHASE 2: NON-BLOCKING BACKGROUND LIVE CHAT (Fast Parallel Innertube -> yt-dlp) ============
+	// Works even on 3–5 hour livestream VODs via parallel Innertube playerOffsetMs seeking (no 90-minute cutoff!).
+	if includeChat && (meta.HasLiveChat || meta.Duration >= 1800) {
 		go func() {
-			s.Broker.Log("analyzer", "info", "Fase 2 (Background): Memperkaya skor dengan YouTube Live Chat Replay (maks 90 dtk)...")
-			chatCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			s.Broker.Log("analyzer", "info", "Fase 2 (Background): Memperkaya skor dengan YouTube Live Chat Replay paralel...")
+			chatCtx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 			defer cancel()
-			chatPath, err := s.YT.DownloadLiveChat(chatCtx, proj.SourceURL, projDir, settings)
+			chatPath, _, engine, err := s.YT.DownloadLiveChatSmart(chatCtx, proj.SourceURL, proj.VideoID, proj.DurationSec, projDir, settings, nil)
 			if err != nil || chatPath == "" {
-				s.Broker.Log("analyzer", "warn", "Background Live Chat selesai/timeout — hasil Fase 1 tetap aktif.")
+				s.Broker.Log("analyzer", "info", "Background Live Chat tidak tersedia/timeout — hasil Fase 1 tetap aktif.")
 				return
 			}
 			msgs, err := youtube.ParseLiveChatFile(chatPath)
-			if err != nil || len(msgs) < 20 {
+			if err != nil || len(msgs) < 10 {
 				return
 			}
 			latestProj, ok := s.Store.GetProject(projectID)
@@ -1207,17 +1208,18 @@ func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat
 			}
 			latestProj.LiveChatPath = chatPath
 			s.cacheMu.Lock()
-			if cur, ok := s.rawSignals[projectID]; ok {
+			if cur, exists := s.rawSignals[projectID]; exists {
 				cur.Chats = msgs
 			}
+			heatSnap, audioSnap, transSnap := cs.Heatmap, cs.AudioEnergy, cs.Transcript
 			s.cacheMu.Unlock()
 
 			upgraded := analyzer.DetectHype(analyzer.AnalysisInput{
 				DurationSec:    latestProj.DurationSec,
-				Heatmap:        cs.Heatmap,
+				Heatmap:        heatSnap,
 				Chats:          msgs,
-				AudioEnergy:    cs.AudioEnergy,
-				Transcript:     cs.Transcript,
+				AudioEnergy:    audioSnap,
+				Transcript:     transSnap,
 				Chapters:       latestProj.Chapters,
 				Settings:       latestProj.DetectConfig,
 				ForbiddenWords: s.campaignForbiddenWords(latestProj.CampaignID),
@@ -1226,10 +1228,10 @@ func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat
 			latestProj.Candidates = mergePreservedCandidateMeta(latestProj.Candidates, upgraded.Candidates)
 			s.enrichProjectAutoEdit(latestProj)
 			latestProj.Signals = upgraded.Signals
-			latestProj.StatusMessage = fmt.Sprintf("Diperkaya dengan %d pesan Live Chat! %d momen hits ditemukan.", len(msgs), len(upgraded.Candidates))
+			latestProj.StatusMessage = fmt.Sprintf("💬 Diperkaya %d pesan Live Chat (%s)! %d momen hits ditemukan.", len(msgs), engine, len(upgraded.Candidates))
 			_ = s.Store.SaveProject(latestProj)
 			s.Broker.Publish("project_update", latestProj)
-			s.Broker.Log("analyzer", "success", fmt.Sprintf("Fase 2 Live Chat selesai: %d pesan ditambahkan!", len(msgs)))
+			s.Broker.Log("analyzer", "success", fmt.Sprintf("Fase 2 Live Chat (%s) selesai: %d pesan ditambahkan!", engine, len(msgs)))
 		}()
 	}
 }
@@ -1248,8 +1250,14 @@ func (s *Server) loadCachedSignals(proj *model.Project) *cachedSignals {
 	if b, err := os.ReadFile(filepath.Join(projDir, "heatmap.json")); err == nil {
 		_ = json.Unmarshal(b, &cs.Heatmap)
 	}
-	if proj.LiveChatPath != "" {
-		if msgs, err := youtube.ParseLiveChatFile(proj.LiveChatPath); err == nil {
+	chatPath := proj.LiveChatPath
+	if chatPath == "" {
+		if matches, _ := filepath.Glob(filepath.Join(projDir, "*.live_chat.json")); len(matches) > 0 {
+			chatPath = matches[0]
+		}
+	}
+	if chatPath != "" {
+		if msgs, err := youtube.ParseLiveChatFile(chatPath); err == nil {
 			cs.Chats = msgs
 		}
 	}

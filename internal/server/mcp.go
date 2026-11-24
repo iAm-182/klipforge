@@ -66,7 +66,7 @@ func propBool(desc string) map[string]interface{} {
 	return map[string]interface{}{"type": "boolean", "description": desc}
 }
 
-// mcpTools defines all 23 strictly least-privilege MCP tools exposed at /api/mcp.
+// mcpTools defines all 26 strictly least-privilege MCP tools exposed at /api/mcp.
 // Zero destructive tools: NO DELETE, NO QC approve/reject, NO /api/team management, NO /api/publish/accounts, NO cookie refresh.
 var mcpTools = []mcpToolDef{
 	{
@@ -100,6 +100,38 @@ var mcpTools = []mcpToolDef{
 			"campaignId": propStr("Optional target campaign ID"),
 			"audioFirst": propBool("Defaults to true (audio+chat+heatmap+subs without downloading full MP4)"),
 		}, "url"),
+	},
+	{
+		Name:        "klipforge_scan_livechat",
+		Description: "Fetch YouTube Live Chat Replay across long 3-5h VODs (parallel Innertube seeker -> yt-dlp fallback) and re-score candidates with trailing reaction lag, unique-chatter anti-spam, and Visual Gag Boost.",
+		InputSchema: schemaObj(map[string]interface{}{
+			"projectId": propStr("Project ID"),
+			"sync":      propBool("Defaults to true (waits for chat replay & returns upgraded candidates immediately)"),
+		}, "projectId"),
+	},
+	{
+		Name:        "klipforge_transcript_windows",
+		Description: "Return AutoClip-style one-pass compact transcript windows (`id|MM:SS|text` with inline [SPEAKER_X], [CHAT:N], [AUD:N], and synthetic [VISUAL_CHAT_SPIKE] lines) for whole-VOD LLM moment picking.",
+		InputSchema: schemaObj(map[string]interface{}{
+			"projectId":  propStr("Project ID"),
+			"window":     propInt("0-based window index (default 0)"),
+			"windowMin":  propNum("Window duration in minutes (default 25, max 60)"),
+			"overlapSec": propNum("Overlap between adjacent windows in seconds (default 90)"),
+			"maxChars":   propInt("Character budget per window (default 14000)"),
+		}, "projectId"),
+	},
+	{
+		Name:        "klipforge_sample_storyboard",
+		Description: "Generate a labeled multi-frame contact-sheet JPEG (default 3x3) across a range or full VOD (works in Audio-First mode!) so vision models & humans can visually verify crashes, menus, and gags.",
+		InputSchema: schemaObj(map[string]interface{}{
+			"projectId":     propStr("Project ID"),
+			"startSec":      propNum("Optional start second for range sampling"),
+			"endSec":        propNum("Optional end second for range sampling"),
+			"timestamps":    map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "number"}, "description": "Optional explicit frame timestamps (max 16)"},
+			"count":         propInt("Frame count when timestamps omitted (default 9, max 16)"),
+			"cols":          propInt("Grid columns (default 3, max 4)"),
+			"includeBase64": propBool("Set true to also attach a native MCP image/jpeg block for vision models"),
+		}, "projectId"),
 	},
 	{
 		Name:        "klipforge_detect_scenes",
@@ -170,7 +202,7 @@ var mcpTools = []mcpToolDef{
 			"title":        propStr("Clip or compilation title"),
 			"projectId":    propStr("Default project ID for segments"),
 			"campaignId":   propStr("Optional campaign ID for watermark/outro/forbiddenWords"),
-			"layout":       map[string]interface{}{"type": "object", "description": "aspectRatio (9:16), cropMode (face_track/facecam_auto/facecam_top_neon/...)"},
+			"layout":       map[string]interface{}{"type": "object", "description": "aspectRatio (9:16), cropMode (face_track_smart/face_track/facecam_auto/facecam_top_neon/gaming_cinema/blur_bg)"},
 			"subtitles":    map[string]interface{}{"type": "object", "description": "enabled, preset (karaoke/viral-yellow/gaming-neon), ..."},
 			"audioFx":      map[string]interface{}{"type": "object", "description": "sfxAutoPreset (auto_by_moment), autoDuck, vocalEnhance, bgmAssetId"},
 			"videoFx":      map[string]interface{}{"type": "object", "description": "colorPreset, motionPreset, speed, sharpen, fadeIn"},
@@ -194,7 +226,7 @@ var mcpTools = []mcpToolDef{
 			"startSec":     propNum("Clip start timestamp in seconds"),
 			"endSec":       propNum("Clip end timestamp in seconds"),
 			"hookText":     propStr("Optional animated hook banner text"),
-			"layout":       map[string]interface{}{"type": "object", "description": "aspectRatio, resolution, cropMode"},
+			"layout":       map[string]interface{}{"type": "object", "description": "aspectRatio, resolution, cropMode (face_track_smart/face_track/facecam_auto/facecam_top_neon/blur_bg)"},
 			"subtitles":    map[string]interface{}{"type": "object", "description": "enabled, preset, position"},
 			"audioFx":      map[string]interface{}{"type": "object", "description": "sfxAutoPreset, autoDuck, vocalEnhance, bgmAssetId"},
 			"videoFx":      map[string]interface{}{"type": "object", "description": "colorPreset, motionPreset, speed, sharpen"},
@@ -441,7 +473,7 @@ func (s *Server) handleSingleMCPRequest(r *http.Request, req mcpRequest) (mcpRes
 					"name":    "klipforge-mcp",
 					"version": "1.1.0",
 				},
-				"instructions": "KlipForge least-privilege MCP orchestrator (23 tools). Audio-first by default; all renders honor RBAC, Fair Queue, and campaign forbiddenWords.",
+				"instructions": "KlipForge least-privilege MCP orchestrator (26 tools). Audio-first by default; supports Live Chat Replay Pro, AutoClip compact transcript windows, Vision Storyboards, and shot-aware face_track_smart while honoring RBAC, Fair Queue, and campaign forbiddenWords.",
 			},
 		}, true
 
@@ -579,6 +611,68 @@ func (s *Server) dispatchMCPTool(outer *http.Request, name string, args map[stri
 			payload["audioFirst"] = true
 		}
 		code, body := invoke(http.MethodPost, "/api/projects/analyze", nil, payload, s.handleAnalyzeProject)
+		return formatMCPResult(code, body), nil
+
+	case "klipforge_scan_livechat":
+		pid := strArg("projectId")
+		if pid == "" {
+			return nil, &mcpError{Code: -32602, Message: "Missing required argument: projectId"}
+		}
+		payload := map[string]interface{}{}
+		for k, v := range args {
+			payload[k] = v
+		}
+		if _, set := args["sync"]; !set {
+			payload["sync"] = true
+		}
+		code, body := invoke(http.MethodPost, "/api/projects/"+url.PathEscape(pid)+"/scan-livechat", map[string]string{"id": pid}, payload, s.handleScanLiveChat)
+		return formatMCPResult(code, body), nil
+
+	case "klipforge_transcript_windows":
+		pid := strArg("projectId")
+		if pid == "" {
+			return nil, &mcpError{Code: -32602, Message: "Missing required argument: projectId"}
+		}
+		qv := url.Values{}
+		for _, key := range []string{"window", "windowMin", "overlapSec", "maxChars"} {
+			if val := strArg(key); val != "" {
+				qv.Set(key, val)
+			}
+		}
+		target := "/api/projects/" + url.PathEscape(pid) + "/transcript-windows"
+		if enc := qv.Encode(); enc != "" {
+			target += "?" + enc
+		}
+		code, body := invoke(http.MethodGet, target, map[string]string{"id": pid}, nil, s.handleGetTranscriptWindows)
+		return formatMCPResult(code, body), nil
+
+	case "klipforge_sample_storyboard":
+		pid := strArg("projectId")
+		if pid == "" {
+			return nil, &mcpError{Code: -32602, Message: "Missing required argument: projectId"}
+		}
+		code, body := invoke(http.MethodPost, "/api/projects/"+url.PathEscape(pid)+"/storyboard", map[string]string{"id": pid}, args, s.handleSampleStoryboard)
+		if code < 400 {
+			if incB64, ok := boolArg("includeBase64"); ok && incB64 {
+				var parsed map[string]interface{}
+				if json.Unmarshal(body, &parsed) == nil {
+					if b64, has := parsed["base64"].(string); has && b64 != "" {
+						delete(parsed, "base64")
+						metaBytes, _ := json.Marshal(parsed)
+						return map[string]interface{}{
+							"content": []map[string]interface{}{
+								{"type": "text", "text": string(metaBytes)},
+								{"type": "image", "data": b64, "mimeType": "image/jpeg"},
+							},
+							"isError": false,
+							"_meta": map[string]interface{}{
+								"httpStatus": code,
+							},
+						}, nil
+					}
+				}
+			}
+		}
 		return formatMCPResult(code, body), nil
 
 	case "klipforge_detect_scenes":

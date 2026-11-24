@@ -175,6 +175,8 @@ func isRoleAllowed(p model.Principal, method, path string) bool {
 		if strings.HasPrefix(path, "/api/projects/") {
 			if strings.HasSuffix(path, "/reanalyze") ||
 				strings.HasSuffix(path, "/scan-audio") ||
+				strings.HasSuffix(path, "/scan-livechat") ||
+				strings.HasSuffix(path, "/storyboard") ||
 				strings.HasSuffix(path, "/download-full") ||
 				strings.HasSuffix(path, "/verify-frames") ||
 				strings.HasSuffix(path, "/grab-frame") ||

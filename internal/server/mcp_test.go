@@ -44,19 +44,21 @@ func TestMCP_StreamableHTTP_RBACAndTools(t *testing.T) {
 		t.Fatalf("unexpected serverInfo: %+v", sInfo)
 	}
 
-	// 3. tools/list -> 23 tools, ZERO destructive/admin/review tools (read-only klipforge_team_metrics allowed)
+	// 3. tools/list -> 26 tools, ZERO destructive/admin/review tools (read-only klipforge_team_metrics allowed)
 	c2, r2 := callMCP(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 	if c2 != http.StatusOK {
 		t.Fatalf("tools/list expected 200, got %d", c2)
 	}
 	res2, _ := r2["result"].(map[string]interface{})
 	tools, _ := res2["tools"].([]interface{})
-	if len(tools) != 23 {
-		t.Fatalf("expected 23 MCP tools, got %d", len(tools))
+	if len(tools) != 26 {
+		t.Fatalf("expected 26 MCP tools, got %d", len(tools))
 	}
+	foundNew := map[string]bool{}
 	for _, raw := range tools {
 		tm, _ := raw.(map[string]interface{})
 		name, _ := tm["name"].(string)
+		foundNew[name] = true
 		lower := strings.ToLower(name)
 		if strings.Contains(lower, "delete") || strings.Contains(lower, "review") || strings.Contains(lower, "approve") ||
 			(strings.Contains(lower, "team") && lower != "klipforge_team_metrics") ||
@@ -64,16 +66,22 @@ func TestMCP_StreamableHTTP_RBACAndTools(t *testing.T) {
 			t.Fatalf("least-privilege violation: forbidden tool exposed in tools/list: %s", name)
 		}
 	}
+	for _, reqName := range []string{"klipforge_scan_livechat", "klipforge_transcript_windows", "klipforge_sample_storyboard"} {
+		if !foundNew[reqName] {
+			t.Fatalf("expected new MCP tool %s in tools/list", reqName)
+		}
+	}
 
-	// 4. tools/call -> core + new tools (including search_transcript, activity, team_metrics)
+	// 4. tools/call -> core + new tools (including transcript_windows, search_transcript, activity, team_metrics)
 	for _, tc := range []string{
 		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"klipforge_home_metrics","arguments":{}}}`,
 		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"klipforge_cookie_status","arguments":{}}}`,
 		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"klipforge_list_board","arguments":{}}}`,
 		`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"klipforge_detect_facecam","arguments":{"projectId":"proj-test-windah"}}}`,
 		`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"klipforge_search_transcript","arguments":{"projectId":"proj-test-windah","query":"gta"}}}`,
-		`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"klipforge_activity","arguments":{"limit":10}}}`,
-		`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"klipforge_team_metrics","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"klipforge_transcript_windows","arguments":{"projectId":"proj-test-windah","window":0}}}`,
+		`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"klipforge_activity","arguments":{"limit":10}}}`,
+		`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"klipforge_team_metrics","arguments":{}}}`,
 	} {
 		code, resp := callMCP(tc)
 		if code != http.StatusOK || resp["error"] != nil {

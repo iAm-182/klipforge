@@ -220,6 +220,172 @@ func BuildFaceTrackFilter(pts []TrackPoint, srcW, srcH, outW, outH int, inLabel,
 		inLabel, cropW, cropH, expr.String(), outW, outH, outLabel)
 }
 
+// ShotReframeSegment represents one scene shot inside a clip with AutoClip-style per-shot framing choice:
+// - "crop": YuNet/OpenCV face is present in this shot -> dynamic portrait follow crop
+// - "fit":  No face / landscape gameplay/menu/cutscene -> full 16:9 uncropped over blurred vertical backdrop
+type ShotReframeSegment struct {
+	StartSec float64      `json:"startSec"`
+	EndSec   float64      `json:"endSec"`
+	Mode     string       `json:"mode"` // "crop" | "fit"
+	Track    []TrackPoint `json:"-"`
+}
+
+// PlanShotAwareReframe partitions [0, durSec] along detected scene cuts (merging tiny <1.2s micro-shots,
+// capping at 10 shots for compact FFmpeg graphs) and chooses "crop" vs "fit" per shot based on face presence.
+func PlanShotAwareReframe(dets []FaceDetection, cuts []float64, durSec float64) []ShotReframeSegment {
+	if durSec <= 0 {
+		durSec = 1.0
+	}
+	// 1. Clean & filter cut boundaries strictly inside (1.2, durSec-1.2)
+	sortedCuts := make([]float64, 0, len(cuts))
+	for _, c := range cuts {
+		if c > 1.2 && c < durSec-1.2 {
+			sortedCuts = append(sortedCuts, c)
+		}
+	}
+	sort.Float64s(sortedCuts)
+
+	// Merge cuts closer than 1.2s and cap to at most 9 internal cuts (10 shots)
+	var boundaries []float64
+	boundaries = append(boundaries, 0)
+	for _, c := range sortedCuts {
+		if c-boundaries[len(boundaries)-1] >= 1.2 {
+			boundaries = append(boundaries, c)
+		}
+	}
+	if len(boundaries) > 10 {
+		// Downsample internal cuts evenly while keeping 0
+		keep := make([]float64, 0, 10)
+		keep = append(keep, 0)
+		step := float64(len(boundaries)-1) / 9.0
+		for i := 1; i < 10; i++ {
+			idx := int(math.Round(float64(i) * step))
+			if idx >= len(boundaries) {
+				idx = len(boundaries) - 1
+			}
+			if boundaries[idx] > keep[len(keep)-1]+0.5 {
+				keep = append(keep, boundaries[idx])
+			}
+		}
+		boundaries = keep
+	}
+	boundaries = append(boundaries, durSec)
+
+	// 2. Classify each shot using 4 Hz face presence ratio (>= 35% buckets with valid face -> "crop", else "fit")
+	const sampleFPS = 4.0
+	rawShots := make([]ShotReframeSegment, 0, len(boundaries)-1)
+	for i := 0; i < len(boundaries)-1; i++ {
+		s0, s1 := boundaries[i], boundaries[i+1]
+		span := s1 - s0
+		if span <= 0.1 {
+			continue
+		}
+		var shotDets []FaceDetection
+		bucketSeen := make(map[int]bool)
+		for _, d := range dets {
+			if d.TimeSec >= s0-0.05 && d.TimeSec <= s1+0.05 && d.CenterX > 0 && d.CenterX < 1 {
+				relT := d.TimeSec - s0
+				if relT < 0 {
+					relT = 0
+				}
+				if relT > span {
+					relT = span
+				}
+				cp := d
+				cp.TimeSec = relT
+				shotDets = append(shotDets, cp)
+				bucketSeen[int(math.Floor(relT*sampleFPS))] = true
+			}
+		}
+		totalBuckets := int(math.Ceil(span * sampleFPS))
+		if totalBuckets < 1 {
+			totalBuckets = 1
+		}
+		presenceRatio := float64(len(bucketSeen)) / float64(totalBuckets)
+
+		mode := "fit"
+		var track []TrackPoint
+		if presenceRatio >= 0.35 && len(shotDets) > 0 {
+			mode = "crop"
+			track = SmoothFaceTrack(shotDets, span, sampleFPS)
+		}
+		rawShots = append(rawShots, ShotReframeSegment{
+			StartSec: s0,
+			EndSec:   s1,
+			Mode:     mode,
+			Track:    track,
+		})
+	}
+
+	if len(rawShots) == 0 {
+		return []ShotReframeSegment{{StartSec: 0, EndSec: durSec, Mode: "fit"}}
+	}
+
+	// 3. Coalesce consecutive "fit" shots so FFmpeg doesn't split/concat identical blurred-fit stretches unnecessarily.
+	merged := make([]ShotReframeSegment, 0, len(rawShots))
+	for _, sh := range rawShots {
+		if len(merged) > 0 && sh.Mode == "fit" && merged[len(merged)-1].Mode == "fit" {
+			merged[len(merged)-1].EndSec = sh.EndSec
+			continue
+		}
+		merged = append(merged, sh)
+	}
+	return merged
+}
+
+func buildBlurFitBranch(inLabel string, outW, outH int, outLabel, prefix string) string {
+	return fmt.Sprintf(
+		"%ssplit=2[%s_bgs][%s_fgs];"+
+			"[%s_bgs]scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,boxblur=26:6[%s_bg];"+
+			"[%s_fgs]scale=%d:-2:force_original_aspect_ratio=decrease[%s_fg];"+
+			"[%s_bg][%s_fg]overlay=(W-w)/2:(H-h)/2,setsar=1%s",
+		inLabel, prefix, prefix,
+		prefix, outW, outH, outW, outH, prefix,
+		prefix, outW, prefix,
+		prefix, prefix, outLabel,
+	)
+}
+
+// BuildShotAwareReframeFilter builds an FFmpeg filtergraph that switches cleanly per shot between
+// YuNet dynamic speaker crop ("crop") and full 16:9 blurred-backdrop portrait ("fit").
+func BuildShotAwareReframeFilter(shots []ShotReframeSegment, srcW, srcH, outW, outH int, inLabel, outLabel string) string {
+	if len(shots) == 0 {
+		return buildBlurFitBranch(inLabel, outW, outH, outLabel, "sfit0")
+	}
+	if len(shots) == 1 {
+		if shots[0].Mode == "crop" && len(shots[0].Track) > 0 {
+			return BuildFaceTrackFilter(shots[0].Track, srcW, srcH, outW, outH, inLabel, outLabel)
+		}
+		return buildBlurFitBranch(inLabel, outW, outH, outLabel, "sfit0")
+	}
+
+	var parts []string
+	var splitOuts strings.Builder
+	for i := range shots {
+		splitOuts.WriteString(fmt.Sprintf("[sh_in_%d]", i))
+	}
+	parts = append(parts, fmt.Sprintf("%ssplit=%d%s", inLabel, len(shots), splitOuts.String()))
+
+	var concatIns strings.Builder
+	for i, sh := range shots {
+		trLabel := fmt.Sprintf("[sh_tr_%d]", i)
+		outSegLabel := fmt.Sprintf("[sh_out_%d]", i)
+		parts = append(parts, fmt.Sprintf("[sh_in_%d]trim=start=%.3f:end=%.3f,setpts=PTS-STARTPTS%s",
+			i, sh.StartSec, sh.EndSec, trLabel))
+
+		if sh.Mode == "crop" && len(sh.Track) > 0 {
+			cropRaw := fmt.Sprintf("[sh_crop_%d]", i)
+			parts = append(parts, BuildFaceTrackFilter(sh.Track, srcW, srcH, outW, outH, trLabel, cropRaw))
+			parts = append(parts, fmt.Sprintf("%ssetsar=1%s", cropRaw, outSegLabel))
+		} else {
+			parts = append(parts, buildBlurFitBranch(trLabel, outW, outH, outSegLabel, fmt.Sprintf("sf%d", i)))
+		}
+		concatIns.WriteString(outSegLabel)
+	}
+	parts = append(parts, fmt.Sprintf("%sconcat=n=%d:v=1:a=0%s", concatIns.String(), len(shots), outLabel))
+	return strings.Join(parts, ";")
+}
+
 // inlineOpenCVFaceScript samples the video segment at ~4 fps and detects the largest frontal face
 // using YuNet ONNX (230 KB CPU model, per reelsaw design) when present, falling back cleanly to
 // OpenCV's bundled Haar Cascade (zero external downloads required!).
