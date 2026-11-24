@@ -7,107 +7,238 @@
   <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png" />
   <link rel="icon" href="/favicon.ico" sizes="any" />
   <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/app.css" />
+  <link rel="stylesheet" href="/b1_theme.css" />
 </head>
 <body>
   <div class="app-shell">
-    <!-- Top Header -->
-    <header class="topbar">
-      <div class="brand">
-        <div class="brand-logo"><img src="/apple-touch-icon.png" alt="KlipForge" class="brand-logo-img" /></div>
-        <div>
-          <div class="brand-title">KlipForge <span class="badge badge-go">GO ENGINE</span></div>
-          <div class="brand-sub">Multi-Signal YouTube Auto-Clipper &amp; MotionKlip Studio</div>
+    <!-- B1.1 Persistent Top Status Strip (Phone + Desktop) -->
+    <header class="status-strip">
+      <div class="strip-group">
+        <div class="strip-brand">
+          <img src="/apple-touch-icon.png" alt="KlipForge" />
+          <span>KlipForge</span>
+        </div>
+        <span class="engine-pill" id="stripEnginePill" title="Status engine & cooldown">
+          <i class="dot"></i>
+          <span class="strip-mono" id="stripEngineText">Memeriksa...</span>
+        </span>
+        <div class="disk-gauge" id="stripDiskGauge" title="Sisa ruang penyimpanan engine">
+          <div class="disk-gauge-bar"><div class="disk-gauge-fill" id="stripDiskFill" style="width:20%"></div></div>
+          <span class="strip-mono" id="stripDiskText">— GB tersisa</span>
         </div>
       </div>
 
-      <nav class="nav-tabs" id="navTabs">
-        <button class="nav-btn active" data-tab="home">🏠 Beranda</button>
-        <button class="nav-btn" data-tab="studio">🎬 Studio</button>
-        <button class="nav-btn" data-tab="topn">🏆 Top-N <span class="pill-count pill-green" id="navTopNCount">0</span></button>
-        <button class="nav-btn" data-tab="review">🕵️ Review <span class="pill-count pill-amber" id="navReviewCount">0</span></button>
-        <button class="nav-btn" data-tab="queue">📦 Library <span class="pill-count" id="navJobCount">0</span></button>
-        <button class="nav-btn" data-tab="campaigns">📋 Campaign</button>
-        <button class="nav-btn" data-tab="audio">🎵 SFX &amp; BGM</button>
-        <button class="nav-btn" data-tab="autopilot">🤖 Autopilot</button>
-        <button class="nav-btn" data-tab="settings">⚙️ Settings</button>
-      </nav>
-
-      <div class="topbar-right">
-        <span class="user-pill hidden" id="userBadge" title="Identitas & role akun aktif">👑 Owner</span>
-        <span class="status-dot" id="sseDot" title="Real-time SSE connection"></span>
-        <span class="dep-pill" id="depBadge">Checking...</span>
-        <button class="btn btn-sm btn-ghost hide-mobile" id="btnOpenOutputs" title="Buka folder outputs di Explorer">📂 Outputs</button>
+      <div class="strip-group">
+        <span class="queue-meter strip-mono" id="stripQueueMeter" title="Batas antrean aktif (Fair Queue)">Antrean kamu <strong>0/3</strong></span>
+        <span class="strip-member" id="stripMemberBadge">Owner <span class="strip-role">owner</span></span>
+        <!-- Legacy compatibility elements referenced by app.js -->
+        <span class="hidden" id="userBadge"></span>
+        <span class="status-dot hidden" id="sseDot"></span>
+        <span class="dep-pill hidden" id="depBadge">Checking...</span>
+        <span class="hidden" id="navTopNCount">0</span>
+        <span class="hidden" id="navReviewCount">0</span>
+        <span class="hidden" id="navJobCount">0</span>
+        <button class="hidden" id="btnOpenOutputs"></button>
       </div>
     </header>
 
+    <!-- B1.1 Desktop Left Rail (5 Primary Items + Contextual Screens) -->
+    <aside class="side-rail" aria-label="Navigasi Utama">
+      <div class="rail-section-label">Utama</div>
+      <button class="rail-nav-btn active" data-tab="home">
+        <svg viewBox="0 0 24 24"><path d="M3 10.5L12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>
+        <span>Beranda</span>
+      </button>
+      <button class="rail-nav-btn" data-tab="board">
+        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="11" rx="1"/><rect x="17" y="4" width="4" height="14" rx="1"/></svg>
+        <span>Papan</span>
+      </button>
+      <button class="rail-nav-btn" data-tab="review">
+        <svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+        <span>Review</span>
+        <span class="rail-badge" id="railReviewBadge">0</span>
+      </button>
+      <button class="rail-nav-btn" data-tab="queue">
+        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M10 9l5 3-5 3z"/></svg>
+        <span>Library</span>
+      </button>
+      <button class="rail-nav-btn" data-tab="team">
+        <svg viewBox="0 0 24 24"><circle cx="9" cy="7" r="3"/><path d="M3 20v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/><circle cx="17" cy="8" r="2.5"/><path d="M17 13a4 4 0 0 1 4 4v3"/></svg>
+        <span>Tim</span>
+      </button>
+
+      <hr class="rail-context-divider" />
+      <div class="rail-section-label">Kontekstual</div>
+      <button class="rail-nav-btn rail-ctx-btn" data-tab="studio"><span>Studio Klip</span></button>
+      <button class="rail-nav-btn rail-ctx-btn" data-tab="topn"><span>Top-N Builder</span></button>
+      <button class="rail-nav-btn rail-ctx-btn" data-tab="campaigns"><span>Campaign &amp; Rules</span></button>
+      <button class="rail-nav-btn rail-ctx-btn" data-tab="audio"><span>Audio &amp; Radar</span></button>
+      <button class="rail-nav-btn rail-ctx-btn" data-tab="autopilot"><span>Autopilot</span></button>
+      <button class="rail-nav-btn rail-ctx-btn" data-tab="settings"><span>Pengaturan Engine</span></button>
+    </aside>
+
+    <!-- Main Viewport -->
+    <div class="main-viewport">
     <!-- Toast Notification Container -->
     <div id="toastBox" class="toast-box"></div>
 
-    <!-- ==================== TAB 0: BERANDA (COMMAND CENTER) ==================== -->
+    <!-- ==================== TAB 0: BERANDA (LIVE STATE — NO HERO BANNER) ==================== -->
     <main id="tab-home" class="tab-panel active">
-      <section class="home-hero-grid">
-        <div class="home-kpi-card kpi-amber" id="kpiCardReview">
-          <div class="kpi-label">⏳ Menunggu Review</div>
-          <div class="kpi-val" id="homePendingCount">0</div>
-          <div class="kpi-sub">Klik untuk putuskan Approve / Reject</div>
+      <!-- B1.5 Four KPI Tiles with 7-day deltas -->
+      <section class="b1-kpi-grid">
+        <div class="b1-kpi-tile" id="kpiCardDone">
+          <div class="b1-kpi-label">Klip dirender (7 hari)</div>
+          <div class="b1-kpi-row">
+            <span class="b1-kpi-val" id="kpiRendered7d">0</span>
+            <span id="kpiRenderedDelta"></span>
+          </div>
         </div>
-        <div class="home-kpi-card kpi-rose" id="kpiCardErrors">
-          <div class="kpi-label">❌ Job Gagal / Perhatian</div>
-          <div class="kpi-val" id="homeErrorCount">0</div>
-          <div class="kpi-sub">Cek di Library untuk Retry / Edit</div>
+        <div class="b1-kpi-tile" id="kpiCardReview">
+          <div class="b1-kpi-label">Disetujui QC (7 hari)</div>
+          <div class="b1-kpi-row">
+            <span class="b1-kpi-val" id="kpiApproved7d">0</span>
+            <span id="kpiApprovedDelta"></span>
+          </div>
         </div>
-        <div class="home-kpi-card kpi-green" id="kpiCardDone">
-          <div class="kpi-label">🎬 Klip Siap Upload</div>
-          <div class="kpi-val" id="homeDoneCount">0</div>
-          <div class="kpi-sub" id="homeApprovedSub">0 approved · 0 aktif</div>
+        <div class="b1-kpi-tile" id="kpiCardPosted" onclick="window.__kfSwitchTab && window.__kfSwitchTab('board')">
+          <div class="b1-kpi-label">Diposting (7 hari)</div>
+          <div class="b1-kpi-row">
+            <span class="b1-kpi-val" id="kpiPosted7d">0</span>
+            <span id="kpiPostedDelta"></span>
+          </div>
         </div>
-        <div class="home-kpi-card kpi-cyan" id="kpiCardHealth">
-          <div class="kpi-label">🛡️ Engine &amp; Disk</div>
-          <div class="kpi-val" id="homeDiskFree">— GB</div>
-          <div class="kpi-sub" id="homeHealthSub">yt-dlp — · 🔒 Protected</div>
+        <div class="b1-kpi-tile" id="kpiCardHealth">
+          <div class="b1-kpi-label">Rata-rata waktu render</div>
+          <div class="b1-kpi-row">
+            <span class="b1-kpi-val" id="kpiAvgRender">0s</span>
+            <span id="kpiAvgDelta"></span>
+          </div>
+        </div>
+        <!-- Hidden legacy KPI refs for app.js compatibility -->
+        <span class="hidden" id="homePendingCount">0</span>
+        <span class="hidden" id="homeErrorCount">0</span>
+        <span class="hidden" id="homeDoneCount">0</span>
+        <span class="hidden" id="homeApprovedSub"></span>
+        <span class="hidden" id="homeDiskFree"></span>
+        <span class="hidden" id="homeHealthSub"></span>
+        <span class="hidden" id="kpiCardErrors"></span>
+      </section>
+
+      <!-- B1.5 Live Active Renders (OpenCue Peek) + Butuh Kamu (Oldest Pending First) -->
+      <section class="b1-home-split">
+        <div class="card" style="margin-bottom:0;">
+          <div class="card-head">
+            <div>
+              <h2>Sedang render</h2>
+              <div class="muted text-xs">Frame peek otomatis diperbarui tiap 30 detik.</div>
+            </div>
+            <button class="btn btn-xs btn-secondary" onclick="window.__kfSwitchTab && window.__kfSwitchTab('board')">Buka Papan</button>
+          </div>
+          <div id="homeActiveRenders" class="peek-list"></div>
+        </div>
+
+        <div class="card" style="margin-bottom:0;">
+          <div class="card-head">
+            <div>
+              <h2>Butuh kamu</h2>
+              <div class="muted text-xs">Antrean review tertua dulu (SLA aging).</div>
+            </div>
+            <button class="btn btn-xs btn-secondary" id="btnHomeGoReview">Semua Review</button>
+          </div>
+          <div id="homeButuhKamu" class="butuh-list"></div>
         </div>
       </section>
 
-      <!-- Quick Scan & Quick System Actions -->
+      <!-- Compact Quick Scan Bar -->
       <section class="card mt-12">
         <div class="card-head">
           <div>
-            <h2>⚡ Mulai Cepat — Scan Link YouTube Baru</h2>
-            <div class="muted text-xs">Tempel link livestream / VOD YouTube untuk langsung berburu momen hits di Studio.</div>
+            <h3>Scan Link YouTube Baru</h3>
+            <div class="muted text-xs">Tempel link VOD untuk memindai momen arc di Studio.</div>
           </div>
           <div class="head-actions">
-            <button class="btn btn-xs btn-secondary" id="btnHomeUpdateYt">⬆️ Update yt-dlp</button>
-            <button class="btn btn-xs btn-secondary" id="btnHomeCleanup">🧹 Bersihkan Cache</button>
+            <button class="btn btn-xs btn-secondary" id="btnHomeUpdateYt">Update yt-dlp</button>
+            <button class="btn btn-xs btn-secondary" id="btnHomeCleanup">Bersihkan Cache</button>
+            <button class="btn btn-xs btn-ghost" id="btnHomeGoLibrary">Library</button>
           </div>
         </div>
         <div class="intake-row">
           <div class="intake-url-wrap">
-            <input type="text" id="homeYtUrl" class="input input-lg" placeholder="Tempel link YouTube di sini (contoh: https://www.youtube.com/watch?v=...)" />
+            <input type="text" id="homeYtUrl" class="input input-lg" placeholder="https://www.youtube.com/watch?v=..." />
           </div>
           <div class="intake-camp-wrap">
             <select id="homeCampaignSel" class="input input-lg"></select>
           </div>
           <div class="intake-action-wrap">
-            <button class="btn btn-primary btn-lg" id="btnHomeQuickScan">🔍 Scan Sekarang</button>
+            <button class="btn btn-primary btn-lg" id="btnHomeQuickScan">Scan VOD</button>
           </div>
         </div>
       </section>
 
-      <!-- Recent Attention Items -->
-      <section class="card mt-12">
-        <div class="card-head">
-          <div>
-            <h3>🔥 Klip Terbaru &amp; Antrean Perhatian</h3>
-            <div class="muted text-xs">Akses cepat ke klip terbaru untuk Review, Edit Manual (+SFX &amp; Watermark), atau Download MP4.</div>
-          </div>
-          <div class="head-actions">
-            <button class="btn btn-xs btn-accent" id="btnHomeGoReview">🕵️ Buka Review Inbox</button>
-            <button class="btn btn-xs btn-secondary" id="btnHomeGoLibrary">📦 Semua Library</button>
-          </div>
+      <!-- Hidden legacy recent container so app.js renderHomeDashboard stays clean -->
+      <div id="homeRecentList" class="hidden"></div>
+    </main>
+
+    <!-- ==================== TAB: PAPAN (B1.2 KANBAN + SORTABLEJS + WIP LIMIT) ==================== -->
+    <main id="tab-board" class="tab-panel">
+      <div class="board-toolbar">
+        <div class="board-filters">
+          <select id="boardFilterProject" class="input input-sm" style="width:auto;min-width:170px;">
+            <option value="all">Semua Project</option>
+          </select>
+          <select id="boardFilterMember" class="input input-sm" style="width:auto;min-width:140px;">
+            <option value="all">Semua Anggota</option>
+          </select>
+          <button class="filter-chip board-moment-chip active" data-moment="all">Semua Tipe</button>
+          <button class="filter-chip board-moment-chip" data-moment="crash">crash</button>
+          <button class="filter-chip board-moment-chip" data-moment="fail">fail</button>
+          <button class="filter-chip board-moment-chip" data-moment="hype">hype</button>
+          <button class="filter-chip board-moment-chip" data-moment="meme">meme</button>
+          <button class="filter-chip board-moment-chip" data-moment="twist">twist</button>
+          <button class="filter-chip board-moment-chip" data-moment="victory">victory</button>
         </div>
-        <div id="homeRecentList" class="jobs-grid"></div>
-      </section>
+        <div class="head-actions">
+          <button class="btn btn-xs btn-secondary" id="btnRefreshBoard">Muat Ulang</button>
+          <button class="btn btn-xs btn-primary" onclick="window.__kfSwitchTab && window.__kfSwitchTab('studio')">Buka Studio</button>
+        </div>
+      </div>
+      <div id="kanbanBoardWrap" class="kanban-scroll"></div>
+    </main>
+
+    <!-- ==================== TAB: TIM & AKTIVITAS (B1.4) ==================== -->
+    <main id="tab-team" class="tab-panel">
+      <div class="tim-layout">
+        <section class="card" style="margin-bottom:0;">
+          <div class="card-head">
+            <div>
+              <h2>Tim &amp; Status Kerja</h2>
+              <div class="muted text-xs">Kehadiran, klip hari ini, approval rate, rata-rata turnaround, dan output 7 hari.</div>
+            </div>
+            <button class="btn btn-xs btn-secondary" onclick="window.__kfSwitchTab && window.__kfSwitchTab('settings')">Kelola Kunci &amp; Engine</button>
+          </div>
+          <div id="b1TimCards" class="tim-cards-grid"></div>
+        </section>
+
+        <section class="card" style="margin-bottom:0;">
+          <div class="card-head">
+            <div>
+              <h2>Aktivitas</h2>
+              <div class="muted text-xs">Log persisten aksi manusia &amp; Muse.</div>
+            </div>
+            <div class="head-actions">
+              <select id="activityMemberFilter" class="input input-sm" style="width:auto;min-width:120px;">
+                <option value="all">Semua Aktivitas</option>
+              </select>
+              <button class="btn btn-xs btn-secondary" id="btnRefreshActivity">Muat Ulang</button>
+            </div>
+          </div>
+          <div id="b1ActivityFeed" class="activity-feed"></div>
+        </section>
+      </div>
     </main>
 
     <!-- ==================== TAB 1: STUDIO CLIPPER ==================== -->
@@ -700,24 +831,29 @@
       </div>
     </main>
 
-    <!-- ==================== TAB: REVIEW INBOX (STANDALONE — MOBILE 1-TANGAN!) ==================== -->
+    <!-- ==================== TAB: REVIEW INBOX (B1.3 AGING SLA + BATCH MODE) ==================== -->
     <main id="tab-review" class="tab-panel">
       <section class="card">
         <div class="card-head">
           <div>
-            <h2>🕵️ Review Inbox — Putuskan Klip Siap Upload</h2>
-            <div class="muted text-xs">Desain cepat &amp; ramah HP: tonton sebentar → <strong>Approve</strong>, <strong>Edit Manual (+SFX &amp; Watermark)</strong>, atau <strong>Reject</strong>.</div>
+            <h2>Review Antrean</h2>
+            <div class="muted text-xs">Diurutkan tertua dulu. Buka Review Sheet untuk cek Start/Peak Frame berdampingan, lalu Setujui atau Tolak.</div>
           </div>
           <div class="head-actions">
             <select id="reviewMemberFilter" class="input input-sm" style="width:auto;min-width:135px;" title="Filter klip berdasarkan anggota pembuat">
-              <option value="all">👤 Semua Anggota</option>
+              <option value="all">Semua Anggota</option>
             </select>
-            <button class="btn btn-xs btn-secondary review-filter active" data-rfilter="pending_review">⏳ Menunggu (<span id="cntPending">0</span>)</button>
-            <button class="btn btn-xs btn-ghost review-filter" data-rfilter="approved">✅ Approved (<span id="cntApproved">0</span>)</button>
-            <button class="btn btn-xs btn-ghost review-filter" data-rfilter="rejected">❌ Rejected (<span id="cntRejected">0</span>)</button>
+            <button class="btn btn-xs btn-secondary review-filter active" data-rfilter="pending_review">Menunggu (<span id="cntPending">0</span>)</button>
+            <button class="btn btn-xs btn-ghost review-filter" data-rfilter="approved">Disetujui (<span id="cntApproved">0</span>)</button>
+            <button class="btn btn-xs btn-ghost review-filter" data-rfilter="rejected">Ditolak (<span id="cntRejected">0</span>)</button>
           </div>
         </div>
-        <div id="reviewInboxList" class="jobs-grid"></div>
+        <div id="b1BatchReviewBar" class="review-batch-bar hidden">
+          <span class="text-xs">Mode Batch QC · <strong id="b1BatchCount">0</strong> klip dipilih</span>
+          <button class="btn btn-xs btn-primary" id="btnB1BatchApprove">Setujui Terpilih</button>
+        </div>
+        <div id="b1ReviewList" class="jobs-grid"></div>
+        <div id="reviewInboxList" class="hidden"></div>
       </section>
     </main>
 
@@ -1095,6 +1231,9 @@
               </label>
             </div>
           </label>
+          <label class="check-inline mt-12">
+            <input type="checkbox" id="sDisableAgentTrendImport" /> 🔒 Nonaktifkan import sound Trending oleh Agent (Muse) — default aktif dengan batas radar-only, maks 30 dtk, 5/hari per anggota
+          </label>
           <div class="head-actions mt-16">
             <button class="btn btn-primary" id="btnSaveSettings">💾 Simpan Settings</button>
             <button class="btn btn-secondary" id="btnCleanupStorage">🧹 Bersihkan Temp &amp; Klip Lama</button>
@@ -1110,7 +1249,33 @@
         </section>
       </div>
     </main>
-  </div>
+    </div><!-- /.main-viewport -->
+
+    <!-- B1.1 Mobile 5-Item Bottom Tab Bar -->
+    <nav class="mobile-bottom-nav" aria-label="Navigasi Ponsel">
+      <button class="mob-nav-btn active" data-tab="home">
+        <svg viewBox="0 0 24 24"><path d="M3 10.5L12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>
+        <span>Beranda</span>
+      </button>
+      <button class="mob-nav-btn" data-tab="board">
+        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="11" rx="1"/><rect x="17" y="4" width="4" height="14" rx="1"/></svg>
+        <span>Papan</span>
+      </button>
+      <button class="mob-nav-btn" data-tab="review">
+        <svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+        <span>Review</span>
+        <span class="mob-nav-dot hidden" id="mobReviewDot">0</span>
+      </button>
+      <button class="mob-nav-btn" data-tab="queue">
+        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M10 9l5 3-5 3z"/></svg>
+        <span>Library</span>
+      </button>
+      <button class="mob-nav-btn" data-tab="team">
+        <svg viewBox="0 0 24 24"><circle cx="9" cy="7" r="3"/><path d="M3 20v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/><circle cx="17" cy="8" r="2.5"/><path d="M17 13a4 4 0 0 1 4 4v3"/></svg>
+        <span>Tim</span>
+      </button>
+    </nav>
+  </div><!-- /.app-shell -->
 
   <!-- ==================== POST-CLIP MANUAL EDITOR MODAL (Trim + +SFX + Drag-Drop Watermark + Safe-Zone) ==================== -->
   <div id="postEditModal" class="modal-backdrop hidden">
@@ -1312,6 +1477,73 @@
     </div>
   </div>
 
+  <!-- B1.3 Review Sheet (Thumb-Reach Phone Bottom Sheet + Side-by-Side Start/Peak Frames) -->
+  <div id="b1ReviewSheet" class="b1-sheet-backdrop hidden">
+    <div class="b1-sheet-card">
+      <div class="card-head">
+        <div>
+          <h3 id="rsTitle">Review Klip</h3>
+          <div class="text-xs muted" id="rsMeta">—</div>
+        </div>
+        <button class="btn btn-xs btn-ghost" id="btnCloseReviewSheet">Tutup</button>
+      </div>
+      <video id="rsVideo" class="job-video" controls playsinline style="width:100%;max-height:320px;background:#000;"></video>
+      <div id="rsFrames" class="review-frames-compare hidden"></div>
+      <div id="rsVirality" class="text-xs muted mt-8"></div>
+      <div id="rsVerdict" class="text-xs mt-4" style="color:#34d399;"></div>
+      <div class="mt-12">
+        <div class="text-xs muted">Alasan penolakan (wajib jika ditolak):</div>
+        <div class="reject-chips">
+          <button class="reject-chip" data-reason="frame kosong">frame kosong</button>
+          <button class="reject-chip" data-reason="arc terpotong">arc terpotong</button>
+          <button class="reject-chip" data-reason="watermark salah">watermark salah</button>
+          <button class="reject-chip" data-reason="kata terlarang">kata terlarang</button>
+        </div>
+        <input type="text" id="rsNote" class="input input-sm" placeholder="Catatan tambahan QC..." />
+      </div>
+      <div class="b1-sheet-actions">
+        <button class="btn btn-danger-solid" id="btnRsReject">Tolak -> Kandidat</button>
+        <button class="btn btn-primary" id="btnRsApprove">Setujui -> Siap Posting</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- B2.1 Per-Platform Publish Kit Modal (TikTok / Shorts / Reels + Approved Publish Actions) -->
+  <div id="b1PublishKitModal" class="b1-sheet-backdrop hidden">
+    <div class="b1-sheet-card">
+      <div class="card-head">
+        <h3>Publish Kit (TikTok · Shorts · Reels)</h3>
+        <button class="btn btn-xs btn-ghost" id="btnClosePublishKit">Tutup</button>
+      </div>
+      <div id="pkChecklist" style="margin-bottom:10px;"></div>
+      <label class="mt-8">TikTok Caption &amp; Hashtags
+        <textarea id="pkTikTok" class="input textarea" rows="3"></textarea>
+      </label>
+      <div class="head-actions mt-4">
+        <button class="btn btn-xs btn-secondary" id="btnCopyPkTikTok">Salin TikTok</button>
+        <button class="btn btn-xs btn-primary" id="btnPkPublishTikTok">Publish TikTok (sau)</button>
+      </div>
+      <label class="mt-12">YouTube Shorts Title (&le;100 karakter)
+        <input type="text" id="pkShortsTitle" class="input input-sm" maxlength="100" />
+      </label>
+      <label class="mt-8">YouTube Shorts Description
+        <textarea id="pkShortsDesc" class="input textarea" rows="2"></textarea>
+      </label>
+      <div class="head-actions mt-4">
+        <button class="btn btn-xs btn-secondary" id="btnCopyPkShorts">Salin Shorts</button>
+        <button class="btn btn-xs btn-primary" id="btnPkPublishYT">Publish YouTube Shorts</button>
+      </div>
+      <label class="mt-12">Instagram Reels Caption
+        <textarea id="pkReels" class="input textarea" rows="3"></textarea>
+      </label>
+      <div class="head-actions mt-4">
+        <button class="btn btn-xs btn-secondary" id="btnCopyPkReels">Salin Reels</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/vendor/sortable.min.js"></script>
   <script src="/app.js"></script>
+  <script src="/b1_dashboard.js"></script>
 </body>
 </html>
