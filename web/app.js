@@ -163,12 +163,16 @@
 
   // ==================== Navigation Tabs ====================
   function switchTab(tabName) {
-    document.querySelectorAll('.nav-btn').forEach((b) => {
-      b.classList.toggle('active', b.dataset.tab === tabName);
-    });
-    document.querySelectorAll('.tab-panel').forEach((p) => {
-      p.classList.toggle('active', p.id === `tab-${tabName}`);
-    });
+    if (window.__kfSwitchTab) {
+      window.__kfSwitchTab(tabName);
+    } else {
+      document.querySelectorAll('.nav-btn, .rail-nav-btn, .mob-nav-btn').forEach((b) => {
+        b.classList.toggle('active', b.dataset.tab === tabName);
+      });
+      document.querySelectorAll('.tab-panel').forEach((p) => {
+        p.classList.toggle('active', p.id === `tab-${tabName}`);
+      });
+    }
     if (tabName === 'studio' && state.activeProject) {
       setTimeout(() => {
         drawHypeChart();
