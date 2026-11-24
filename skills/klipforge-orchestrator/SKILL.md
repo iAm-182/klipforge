@@ -9,10 +9,10 @@ Use this skill whenever orchestrating clipping workflows on **KlipForge** (`http
 
 ## 1. MCP Connection (Streamable HTTP JSON-RPC 2.0)
 
-- **Endpoint**: `POST https://klip.breakthematrix.id/api/mcp`
+- **Endpoint**: `POST / GET / DELETE https://klip.breakthematrix.id/api/mcp`
 - **Header**: `X-Agent-Key: <member-or-owner-agent-key>`
-- **Protocol**: MCP Streamable HTTP (`2025-03-26`, JSON-RPC `2.0`)
-- Never send destructive requests (`DELETE`, QC approve/reject, `/api/team`, `/api/publish/accounts`, `/api/settings/cookies/refresh`) — they are strictly Owner/QC-only and return `403`.
+- **Protocol**: MCP Streamable HTTP (`2025-03-26`, JSON-RPC `2.0`, single & batch arrays `[...]`)
+- Never send destructive requests (`DELETE` except session teardown `/api/mcp`, QC approve/reject, `/api/team`, `/api/publish/accounts`, `/api/settings/cookies/refresh`) — they are strictly Owner/QC-only and return `403`.
 
 ## 2. Standard End-to-End Viral Clipping SOP
 
@@ -38,8 +38,8 @@ Use this skill whenever orchestrating clipping workflows on **KlipForge** (`http
    - Completed jobs land in `review` for human QC approval. Do **not** try to self-approve.
    - Once approved, generate `klipforge_generate_publish_kit` (TikTok + YT Shorts <=100 chars + IG Reels) and optionally `klipforge_export_jianying_draft` (`.zip` CapCut desktop draft).
 
-## 3. All 18 Least-Privilege MCP Tools
+## 3. All 23 Least-Privilege MCP Tools
 
-- Read/Observe: `klipforge_home_metrics`, `klipforge_cookie_status`, `klipforge_list_projects`, `klipforge_get_project`, `klipforge_list_board`, `klipforge_list_jobs`, `klipforge_get_job`, `klipforge_audio_and_moment_map`
-- Analyze/Pre-Edit: `klipforge_analyze_video`, `klipforge_detect_scenes`, `klipforge_detect_facecam`, `klipforge_diarize_project`, `klipforge_verify_frames`, `klipforge_set_verdict`
-- Produce/Deliver: `klipforge_move_board`, `klipforge_render_edit_script`, `klipforge_generate_publish_kit`, `klipforge_export_jianying_draft`
+- **Read/Observe**: `klipforge_home_metrics`, `klipforge_cookie_status`, `klipforge_list_projects`, `klipforge_get_project`, `klipforge_search_transcript`, `klipforge_list_board`, `klipforge_list_jobs`, `klipforge_get_job`, `klipforge_activity`, `klipforge_team_metrics`, `klipforge_audio_and_moment_map`
+- **Analyze/Pre-Edit**: `klipforge_analyze_video`, `klipforge_detect_scenes`, `klipforge_detect_facecam`, `klipforge_diarize_project`, `klipforge_verify_frames`, `klipforge_set_verdict`
+- **Produce/Deliver**: `klipforge_move_board`, `klipforge_render_single`, `klipforge_render_edit_script`, `klipforge_post_edit`, `klipforge_generate_publish_kit`, `klipforge_export_jianying_draft`

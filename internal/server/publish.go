@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -117,15 +118,17 @@ func (s *Server) buildPublishKitForJob(job *model.RenderJob, ov *publishKitOverr
 		ttCaption = strings.TrimSpace(ov.TikTokCaption)
 	}
 
-	// 2. YouTube Shorts variant (title strictly <= 100 chars!)
-	shortsTitle := hook
-	if !strings.Contains(strings.ToLower(shortsTitle), "#shorts") {
-		shortsTitle = strings.TrimSpace(shortsTitle) + " #Shorts"
-	}
+	// 2. YouTube Shorts variant (title strictly <= 100 chars, preserving #Shorts suffix!)
+	shortsTitle := strings.TrimSpace(hook)
 	if ov != nil && strings.TrimSpace(ov.ShortsTitle) != "" {
 		shortsTitle = strings.TrimSpace(ov.ShortsTitle)
 	}
-	if r := []rune(shortsTitle); len(r) > 100 {
+	if !strings.Contains(strings.ToLower(shortsTitle), "#shorts") {
+		if r := []rune(shortsTitle); len(r) > 91 {
+			shortsTitle = strings.TrimSpace(string(r[:88])) + "..."
+		}
+		shortsTitle = strings.TrimSpace(shortsTitle) + " #Shorts"
+	} else if r := []rune(shortsTitle); len(r) > 100 {
 		shortsTitle = strings.TrimSpace(string(r[:97])) + "..."
 	}
 	shDescParts := []string{hook}
@@ -170,18 +173,47 @@ func (s *Server) buildPublishKitForJob(job *model.RenderJob, ov *publishKitOverr
 		}
 	}
 
-	// 4-point SOP Publish Checklist
+	// 4-point SOP Publish Checklist (verify ALL campaign hashtags & social mentions across all 3 platforms!)
 	wmReq := camp != nil && camp.Watermark.Enabled
 	outroReq := camp != nil && camp.Outro.Enabled
 	wmOK := !wmReq || job.Compliance.WatermarkApplied
 	outroOK := !outroReq || (job.Compliance.OutroApplied && job.Compliance.OutroClean)
 	forbOK := true
 	creditHashOK := true
-	if camp != nil && len(camp.Hashtags) > 0 && !strings.Contains(ttCaption, camp.Hashtags[0]) {
-		creditHashOK = false
-	}
-	if camp != nil && len(camp.SocialMentions) > 0 && !strings.Contains(ttCaption, camp.SocialMentions[0]) {
-		creditHashOK = false
+	if camp != nil {
+		platforms := []string{strings.ToLower(ttCaption), strings.ToLower(shortsDesc), strings.ToLower(reelsCaption)}
+		for _, tag := range camp.Hashtags {
+			t := strings.ToLower(strings.TrimSpace(tag))
+			if t == "" {
+				continue
+			}
+			for _, body := range platforms {
+				if !strings.Contains(body, t) {
+					creditHashOK = false
+					break
+				}
+			}
+			if !creditHashOK {
+				break
+			}
+		}
+		if creditHashOK {
+			for _, m := range camp.SocialMentions {
+				ml := strings.ToLower(strings.TrimSpace(m))
+				if ml == "" {
+					continue
+				}
+				for _, body := range platforms {
+					if !strings.Contains(body, ml) {
+						creditHashOK = false
+						break
+					}
+				}
+				if !creditHashOK {
+					break
+				}
+			}
+		}
 	}
 
 	var missing []string
@@ -324,6 +356,38 @@ func (s *Server) handlePublishJob(w http.ResponseWriter, r *http.Request) {
 	p := getPrincipal(r)
 	settings := s.Store.GetSettings()
 
+	// Prevent duplicate in-flight / already-published uploads for the same platform
+	for _, existing := range job.PublishRecords {
+		if existing.Platform == platform && (existing.Status == "publishing" || existing.Status == "published") {
+			writeErr(w, http.StatusConflict, fmt.Sprintf("Klip ini sudah berstatus %q untuk platform %s", existing.Status, platform))
+			return
+		}
+	}
+
+	// Helper to update the matching in-flight PublishRecord in-place (zero duplicate rows!)
+	updateRecordInPlace := func(jID, plat string, startedAt time.Time, nextRec model.PublishRecord, markPosted bool) *model.RenderJob {
+		updated, ok := s.Store.UpdateJob(jID, func(j *model.RenderJob) {
+			replaced := false
+			for i := len(j.PublishRecords) - 1; i >= 0; i-- {
+				if j.PublishRecords[i].Platform == plat && j.PublishRecords[i].Status == "publishing" && j.PublishRecords[i].UpdatedAt.Equal(startedAt) {
+					j.PublishRecords[i] = nextRec
+					replaced = true
+					break
+				}
+			}
+			if !replaced {
+				j.PublishRecords = append(j.PublishRecords, nextRec)
+			}
+			if markPosted {
+				j.BoardColumn = "diposting"
+			}
+		})
+		if ok {
+			s.Broker.Publish("job_update", updated)
+		}
+		return updated
+	}
+
 	switch platform {
 	case "youtube":
 		acc, ok := s.Store.FindPublishAccountByPlatform("youtube", req.AccountID)
@@ -339,21 +403,25 @@ func (s *Server) handlePublishJob(w http.ResponseWriter, r *http.Request) {
 		for _, t := range strings.Fields(kit.Shorts.Hashtags) {
 			tags = append(tags, strings.TrimPrefix(t, "#"))
 		}
+		startedAt := time.Now()
 		rec := model.PublishRecord{
 			Platform:    "youtube",
 			Method:      "youtube_api",
 			AccountName: acc.Name,
 			Status:      "publishing",
 			ScheduledAt: req.ScheduledAt,
-			UpdatedAt:   time.Now(),
+			UpdatedAt:   startedAt,
 		}
-		job.PublishRecords = append(job.PublishRecords, rec)
-		_ = s.Store.SaveJob(job)
-		s.Broker.Publish("job_update", job)
+		if updated, ok := s.Store.UpdateJob(job.ID, func(j *model.RenderJob) {
+			j.PublishKit = kit
+			j.PublishRecords = append(j.PublishRecords, rec)
+		}); ok {
+			s.Broker.Publish("job_update", updated)
+		}
 
-		go func(jID string, a model.PublishAccount, k model.PublishKit) {
+		go func(jID, outFile string, a model.PublishAccount, k model.PublishKit, stAt time.Time) {
 			res, err := publish.UploadYouTubeVideo(context.Background(), publish.YouTubeUploadInput{
-				FilePath:      job.OutputPath,
+				FilePath:      outFile,
 				Title:         k.Shorts.Title,
 				Description:   k.Shorts.Description,
 				Tags:          tags,
@@ -363,26 +431,24 @@ func (s *Server) handlePublishJob(w http.ResponseWriter, r *http.Request) {
 				ClientSecret:  a.ClientSecret,
 				RefreshToken:  a.RefreshToken,
 			})
-			latest, ok := s.Store.GetJob(jID)
-			if !ok {
-				return
-			}
 			now := time.Now()
 			if err != nil {
-				latest.PublishRecords = append(latest.PublishRecords, model.PublishRecord{
+				latest := updateRecordInPlace(jID, "youtube", stAt, model.PublishRecord{
 					Platform:    "youtube",
 					Method:      "youtube_api",
 					AccountName: a.Name,
 					Status:      "error",
 					Error:       err.Error(),
 					UpdatedAt:   now,
-				})
-				_ = s.Store.SaveJob(latest)
-				s.Broker.Publish("job_update", latest)
-				s.recordActivity(p, "publish_error", "job", jID, fmt.Sprintf("Upload YouTube gagal (%s)", latest.Title), err.Error(), "error")
+				}, false)
+				title := jID
+				if latest != nil {
+					title = latest.Title
+				}
+				s.recordActivity(p, "publish_error", "job", jID, fmt.Sprintf("Upload YouTube gagal (%s)", title), err.Error(), "error")
 				return
 			}
-			latest.PublishRecords = append(latest.PublishRecords, model.PublishRecord{
+			latest := updateRecordInPlace(jID, "youtube", stAt, model.PublishRecord{
 				Platform:      "youtube",
 				Method:        "youtube_api",
 				AccountName:   a.Name,
@@ -391,12 +457,13 @@ func (s *Server) handlePublishJob(w http.ResponseWriter, r *http.Request) {
 				PublishedURL:  res.URL,
 				ScheduledAt:   req.ScheduledAt,
 				UpdatedAt:     now,
-			})
-			latest.BoardColumn = "diposting"
-			_ = s.Store.SaveJob(latest)
-			s.Broker.Publish("job_update", latest)
-			s.recordActivity(p, "published", "job", jID, fmt.Sprintf("%s mempublikasikan %s ke YouTube Shorts", p.Name, latest.Title), res.URL, "success")
-		}(job.ID, *acc, *kit)
+			}, true)
+			title := jID
+			if latest != nil {
+				title = latest.Title
+			}
+			s.recordActivity(p, "published", "job", jID, fmt.Sprintf("%s mempublikasikan %s ke YouTube Shorts", p.Name, title), res.URL, "success")
+		}(job.ID, job.OutputPath, *acc, *kit, startedAt)
 
 		writeJSON(w, http.StatusAccepted, map[string]interface{}{
 			"ok":       true,
@@ -414,47 +481,79 @@ func (s *Server) handlePublishJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		vidURL := strings.TrimSpace(req.VideoPublicURL)
-		if vidURL == "" {
+		if vidURL != "" {
+			// Security: only Owner/QC may supply custom videoPublicUrl, and it must be HTTPS on a public host!
+			if p.Role != "owner" && p.Role != "admin" && p.Role != "qc" {
+				writeErr(w, http.StatusForbidden, "Hanya Owner/QC yang boleh menentukan videoPublicUrl kustom")
+				return
+			}
+			pu, uerr := url.Parse(vidURL)
+			if uerr != nil || pu.Scheme != "https" || pu.Host == "" {
+				writeErr(w, http.StatusBadRequest, "videoPublicUrl harus berupa URL https:// yang valid")
+				return
+			}
+		} else {
 			vidURL = fmt.Sprintf("%s/api/jobs/%s/video", s.edgeBaseURL(), job.ID)
 		}
-		go func(jID string, a model.PublishAccount, k model.PublishKit, vURL string) {
+
+		startedAt := time.Now()
+		rec := model.PublishRecord{
+			Platform:    "instagram",
+			Method:      "instagram_api",
+			AccountName: acc.Name,
+			Status:      "publishing",
+			UpdatedAt:   startedAt,
+		}
+		if updated, ok := s.Store.UpdateJob(job.ID, func(j *model.RenderJob) {
+			j.PublishKit = kit
+			j.PublishRecords = append(j.PublishRecords, rec)
+		}); ok {
+			s.Broker.Publish("job_update", updated)
+		}
+
+		go func(jID string, a model.PublishAccount, k model.PublishKit, vURL string, stAt time.Time) {
 			res, err := publish.UploadInstagramReel(context.Background(), publish.InstagramReelInput{
 				IGUserID:    a.IGUserID,
 				AccessToken: a.AccessToken,
 				VideoURL:    vURL,
 				Caption:     k.Reels.Caption,
 			})
-			latest, ok := s.Store.GetJob(jID)
-			if !ok {
-				return
-			}
 			now := time.Now()
 			if err != nil {
-				latest.PublishRecords = append(latest.PublishRecords, model.PublishRecord{
+				latest := updateRecordInPlace(jID, "instagram", stAt, model.PublishRecord{
 					Platform:    "instagram",
 					Method:      "instagram_api",
 					AccountName: a.Name,
 					Status:      "error",
 					Error:       err.Error(),
 					UpdatedAt:   now,
-				})
-				_ = s.Store.SaveJob(latest)
-				s.Broker.Publish("job_update", latest)
+				}, false)
+				title := jID
+				if latest != nil {
+					title = latest.Title
+				}
+				s.recordActivity(p, "publish_error", "job", jID, fmt.Sprintf("Upload Instagram Reels gagal (%s)", title), err.Error(), "error")
 				return
 			}
-			latest.PublishRecords = append(latest.PublishRecords, model.PublishRecord{
+			latest := updateRecordInPlace(jID, "instagram", stAt, model.PublishRecord{
 				Platform:      "instagram",
 				Method:        "instagram_api",
 				AccountName:   a.Name,
 				Status:        "published",
 				RemoteVideoID: res.MediaID,
+				PublishedURL:  res.PublishedURL,
 				UpdatedAt:     now,
-			})
-			latest.BoardColumn = "diposting"
-			_ = s.Store.SaveJob(latest)
-			s.Broker.Publish("job_update", latest)
-			s.recordActivity(p, "published", "job", jID, fmt.Sprintf("%s mempublikasikan %s ke Instagram Reels", p.Name, latest.Title), res.MediaID, "success")
-		}(job.ID, *acc, *kit, vidURL)
+			}, true)
+			title := jID
+			if latest != nil {
+				title = latest.Title
+			}
+			detail := res.PublishedURL
+			if detail == "" {
+				detail = res.MediaID
+			}
+			s.recordActivity(p, "published", "job", jID, fmt.Sprintf("%s mempublikasikan %s ke Instagram Reels", p.Name, title), detail, "success")
+		}(job.ID, *acc, *kit, vidURL, startedAt)
 
 		writeJSON(w, http.StatusAccepted, map[string]interface{}{
 			"ok":       true,
@@ -482,36 +581,51 @@ func (s *Server) handlePublishJob(w http.ResponseWriter, r *http.Request) {
 		for _, t := range strings.Fields(kit.TikTok.Hashtags) {
 			tags = append(tags, strings.TrimPrefix(t, "#"))
 		}
-		go func(jID string, k model.PublishKit) {
+		startedAt := time.Now()
+		rec := model.PublishRecord{
+			Platform:    "tiktok",
+			Method:      "sau_sidecar",
+			AccountName: accName,
+			Status:      "publishing",
+			ScheduledAt: req.ScheduledAt,
+			UpdatedAt:   startedAt,
+		}
+		if updated, ok := s.Store.UpdateJob(job.ID, func(j *model.RenderJob) {
+			j.PublishKit = kit
+			j.PublishRecords = append(j.PublishRecords, rec)
+		}); ok {
+			s.Broker.Publish("job_update", updated)
+		}
+
+		go func(jID, outFile, jTitle string, k model.PublishKit, stAt time.Time) {
 			out, err := publish.RunSAUSidecar(context.Background(), publish.SAUUploadInput{
 				BinaryPath:  settings.SAUPath,
 				Platform:    "tiktok",
 				AccountName: accName,
-				FilePath:    job.OutputPath,
-				Title:       job.Title,
+				FilePath:    outFile,
+				Title:       jTitle,
 				Caption:     k.TikTok.Caption,
 				Tags:        tags,
 				ScheduledAt: req.ScheduledAt,
 			})
-			latest, ok := s.Store.GetJob(jID)
-			if !ok {
-				return
-			}
 			now := time.Now()
 			if err != nil {
-				latest.PublishRecords = append(latest.PublishRecords, model.PublishRecord{
+				latest := updateRecordInPlace(jID, "tiktok", stAt, model.PublishRecord{
 					Platform:    "tiktok",
 					Method:      "sau_sidecar",
 					AccountName: accName,
 					Status:      "error",
 					Error:       err.Error(),
 					UpdatedAt:   now,
-				})
-				_ = s.Store.SaveJob(latest)
-				s.Broker.Publish("job_update", latest)
+				}, false)
+				title := jTitle
+				if latest != nil {
+					title = latest.Title
+				}
+				s.recordActivity(p, "publish_error", "job", jID, fmt.Sprintf("Upload TikTok (sau) gagal (%s)", title), err.Error(), "error")
 				return
 			}
-			latest.PublishRecords = append(latest.PublishRecords, model.PublishRecord{
+			latest := updateRecordInPlace(jID, "tiktok", stAt, model.PublishRecord{
 				Platform:     "tiktok",
 				Method:       "sau_sidecar",
 				AccountName:  accName,
@@ -519,12 +633,13 @@ func (s *Server) handlePublishJob(w http.ResponseWriter, r *http.Request) {
 				PublishedURL: out,
 				ScheduledAt:  req.ScheduledAt,
 				UpdatedAt:    now,
-			})
-			latest.BoardColumn = "diposting"
-			_ = s.Store.SaveJob(latest)
-			s.Broker.Publish("job_update", latest)
-			s.recordActivity(p, "published", "job", jID, fmt.Sprintf("%s mempublikasikan %s ke TikTok (sau)", p.Name, latest.Title), out, "success")
-		}(job.ID, *kit)
+			}, true)
+			title := jTitle
+			if latest != nil {
+				title = latest.Title
+			}
+			s.recordActivity(p, "published", "job", jID, fmt.Sprintf("%s mempublikasikan %s ke TikTok (sau)", p.Name, title), out, "success")
+		}(job.ID, job.OutputPath, job.Title, *kit, startedAt)
 
 		writeJSON(w, http.StatusAccepted, map[string]interface{}{
 			"ok":       true,

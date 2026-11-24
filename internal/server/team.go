@@ -203,8 +203,8 @@ func isRoleAllowed(p model.Principal, method, path string) bool {
 		return false
 	}
 
-	// Clippers & QC can delete jobs (ownership & unapproved guard enforced inside handleDeleteJob!)
-	if method == http.MethodDelete && strings.HasPrefix(path, "/api/jobs/") {
+	// Clippers & QC can delete jobs (ownership & unapproved guard enforced inside handleDeleteJob!) or close MCP session
+	if method == http.MethodDelete && (strings.HasPrefix(path, "/api/jobs/") || path == "/api/mcp") {
 		return true
 	}
 
@@ -227,7 +227,7 @@ func (s *Server) checkMemberQueueLimit(p model.Principal) error {
 	return nil
 }
 
-// tagJobWithPrincipal attributes a newly queued render job to the calling member/agent.
+// tagJobWithPrincipal attributes a newly queued render job to the calling member/agent atomically.
 func (s *Server) tagJobWithPrincipal(job *model.RenderJob, p model.Principal) {
 	if job == nil || p.ID == "" {
 		return
@@ -235,8 +235,13 @@ func (s *Server) tagJobWithPrincipal(job *model.RenderJob, p model.Principal) {
 	job.CreatedByID = p.ID
 	job.CreatedBy = p.Name
 	job.CreatedVia = p.Via
-	_ = s.Store.SaveJob(job)
-	s.Broker.Publish("job_update", job)
+	if updated, ok := s.Store.UpdateJob(job.ID, func(j *model.RenderJob) {
+		j.CreatedByID = p.ID
+		j.CreatedBy = p.Name
+		j.CreatedVia = p.Via
+	}); ok {
+		s.Broker.Publish("job_update", updated)
+	}
 }
 
 func (s *Server) bridgeSecret() string {

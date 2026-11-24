@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"time"
 )
 
 type mcpRequest struct {
@@ -64,8 +66,8 @@ func propBool(desc string) map[string]interface{} {
 	return map[string]interface{}{"type": "boolean", "description": desc}
 }
 
-// mcpTools defines all 18 strictly least-privilege MCP tools exposed at POST /api/mcp.
-// Zero destructive tools: NO DELETE, NO QC approve/reject, NO /api/team, NO /api/publish/accounts, NO cookie refresh.
+// mcpTools defines all 23 strictly least-privilege MCP tools exposed at /api/mcp.
+// Zero destructive tools: NO DELETE, NO QC approve/reject, NO /api/team management, NO /api/publish/accounts, NO cookie refresh.
 var mcpTools = []mcpToolDef{
 	{
 		Name:        "klipforge_home_metrics",
@@ -165,14 +167,62 @@ var mcpTools = []mcpToolDef{
 		Name:        "klipforge_render_edit_script",
 		Description: "Render a single clip or multi-segment CapCut-Pro timeline (speedRamp, zoom, textOverlay, auto_by_moment, vocalEnhance, sceneSnap, silenceTrim, karaoke).",
 		InputSchema: schemaObj(map[string]interface{}{
-			"title":      propStr("Clip or compilation title"),
-			"projectId":  propStr("Default project ID for segments"),
-			"campaignId": propStr("Optional campaign ID for watermark/outro/forbiddenWords"),
-			"layout":     map[string]interface{}{"type": "object", "description": "aspectRatio (9:16), cropMode (face_track/facecam_top_neon/...)"},
-			"subtitles":  map[string]interface{}{"type": "object", "description": "enabled, preset (karaoke/viral-yellow/gaming-neon), ..."},
-			"audioFx":    map[string]interface{}{"type": "object", "description": "sfxAutoPreset (auto_by_moment), autoDuck, vocalEnhance, bgmAssetId"},
-			"segments":   map[string]interface{}{"type": "array", "description": "Array of segment objects with startSec, endSec, momentType, speedRamp, zoom, textOverlay, filter, transition"},
+			"title":        propStr("Clip or compilation title"),
+			"projectId":    propStr("Default project ID for segments"),
+			"campaignId":   propStr("Optional campaign ID for watermark/outro/forbiddenWords"),
+			"layout":       map[string]interface{}{"type": "object", "description": "aspectRatio (9:16), cropMode (face_track/facecam_auto/facecam_top_neon/...)"},
+			"subtitles":    map[string]interface{}{"type": "object", "description": "enabled, preset (karaoke/viral-yellow/gaming-neon), ..."},
+			"audioFx":      map[string]interface{}{"type": "object", "description": "sfxAutoPreset (auto_by_moment), autoDuck, vocalEnhance, bgmAssetId"},
+			"videoFx":      map[string]interface{}{"type": "object", "description": "colorPreset, motionPreset, speed, sharpen, fadeIn"},
+			"audioNorm":    propBool("Enable -14 LUFS loudnorm"),
+			"useWatermark": propBool("Attach campaign watermark"),
+			"useOutro":     propBool("Attach clean campaign 3s outro"),
+			"sceneSnap":    propBool("Snap segment cuts to detected shot boundaries"),
+			"silenceTrim":  propBool("Trim leading/trailing silence while protecting peak"),
+			"pickCover":    propBool("Pick sharpest face-present cover frame"),
+			"segments":     map[string]interface{}{"type": "array", "description": "Array of segment objects with startSec, endSec, cropMode, momentType, speedRamp, zoom, textOverlay, filter, transition"},
 		}, "segments"),
+	},
+	{
+		Name:        "klipforge_render_single",
+		Description: "Render a single vertical clip directly via POST /api/jobs/render (supports facecam_auto, vocalEnhance, sceneSnap, silenceTrim, karaoke).",
+		InputSchema: schemaObj(map[string]interface{}{
+			"projectId":    propStr("Project ID"),
+			"campaignId":   propStr("Optional campaign ID"),
+			"candidateId":  propStr("Optional candidate ID"),
+			"title":        propStr("Clip title"),
+			"startSec":     propNum("Clip start timestamp in seconds"),
+			"endSec":       propNum("Clip end timestamp in seconds"),
+			"hookText":     propStr("Optional animated hook banner text"),
+			"layout":       map[string]interface{}{"type": "object", "description": "aspectRatio, resolution, cropMode"},
+			"subtitles":    map[string]interface{}{"type": "object", "description": "enabled, preset, position"},
+			"audioFx":      map[string]interface{}{"type": "object", "description": "sfxAutoPreset, autoDuck, vocalEnhance, bgmAssetId"},
+			"videoFx":      map[string]interface{}{"type": "object", "description": "colorPreset, motionPreset, speed, sharpen"},
+			"audioNorm":    propBool("Enable loudnorm"),
+			"useWatermark": propBool("Apply campaign watermark"),
+			"useOutro":     propBool("Append clean 3s outro"),
+			"sceneSnap":    propBool("Snap clip bounds to real scene cuts"),
+			"silenceTrim":  propBool("Trim dead air at start/end"),
+			"pickCover":    propBool("Pick sharpest cover frame"),
+		}, "projectId", "startSec", "endSec"),
+	},
+	{
+		Name:        "klipforge_post_edit",
+		Description: "Fast local post-edit on an already-rendered clip (trim, speed, additional SFX/BGM, vocalEnhance, audioNorm) without re-downloading YouTube.",
+		InputSchema: schemaObj(map[string]interface{}{
+			"jobId":         propStr("Source RenderJob ID (status=done)"),
+			"title":         propStr("Optional edited title"),
+			"trimStartSec":  propNum("Trim start seconds"),
+			"trimEndSec":    propNum("Trim end seconds"),
+			"speed":         propNum("Playback speed 0.50..2.00"),
+			"preserveOutro": propBool("Preserve clean campaign outro untouched"),
+			"bgmAssetId":    propStr("Optional additional BGM asset ID"),
+			"bgmVolume":     propNum("BGM volume 0.05..0.80"),
+			"bgmAutoDuck":   propBool("Duck BGM under voice"),
+			"audioNorm":     propBool("Apply -14 LUFS normalization"),
+			"vocalEnhance":  propBool("Apply broadcast vocal mastering chain"),
+			"sfxCues":       map[string]interface{}{"type": "array", "description": "Array of {assetId, atSec, volume}"},
+		}, "jobId"),
 	},
 	{
 		Name:        "klipforge_list_jobs",
@@ -194,7 +244,12 @@ var mcpTools = []mcpToolDef{
 		Name:        "klipforge_generate_publish_kit",
 		Description: "Generate multi-platform publish copy (TikTok, YouTube Shorts <=100 chars, Instagram Reels) + 4-point SOP checklist.",
 		InputSchema: schemaObj(map[string]interface{}{
-			"jobId": propStr("RenderJob ID"),
+			"jobId":             propStr("RenderJob ID"),
+			"hookText":          propStr("Optional hook text override"),
+			"tiktokCaption":     propStr("Optional TikTok caption override"),
+			"shortsTitle":       propStr("Optional YouTube Shorts title override (<=100 chars)"),
+			"shortsDescription": propStr("Optional YouTube Shorts description override"),
+			"reelsCaption":      propStr("Optional Instagram Reels caption override"),
 		}, "jobId"),
 	},
 	{
@@ -211,12 +266,125 @@ var mcpTools = []mcpToolDef{
 			"trendingCategory": propStr("Optional trending category: id_viral | meme_sfx | phonk_gaming | windah_viral"),
 		}),
 	},
+	{
+		Name:        "klipforge_search_transcript",
+		Description: "Search a project's timestamped transcript/subtitles by keyword or phrase (returns matching cue windows).",
+		InputSchema: schemaObj(map[string]interface{}{
+			"projectId": propStr("Project ID"),
+			"query":     propStr("Search keyword or phrase"),
+		}, "projectId", "query"),
+	},
+	{
+		Name:        "klipforge_activity",
+		Description: "List recent persisted studio activity feed entries (renders, reviews, verdicts, publish events).",
+		InputSchema: schemaObj(map[string]interface{}{
+			"limit":  propInt("Max activity rows (default 30)"),
+			"member": propStr("Optional team member ID/name filter"),
+		}),
+	},
+	{
+		Name:        "klipforge_team_metrics",
+		Description: "Read non-secret team presence, active WIP counts, turnaround, approval rates, and 7-day sparklines (zero keys exposed).",
+		InputSchema: schemaObj(map[string]interface{}{}),
+	},
 }
 
-// handleMCP exposes KlipForge's native Streamable HTTP MCP JSON-RPC 2.0 server at POST /api/mcp.
+// handleMCP exposes KlipForge's native Streamable HTTP MCP JSON-RPC 2.0 server at /api/mcp (POST/GET/DELETE).
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodDelete:
+		w.WriteHeader(http.StatusNoContent)
+		return
+	case http.MethodGet:
+		if strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream") {
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				writeErr(w, http.StatusInternalServerError, "SSE streaming tidak didukung")
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			w.Header().Set("X-Accel-Buffering", "no")
+			rc := http.NewResponseController(w)
+			_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			_, _ = fmt.Fprint(w, ": mcp-stream-open\n\n")
+			flusher.Flush()
+			hb := time.NewTicker(20 * time.Second)
+			defer hb.Stop()
+			for {
+				select {
+				case <-r.Context().Done():
+					return
+				case <-hb.C:
+					_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
+					if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+						return
+					}
+					flusher.Flush()
+				}
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"name":            "klipforge-mcp",
+			"version":         "1.1.0",
+			"protocolVersion": "2025-03-26",
+			"transport":       "streamable-http",
+			"toolsCount":      len(mcpTools),
+		})
+		return
+	}
+
+	rawBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, mcpResponse{
+			JSONRPC: "2.0",
+			Error:   &mcpError{Code: -32700, Message: "Parse error: gagal membaca body"},
+		})
+		return
+	}
+	trimmed := bytes.TrimSpace(rawBody)
+	if len(trimmed) == 0 {
+		writeJSON(w, http.StatusBadRequest, mcpResponse{
+			JSONRPC: "2.0",
+			Error:   &mcpError{Code: -32700, Message: "Parse error: body kosong"},
+		})
+		return
+	}
+
+	// JSON-RPC 2.0 batch array support (`[...]`)
+	if trimmed[0] == '[' {
+		var batch []mcpRequest
+		if err := json.Unmarshal(trimmed, &batch); err != nil || len(batch) == 0 {
+			writeJSON(w, http.StatusBadRequest, mcpResponse{
+				JSONRPC: "2.0",
+				Error:   &mcpError{Code: -32700, Message: "Parse error: batch JSON-RPC tidak valid"},
+			})
+			return
+		}
+		if len(batch) > 25 {
+			writeJSON(w, http.StatusBadRequest, mcpResponse{
+				JSONRPC: "2.0",
+				Error:   &mcpError{Code: -32600, Message: "Invalid Request: maksimal 25 request per batch"},
+			})
+			return
+		}
+		responses := make([]mcpResponse, 0, len(batch))
+		for _, item := range batch {
+			if resp, emit := s.handleSingleMCPRequest(r, item); emit {
+				responses = append(responses, resp)
+			}
+		}
+		if len(responses) == 0 {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		writeJSON(w, http.StatusOK, responses)
+		return
+	}
+
 	var req mcpRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(trimmed, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, mcpResponse{
 			JSONRPC: "2.0",
 			Error:   &mcpError{Code: -32700, Message: "Parse error: JSON-RPC tidak valid"},
@@ -231,21 +399,37 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	resp, emit := s.handleSingleMCPRequest(r, req)
+	if !emit {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleSingleMCPRequest(r *http.Request, req mcpRequest) (mcpResponse, bool) {
+	if req.JSONRPC != "" && req.JSONRPC != "2.0" {
+		return mcpResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error:   &mcpError{Code: -32600, Message: "Invalid Request: jsonrpc wajib '2.0'"},
+		}, true
+	}
+
+	isNotif := len(req.ID) == 0 || string(bytes.TrimSpace(req.ID)) == "null"
+	if strings.HasPrefix(req.Method, "notifications/") {
+		if isNotif {
+			return mcpResponse{}, false
+		}
+		return mcpResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]interface{}{}}, true
+	}
 
 	switch req.Method {
-	case "notifications/initialized":
-		// Notification without ID expects 202 empty body; with ID ack cleanly
-		if len(req.ID) == 0 || string(bytes.TrimSpace(req.ID)) == "null" {
-			w.WriteHeader(http.StatusAccepted)
-			return
-		}
-		writeJSON(w, http.StatusOK, mcpResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]interface{}{}})
-
 	case "ping":
-		writeJSON(w, http.StatusOK, mcpResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]interface{}{}})
+		return mcpResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]interface{}{}}, true
 
 	case "initialize":
-		writeJSON(w, http.StatusOK, mcpResponse{
+		return mcpResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
 			Result: map[string]interface{}{
@@ -255,20 +439,20 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 				},
 				"serverInfo": map[string]interface{}{
 					"name":    "klipforge-mcp",
-					"version": "1.0.0",
+					"version": "1.1.0",
 				},
-				"instructions": "KlipForge least-privilege MCP orchestrator. Audio-first by default; all renders honor RBAC, Fair Queue, and campaign forbiddenWords.",
+				"instructions": "KlipForge least-privilege MCP orchestrator (23 tools). Audio-first by default; all renders honor RBAC, Fair Queue, and campaign forbiddenWords.",
 			},
-		})
+		}, true
 
 	case "tools/list":
-		writeJSON(w, http.StatusOK, mcpResponse{
+		return mcpResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
 			Result: map[string]interface{}{
 				"tools": mcpTools,
 			},
-		})
+		}, true
 
 	case "tools/call":
 		var params struct {
@@ -276,37 +460,35 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			Arguments map[string]interface{} `json:"arguments"`
 		}
 		if err := json.Unmarshal(req.Params, &params); err != nil || strings.TrimSpace(params.Name) == "" {
-			writeJSON(w, http.StatusOK, mcpResponse{
+			return mcpResponse{
 				JSONRPC: "2.0",
 				ID:      req.ID,
 				Error:   &mcpError{Code: -32602, Message: "Invalid params: tools/call membutuhkan 'name'"},
-			})
-			return
+			}, true
 		}
 		if params.Arguments == nil {
 			params.Arguments = map[string]interface{}{}
 		}
 		result, rpcErr := s.dispatchMCPTool(r, params.Name, params.Arguments)
 		if rpcErr != nil {
-			writeJSON(w, http.StatusOK, mcpResponse{
+			return mcpResponse{
 				JSONRPC: "2.0",
 				ID:      req.ID,
 				Error:   rpcErr,
-			})
-			return
+			}, true
 		}
-		writeJSON(w, http.StatusOK, mcpResponse{
+		return mcpResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
 			Result:  result,
-		})
+		}, true
 
 	default:
-		writeJSON(w, http.StatusOK, mcpResponse{
+		return mcpResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
 			Error:   &mcpError{Code: -32601, Message: fmt.Sprintf("Method not found: %s", req.Method)},
-		})
+		}, true
 	}
 }
 
@@ -331,7 +513,10 @@ func (s *Server) dispatchMCPTool(outer *http.Request, name string, args map[stri
 		if body != nil {
 			_ = json.NewEncoder(&buf).Encode(body)
 		}
-		subReq := httptest.NewRequest(method, rawTarget, &buf).WithContext(outer.Context())
+		subReq, err := http.NewRequestWithContext(outer.Context(), method, rawTarget, &buf)
+		if err != nil {
+			return http.StatusBadRequest, []byte(`{"error":"parameter request tidak valid"}`)
+		}
 		if body != nil {
 			subReq.Header.Set("Content-Type", "application/json")
 		}
@@ -401,7 +586,7 @@ func (s *Server) dispatchMCPTool(outer *http.Request, name string, args map[stri
 		if pid == "" {
 			return nil, &mcpError{Code: -32602, Message: "Missing required argument: projectId"}
 		}
-		code, body := invoke(http.MethodPost, "/api/projects/"+pid+"/detect-scenes", map[string]string{"id": pid}, args, s.handleDetectProjectScenes)
+		code, body := invoke(http.MethodPost, "/api/projects/"+url.PathEscape(pid)+"/detect-scenes", map[string]string{"id": pid}, args, s.handleDetectProjectScenes)
 		return formatMCPResult(code, body), nil
 
 	case "klipforge_detect_facecam":
@@ -409,7 +594,7 @@ func (s *Server) dispatchMCPTool(outer *http.Request, name string, args map[stri
 		if pid == "" {
 			return nil, &mcpError{Code: -32602, Message: "Missing required argument: projectId"}
 		}
-		code, body := invoke(http.MethodPost, "/api/projects/"+pid+"/detect-facecam", map[string]string{"id": pid}, args, s.handleDetectProjectFacecam)
+		code, body := invoke(http.MethodPost, "/api/projects/"+url.PathEscape(pid)+"/detect-facecam", map[string]string{"id": pid}, args, s.handleDetectProjectFacecam)
 		return formatMCPResult(code, body), nil
 
 	case "klipforge_diarize_project":
@@ -417,7 +602,7 @@ func (s *Server) dispatchMCPTool(outer *http.Request, name string, args map[stri
 		if pid == "" {
 			return nil, &mcpError{Code: -32602, Message: "Missing required argument: projectId"}
 		}
-		code, body := invoke(http.MethodPost, "/api/projects/"+pid+"/diarize", map[string]string{"id": pid}, args, s.handleDiarizeProject)
+		code, body := invoke(http.MethodPost, "/api/projects/"+url.PathEscape(pid)+"/diarize", map[string]string{"id": pid}, args, s.handleDiarizeProject)
 		return formatMCPResult(code, body), nil
 
 	case "klipforge_verify_frames":
@@ -425,7 +610,7 @@ func (s *Server) dispatchMCPTool(outer *http.Request, name string, args map[stri
 		if pid == "" {
 			return nil, &mcpError{Code: -32602, Message: "Missing required argument: projectId"}
 		}
-		code, body := invoke(http.MethodPost, "/api/projects/"+pid+"/verify-frames", map[string]string{"id": pid}, args, s.handleVerifyCandidateFrames)
+		code, body := invoke(http.MethodPost, "/api/projects/"+url.PathEscape(pid)+"/verify-frames", map[string]string{"id": pid}, args, s.handleVerifyCandidateFrames)
 		return formatMCPResult(code, body), nil
 
 	case "klipforge_set_verdict":
@@ -434,7 +619,7 @@ func (s *Server) dispatchMCPTool(outer *http.Request, name string, args map[stri
 		if pid == "" || cid == "" || strArg("verdict") == "" {
 			return nil, &mcpError{Code: -32602, Message: "Missing required arguments: projectId, candidateId, verdict"}
 		}
-		code, body := invoke(http.MethodPost, "/api/projects/"+pid+"/candidates/"+cid+"/verdict",
+		code, body := invoke(http.MethodPost, "/api/projects/"+url.PathEscape(pid)+"/candidates/"+url.PathEscape(cid)+"/verdict",
 			map[string]string{"id": pid, "candId": cid}, args, s.handleCandidateVerdict)
 		return formatMCPResult(code, body), nil
 
@@ -490,6 +675,18 @@ func (s *Server) dispatchMCPTool(outer *http.Request, name string, args map[stri
 		code, body := invoke(http.MethodPost, "/api/jobs/edit-script", nil, args, s.handleEditScript)
 		return formatMCPResult(code, body), nil
 
+	case "klipforge_render_single":
+		code, body := invoke(http.MethodPost, "/api/jobs/render", nil, args, s.handleRenderSingle)
+		return formatMCPResult(code, body), nil
+
+	case "klipforge_post_edit":
+		jid := strArg("jobId")
+		if jid == "" {
+			return nil, &mcpError{Code: -32602, Message: "Missing required argument: jobId"}
+		}
+		code, body := invoke(http.MethodPost, "/api/jobs/"+url.PathEscape(jid)+"/post-edit", map[string]string{"id": jid}, args, s.handlePostEditJob)
+		return formatMCPResult(code, body), nil
+
 	case "klipforge_list_jobs":
 		q := url.Values{}
 		q.Set("summary", "1")
@@ -512,7 +709,7 @@ func (s *Server) dispatchMCPTool(outer *http.Request, name string, args map[stri
 		if jid == "" {
 			return nil, &mcpError{Code: -32602, Message: "Missing required argument: jobId"}
 		}
-		code, body := invoke(http.MethodGet, "/api/jobs/"+jid, map[string]string{"id": jid}, nil, s.handleGetJob)
+		code, body := invoke(http.MethodGet, "/api/jobs/"+url.PathEscape(jid), map[string]string{"id": jid}, nil, s.handleGetJob)
 		return formatMCPResult(code, body), nil
 
 	case "klipforge_generate_publish_kit":
@@ -520,7 +717,7 @@ func (s *Server) dispatchMCPTool(outer *http.Request, name string, args map[stri
 		if jid == "" {
 			return nil, &mcpError{Code: -32602, Message: "Missing required argument: jobId"}
 		}
-		code, body := invoke(http.MethodPost, "/api/jobs/"+jid+"/publish-kit", map[string]string{"id": jid}, args, s.handleGeneratePublishKit)
+		code, body := invoke(http.MethodPost, "/api/jobs/"+url.PathEscape(jid)+"/publish-kit", map[string]string{"id": jid}, args, s.handleGeneratePublishKit)
 		return formatMCPResult(code, body), nil
 
 	case "klipforge_export_jianying_draft":
@@ -528,7 +725,7 @@ func (s *Server) dispatchMCPTool(outer *http.Request, name string, args map[stri
 		if jid == "" {
 			return nil, &mcpError{Code: -32602, Message: "Missing required argument: jobId"}
 		}
-		code, body := invoke(http.MethodPost, "/api/jobs/"+jid+"/draft", map[string]string{"id": jid}, args, s.handleExportJianyingDraft)
+		code, body := invoke(http.MethodPost, "/api/jobs/"+url.PathEscape(jid)+"/draft", map[string]string{"id": jid}, args, s.handleExportJianyingDraft)
 		return formatMCPResult(code, body), nil
 
 	case "klipforge_audio_and_moment_map":
@@ -551,6 +748,32 @@ func (s *Server) dispatchMCPTool(outer *http.Request, name string, args map[stri
 		}
 		out, _ := json.Marshal(combined)
 		return formatMCPResult(worstCode, out), nil
+
+	case "klipforge_search_transcript":
+		pid := strArg("projectId")
+		q := strArg("query")
+		if pid == "" || q == "" {
+			return nil, &mcpError{Code: -32602, Message: "Missing required arguments: projectId, query"}
+		}
+		code, body := invoke(http.MethodGet, "/api/projects/"+url.PathEscape(pid)+"/search?q="+url.QueryEscape(q), map[string]string{"id": pid}, nil, s.handleSearchTranscript)
+		return formatMCPResult(code, body), nil
+
+	case "klipforge_activity":
+		qv := url.Values{}
+		if lim := strArg("limit"); lim != "" {
+			qv.Set("limit", lim)
+		} else {
+			qv.Set("limit", "30")
+		}
+		if m := strArg("member"); m != "" {
+			qv.Set("member", m)
+		}
+		code, body := invoke(http.MethodGet, "/api/activity?"+qv.Encode(), nil, nil, s.handleListActivity)
+		return formatMCPResult(code, body), nil
+
+	case "klipforge_team_metrics":
+		code, body := invoke(http.MethodGet, "/api/team/metrics", nil, nil, s.handleTeamMetrics)
+		return formatMCPResult(code, body), nil
 
 	default:
 		return nil, &mcpError{Code: -32601, Message: fmt.Sprintf("Unknown tool: %s", name)}

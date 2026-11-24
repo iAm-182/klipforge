@@ -1,18 +1,17 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
 	"os"
-	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"klipforge/internal/autopilot"
 	"klipforge/internal/model"
 )
 
@@ -137,29 +136,18 @@ func (s *Server) handleJobPeek(w http.ResponseWriter, r *http.Request) {
 			peekPath = candPath
 		}
 	}
-	// On-demand grab from completed MP4 if no peek file exists yet
+	// On-demand grab from completed MP4 if no peek file exists yet (atomic .tmp rename!)
 	if (peekPath == "" || !pathExists(peekPath)) && job.OutputPath != "" && pathExists(job.OutputPath) {
-		ff := s.Deps.GetStatus().FFmpegPath
-		if ff != "" {
-			dest := s.Worker.PeekFramePath(job.ID)
-			seek := 1.0
-			if job.FinalDuration > 4 {
-				seek = job.FinalDuration * 0.3
-			}
-			cctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-			defer cancel()
-			_ = exec.CommandContext(cctx, ff,
-				"-y", "-hide_banner", "-loglevel", "error",
-				"-ss", fmt.Sprintf("%.2f", seek),
-				"-i", job.OutputPath,
-				"-frames:v", "1", "-vf", "scale=360:-2", "-q:v", "4", dest,
-			).Run()
-			if fi, err := os.Stat(dest); err == nil && fi.Size() > 256 {
-				peekPath = dest
-				job.PeekFramePath = dest
-				job.PeekFrameURL = fmt.Sprintf("/api/jobs/%s/peek", job.ID)
-				_ = s.Store.SaveJob(job)
-			}
+		seek := 1.0
+		if job.FinalDuration > 4 {
+			seek = job.FinalDuration * 0.3
+		}
+		if dest, url, ok := s.Worker.GrabPeekFrameOnce(r.Context(), job.ID, job.OutputPath, seek); ok {
+			peekPath = dest
+			s.Store.UpdateJob(job.ID, func(j *model.RenderJob) {
+				j.PeekFramePath = dest
+				j.PeekFrameURL = url
+			})
 		}
 	}
 
@@ -505,6 +493,17 @@ func (s *Server) handleBoardMove(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotFound, "Job tidak ditemukan")
 			return
 		}
+		isPrivileged := p.Role == "owner" || p.Role == "admin" || p.Role == "qc"
+		if !isPrivileged {
+			if job.ReviewStatus == "approved" || job.ReviewStatus == "rejected" {
+				writeErr(w, http.StatusForbidden, "Klip yang sudah disetujui/ditolak QC hanya boleh dipindahkan oleh Owner atau QC")
+				return
+			}
+			if job.CreatedByID != "" && job.CreatedByID != p.ID {
+				writeErr(w, http.StatusForbidden, "Hanya Owner/QC atau pemilik klip yang boleh memindahkan kartu job ini")
+				return
+			}
+		}
 		switch toCol {
 		case "siap_posting":
 			if p.Role != "owner" && p.Role != "admin" && p.Role != "qc" {
@@ -630,7 +629,7 @@ func (s *Server) handleBoardMove(w http.ResponseWriter, r *http.Request) {
 		proj.Candidates = cands
 		_ = s.Store.SaveProject(proj)
 		s.Broker.Publish("project_update", proj)
-		go s.captureCandidateFrames(proj.ID, 5)
+		go s.captureCandidateFrames(proj.ID, 5, []string{cand.ID})
 		s.recordActivity(p, "board_move", "candidate", cand.ID,
 			fmt.Sprintf("%s memverifikasi frame kandidat %s", p.Name, cand.Title), "", "info")
 		writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -650,13 +649,15 @@ func (s *Server) handleBoardMove(w http.ResponseWriter, r *http.Request) {
 		}
 		camp, _ := s.Store.GetCampaign(proj.CampaignID)
 		opts := buildDefaultRenderOptsFromCandidate(proj, *cand, camp)
+		opts.ActorID = p.ID
+		opts.ActorName = p.Name
+		opts.ActorVia = p.Via
+		opts.InitialBoard = "render"
 		job, err := s.Worker.EnqueueWithReview(opts, "pending_review", "")
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		job.BoardColumn = "render"
-		s.tagJobWithPrincipal(job, p)
 		proj.Candidates = cands
 		_ = s.Store.SaveProject(proj)
 		s.Broker.Publish("project_update", proj)
@@ -772,6 +773,7 @@ func (s *Server) handleBatchReviewJobs(w http.ResponseWriter, r *http.Request) {
 		JobIDs       []string `json:"jobIds"`
 		ReviewStatus string   `json:"reviewStatus"`
 		ReviewNote   string   `json:"reviewNote"`
+		RejectReason string   `json:"rejectReason"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.JobIDs) == 0 {
 		writeErr(w, http.StatusBadRequest, "jobIds wajib diisi")
@@ -783,6 +785,10 @@ func (s *Server) handleBatchReviewJobs(w http.ResponseWriter, r *http.Request) {
 	if req.ReviewStatus != "approved" && req.ReviewStatus != "rejected" {
 		writeErr(w, http.StatusBadRequest, "reviewStatus harus approved atau rejected")
 		return
+	}
+	rejectReason := strings.TrimSpace(req.RejectReason)
+	if rejectReason == "" {
+		rejectReason = strings.TrimSpace(req.ReviewNote)
 	}
 	now := time.Now()
 	var updated []string
@@ -812,14 +818,28 @@ func (s *Server) handleBatchReviewJobs(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			job.BoardColumn = "kandidat"
-			job.RejectReason = req.ReviewNote
+			job.RejectReason = rejectReason
+			if job.ReviewNote == "" {
+				job.ReviewNote = rejectReason
+			}
 		}
 		_ = s.Store.SaveJob(job)
 		s.Broker.Publish("job_update", job)
+		if req.ReviewStatus == "approved" && job.AutopilotID != "" {
+			if rule, ok := s.Store.GetAutopilot(job.AutopilotID); ok && rule.ApproveWebhookURL != "" {
+				autopilot.FireApproveWebhook(rule.ApproveWebhookURL, job)
+			}
+		}
 		updated = append(updated, id)
 	}
+	verb := "menyetujui"
+	lvl := "success"
+	if req.ReviewStatus == "rejected" {
+		verb = "menolak"
+		lvl = "warn"
+	}
 	s.recordActivity(p, "review_batch", "job", strings.Join(updated, ","),
-		fmt.Sprintf("%s menyetujui batch %d klip", p.Name, len(updated)), req.ReviewNote, "success")
+		fmt.Sprintf("%s %s batch %d klip", p.Name, verb, len(updated)), rejectReason, lvl)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok":      true,
 		"updated": updated,

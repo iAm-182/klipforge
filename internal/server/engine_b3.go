@@ -47,14 +47,26 @@ func (s *Server) handleExportJianyingDraft(w http.ResponseWriter, r *http.Reques
 			}
 			return a.FilePath, a.Name, a.Duration, true
 		},
+		ProjectLookup: func(projectID string) (string, float64) {
+			if projectID == "" {
+				return "", 0
+			}
+			if pr, ok := s.Store.GetProject(projectID); ok && pr.LocalVideoPath != "" && pathExists(pr.LocalVideoPath) {
+				return pr.LocalVideoPath, pr.DurationSec
+			}
+			return "", 0
+		},
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "Gagal ekspor Jianying draft: "+err.Error())
 		return
 	}
 
-	job.Draft = info
-	_ = s.Store.SaveJob(job)
+	if updated, ok := s.Store.UpdateJob(job.ID, func(j *model.RenderJob) {
+		j.Draft = info
+	}); ok {
+		job = updated
+	}
 	s.Broker.Publish("job_update", job)
 	p := getPrincipal(r)
 	s.recordActivity(p, "draft_export", "job", job.ID,
@@ -72,13 +84,21 @@ func (s *Server) handleExportJianyingDraft(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleDownloadJianyingDraft(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	job, ok := s.Store.GetJob(id)
-	if !ok || job.Draft == nil || job.Draft.FilePath == "" || !pathExists(job.Draft.FilePath) {
+	if !ok || job.Draft == nil {
+		http.NotFound(w, r)
+		return
+	}
+	draftPath := job.Draft.FilePath
+	if draftPath == "" && job.Draft.FileName != "" {
+		draftPath = filepath.Join(s.Store.DataDir, "drafts", filepath.Base(job.Draft.FileName))
+	}
+	if draftPath == "" || !pathExists(draftPath) {
 		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, job.Draft.FileName))
-	http.ServeFile(w, r, job.Draft.FilePath)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(job.Draft.FileName)))
+	http.ServeFile(w, r, draftPath)
 }
 
 func (s *Server) handleServeJobCover(w http.ResponseWriter, r *http.Request) {
@@ -146,7 +166,13 @@ func (s *Server) handleDetectProjectScenes(w http.ResponseWriter, r *http.Reques
 		res = analyzer.SceneCutResult{Cuts: req.Cuts, Engine: "supplied"}
 	} else {
 		media := strings.TrimSpace(req.MediaPath)
-		if media == "" {
+		if media != "" {
+			// Security: confine user/agent-supplied mediaPath strictly inside KlipForge DataDir or OutputDir!
+			if !s.isAllowedMediaPath(media) {
+				writeErr(w, http.StatusBadRequest, "mediaPath tidak valid: path harus berada di dalam direktori kerja KlipForge")
+				return
+			}
+		} else {
 			media = proj.LocalVideoPath
 		}
 		if media == "" || !pathExists(media) {
@@ -236,13 +262,36 @@ func (s *Server) handleDiarizeProject(w http.ResponseWriter, r *http.Request) {
 	s.cacheMu.Unlock()
 
 	if len(diarCues) > 0 {
-		// Attach SpeakerSummary onto existing candidates without discarding verdicts/board positions!
-		cands := make([]model.ClipCandidate, len(proj.Candidates))
-		copy(cands, proj.Candidates)
-		for i := range cands {
-			cands[i].SpeakerSummary = analyzer.SummarizeSpeakersInWindow(diarCues, cands[i].StartSec, cands[i].EndSec)
+		// Re-run DetectHype with PrimarySpeaker so streamer dialogue gets priority,
+		// while preserving all existing verdicts, board positions, and verification frames!
+		res := analyzer.DetectHype(analyzer.AnalysisInput{
+			DurationSec:    proj.DurationSec,
+			Heatmap:        cs.Heatmap,
+			Chats:          cs.Chats,
+			AudioEnergy:    cs.AudioEnergy,
+			Transcript:     diarCues,
+			Chapters:       proj.Chapters,
+			Settings:       proj.DetectConfig,
+			ForbiddenWords: s.campaignForbiddenWords(proj.CampaignID),
+			PrimarySpeaker: diar.PrimarySpeaker,
+		})
+		if len(res.Candidates) > 0 {
+			merged := mergePreservedCandidateMeta(proj.Candidates, res.Candidates)
+			for i := range merged {
+				merged[i].SpeakerSummary = analyzer.SummarizeSpeakersInWindow(diarCues, merged[i].StartSec, merged[i].EndSec)
+			}
+			proj.Timeline = res.Timeline
+			proj.Candidates = merged
+			proj.Signals = res.Signals
+			s.enrichProjectAutoEdit(proj)
+		} else {
+			cands := make([]model.ClipCandidate, len(proj.Candidates))
+			copy(cands, proj.Candidates)
+			for i := range cands {
+				cands[i].SpeakerSummary = analyzer.SummarizeSpeakersInWindow(diarCues, cands[i].StartSec, cands[i].EndSec)
+			}
+			proj.Candidates = cands
 		}
-		proj.Candidates = cands
 		_ = s.Store.SaveProject(proj)
 		s.Broker.Publish("project_update", proj)
 	}
@@ -306,9 +355,14 @@ func (s *Server) handleDetectProjectFacecam(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	boxCopy := res.FacecamBox
-	proj.FacecamBox = &boxCopy
-	proj.FacecamCorner = res.Corner
+	if res.Found {
+		boxCopy := res.FacecamBox
+		proj.FacecamBox = &boxCopy
+		proj.FacecamCorner = res.Corner
+	} else {
+		proj.FacecamBox = nil
+		proj.FacecamCorner = ""
+	}
 	_ = s.Store.SaveProject(proj)
 	s.Broker.Publish("project_update", proj)
 
@@ -327,4 +381,96 @@ func (s *Server) handleDetectProjectFacecam(w http.ResponseWriter, r *http.Reque
 		"sampleCount": res.SampleCount,
 		"engine":      res.Engine,
 	})
+}
+
+func (s *Server) isAllowedMediaPath(p string) bool {
+	trimmed := strings.TrimSpace(p)
+	if trimmed == "" || strings.HasPrefix(trimmed, `\\`) || strings.HasPrefix(trimmed, "//") {
+		return false
+	}
+	abs, err := filepath.Abs(filepath.Clean(trimmed))
+	if err != nil {
+		return false
+	}
+	allowedRoots := []string{s.Store.DataDir, s.Store.OutputDir, s.Store.GetSettings().OutputDir}
+	for _, root := range allowedRoots {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		absRoot, err := filepath.Abs(filepath.Clean(root))
+		if err != nil {
+			continue
+		}
+		rel, err := filepath.Rel(absRoot, abs)
+		if err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// mergePreservedCandidateMeta carries forward human/agent verdicts, Kanban column/owner/reason,
+// and verification frame paths across background re-analyses (Live Chat, Audio Scan, Diarization).
+func mergePreservedCandidateMeta(oldCands, newCands []model.ClipCandidate) []model.ClipCandidate {
+	if len(oldCands) == 0 || len(newCands) == 0 {
+		return newCands
+	}
+	out := make([]model.ClipCandidate, len(newCands))
+	copy(out, newCands)
+	used := make([]bool, len(oldCands))
+	for i := range out {
+		nc := &out[i]
+		bestIdx := -1
+		bestDist := 18.0
+		for j, oc := range oldCands {
+			if used[j] {
+				continue
+			}
+			if oc.ID == nc.ID {
+				bestIdx = j
+				break
+			}
+			d := oc.PeakSec - nc.PeakSec
+			if d < 0 {
+				d = -d
+			}
+			if d < bestDist {
+				bestDist = d
+				bestIdx = j
+			}
+		}
+		if bestIdx >= 0 {
+			used[bestIdx] = true
+			oc := oldCands[bestIdx]
+			if oc.Verdict != nil {
+				vCopy := *oc.Verdict
+				nc.Verdict = &vCopy
+				if vCopy.MomentType != "" {
+					nc.MomentType = vCopy.MomentType
+				}
+			}
+			if oc.BoardColumn != "" {
+				nc.BoardColumn = oc.BoardColumn
+				nc.BoardReason = oc.BoardReason
+				nc.BoardUpdatedAt = oc.BoardUpdatedAt
+			}
+			if oc.OwnerID != "" {
+				nc.OwnerID = oc.OwnerID
+				nc.OwnerName = oc.OwnerName
+			}
+			if oc.StartFramePath != "" {
+				nc.StartFramePath = oc.StartFramePath
+				nc.StartFrameURL = oc.StartFrameURL
+			}
+			if oc.PeakFramePath != "" {
+				nc.PeakFramePath = oc.PeakFramePath
+				nc.PeakFrameURL = oc.PeakFrameURL
+			}
+			if oc.CoverFramePath != "" {
+				nc.CoverFramePath = oc.CoverFramePath
+				nc.CoverFrameURL = oc.CoverFrameURL
+			}
+		}
+	}
+	return out
 }

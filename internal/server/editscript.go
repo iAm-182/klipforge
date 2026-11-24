@@ -27,6 +27,9 @@ type EditScriptRequest struct {
 	AudioNorm      *bool                  `json:"audioNorm,omitempty"`
 	UseWatermark   *bool                  `json:"useWatermark,omitempty"`
 	UseOutro       *bool                  `json:"useOutro,omitempty"`
+	SilenceTrim    *bool                  `json:"silenceTrim,omitempty"`
+	SceneSnap      *bool                  `json:"sceneSnap,omitempty"`
+	PickCover      *bool                  `json:"pickCover,omitempty"`
 	BumperDuration float64                `json:"bumperDuration,omitempty"`
 	BumperSFXID    string                 `json:"bumperSfxId,omitempty"`
 	Encoder        string                 `json:"encoder,omitempty"`
@@ -95,12 +98,37 @@ func (s *Server) handleEditScript(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Defaults for layout, mode, audioFx, compliance booleans
+	// Defaults for layout, subtitles, mode, audioFx, videoFx, compliance booleans (inheriting campaign defaults!)
+	var camp *model.Campaign
+	if campaignID != "" {
+		camp, _ = s.Store.GetCampaign(campaignID)
+	}
+
 	mode := strings.TrimSpace(req.Mode)
 	if mode == "" {
 		mode = "edit_script"
 	}
 	layout := req.Layout
+	if camp != nil {
+		if layout.AspectRatio == "" {
+			layout.AspectRatio = camp.DefaultLayout.AspectRatio
+		}
+		if layout.Resolution == "" {
+			layout.Resolution = camp.DefaultLayout.Resolution
+		}
+		if layout.CropMode == "" {
+			layout.CropMode = camp.DefaultLayout.CropMode
+		}
+		if layout.SplitRatio <= 0 && camp.DefaultLayout.SplitRatio > 0 {
+			layout.SplitRatio = camp.DefaultLayout.SplitRatio
+		}
+		if layout.GameplayBox.W <= 0 && camp.DefaultLayout.GameplayBox.W > 0 {
+			layout.GameplayBox = camp.DefaultLayout.GameplayBox
+		}
+		if layout.FacecamBox.W <= 0 && camp.DefaultLayout.FacecamBox.W > 0 {
+			layout.FacecamBox = camp.DefaultLayout.FacecamBox
+		}
+	}
 	if layout.AspectRatio == "" {
 		layout.AspectRatio = "9:16"
 	}
@@ -111,9 +139,20 @@ func (s *Server) handleEditScript(w http.ResponseWriter, r *http.Request) {
 		layout.CropMode = "face_track"
 	}
 
+	subs := req.Subtitles
+	if camp != nil && !subs.Enabled && subs.Preset == "" && subs.FontName == "" && camp.DefaultSubtitles.Preset != "" {
+		subs = camp.DefaultSubtitles
+	}
+
 	audioFX := model.AudioFXConfig{
 		BGMVolume: 0.18,
 		AutoDuck:  true,
+	}
+	if camp != nil {
+		audioFX = camp.DefaultAudioFX
+		if audioFX.BGMVolume <= 0 {
+			audioFX.BGMVolume = 0.18
+		}
 	}
 	if req.AudioFX != nil {
 		audioFX = *req.AudioFX
@@ -122,17 +161,43 @@ func (s *Server) handleEditScript(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	videoFX := req.VideoFX
+	if camp != nil && videoFX.ColorPreset == "" && videoFX.MotionPreset == "" && videoFX.Speed == 0 && !videoFX.FadeIn && !videoFX.Sharpen {
+		videoFX = camp.DefaultVideoFX
+	}
+
 	audioNorm := true
+	if camp != nil {
+		audioNorm = camp.DefaultAudioNorm
+	}
 	if req.AudioNorm != nil {
 		audioNorm = *req.AudioNorm
 	}
 	useWM := true
+	if camp != nil {
+		useWM = camp.Watermark.Enabled
+	}
 	if req.UseWatermark != nil {
 		useWM = *req.UseWatermark
 	}
 	useOutro := true
+	if camp != nil {
+		useOutro = camp.Outro.Enabled
+	}
 	if req.UseOutro != nil {
 		useOutro = *req.UseOutro
+	}
+	silenceTrim := false
+	if req.SilenceTrim != nil {
+		silenceTrim = *req.SilenceTrim
+	}
+	sceneSnap := false
+	if req.SceneSnap != nil {
+		sceneSnap = *req.SceneSnap
+	}
+	pickCover := true
+	if req.PickCover != nil {
+		pickCover = *req.PickCover
 	}
 
 	plan := model.AppliedEditPlan{
@@ -205,9 +270,10 @@ func (s *Server) handleEditScript(w http.ResponseWriter, r *http.Request) {
 			rep.SpeedRamp = &clamped
 		}
 
-		// 3. ZoomPunch clamp
+		// 3. ZoomPunch clamp (against effective ramped/sped-up output duration!)
 		if seg.Zoom != nil {
-			cz, notes := renderer.ClampZoomPunch(*seg.Zoom, segDur)
+			effSegDur := renderer.MapTimeWithRamp(segDur, rep.Speed, seg.SpeedRamp)
+			cz, notes := renderer.ClampZoomPunch(*seg.Zoom, effSegDur)
 			if len(notes) > 0 {
 				rep.Clamped = append(rep.Clamped, notes...)
 			}
@@ -249,6 +315,14 @@ func (s *Server) handleEditScript(w http.ResponseWriter, r *http.Request) {
 				if pos != "" && pos != "top" && pos != "center" && pos != "bottom" {
 					rep.Clamped = append(rep.Clamped, fmt.Sprintf("textOverlay.position %q -> top", pos))
 					seg.TextOverlay.Position = "top"
+				}
+				st := strings.ToLower(strings.TrimSpace(seg.TextOverlay.Style))
+				switch st {
+				case "", "viral_yellow", "clean_white", "neon_pink", "pill_dark":
+					seg.TextOverlay.Style = st
+				default:
+					rep.Clamped = append(rep.Clamped, fmt.Sprintf("textOverlay.style %q -> viral_yellow", st))
+					seg.TextOverlay.Style = "viral_yellow"
 				}
 			}
 		}
@@ -308,23 +382,32 @@ func (s *Server) handleEditScript(w http.ResponseWriter, r *http.Request) {
 		plan.Segments = append(plan.Segments, rep)
 	}
 
+	planCopy := plan
 	compileOpts := model.CompileOptions{
 		CampaignID:     campaignID,
 		Title:          strings.TrimSpace(req.Title),
 		Mode:           mode,
 		Segments:       segments,
 		Layout:         layout,
-		Subtitles:      req.Subtitles,
+		Subtitles:      subs,
 		AudioFX:        audioFX,
-		VideoFX:        req.VideoFX,
+		VideoFX:        videoFX,
 		AudioNorm:      audioNorm,
 		BumperDuration: req.BumperDuration,
 		BumperSFXID:    bumperSFX,
 		UseWatermark:   useWM,
 		UseOutro:       useOutro,
+		SilenceTrim:    silenceTrim,
+		SceneSnap:      sceneSnap,
+		PickCover:      pickCover,
 		Encoder:        req.Encoder,
 		Preset:         req.Preset,
 		CRF:            req.CRF,
+		ActorID:        p.ID,
+		ActorName:      p.Name,
+		ActorVia:       p.Via,
+		InitialBoard:   "render",
+		InitialPlan:    &planCopy,
 	}
 
 	job, err := s.Worker.EnqueueCompilation(compileOpts)
@@ -333,13 +416,6 @@ func (s *Server) handleEditScript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	planCopy := plan
-	job.AppliedPlan = &planCopy
-	if plan.AutoEdit != nil {
-		aeCopy := *plan.AutoEdit
-		job.AutoEdit = &aeCopy
-	}
-	s.tagJobWithPrincipal(job, p)
 	s.Broker.Log("edit-script", "info", fmt.Sprintf("🎬 Edit-Script '%s' (%d segmen) masuk antrean oleh %s (%s)", job.Title, len(segments), p.Name, p.Via))
 
 	// Returns HTTP 200 OK echoing full job + appliedPlan!

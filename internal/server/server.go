@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -45,11 +46,15 @@ type Server struct {
 	Cookies     *youtube.CookieKeeper
 	EngineToken string
 	AgentKey    string
+	closeCancel context.CancelFunc
 
-	// Cache raw signals in memory for instant re-analysis without re-fetching YouTube
+	// Cache raw signals in memory (bounded LRU, max 8 projects) for instant re-analysis without re-fetching YouTube
 	cacheMu    sync.RWMutex
 	rawSignals map[string]*cachedSignals
+	cacheOrder []string
 }
+
+var validCampaignIDRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
 type cachedSignals struct {
 	Heatmap     []youtube.HeatmapPoint
@@ -85,6 +90,7 @@ func New(st *store.Store, d *deps.Manager, broker *events.Broker) *Server {
 	wp := renderer.NewWorkerPool(st, d, yt, audioLib, broker)
 	engTok := loadOrCreateSecretFile(st.BaseDir, "KLIPFORGE_ENGINE_TOKEN", ".engine-token", "Engine Token")
 	agentKey := loadOrCreateSecretFile(st.BaseDir, "KLIPFORGE_AGENT_KEY", ".agent-key", "Agent Key")
+	srvCtx, srvCancel := context.WithCancel(context.Background())
 	s := &Server{
 		Store:       st,
 		Deps:        d,
@@ -94,6 +100,7 @@ func New(st *store.Store, d *deps.Manager, broker *events.Broker) *Server {
 		Worker:      wp,
 		EngineToken: engTok,
 		AgentKey:    agentKey,
+		closeCancel: srvCancel,
 		rawSignals:  make(map[string]*cachedSignals),
 	}
 	s.Autopilot = autopilot.NewScheduler(st, yt, wp, broker, s.analyzeSyncFast)
@@ -106,7 +113,7 @@ func New(st *store.Store, d *deps.Manager, broker *events.Broker) *Server {
 			go notify.Send(wh, "cookie_expired", "⚠️ Cookie YouTube Kedaluwarsa", reason)
 		}
 	}
-	s.Cookies.Start(context.Background())
+	s.Cookies.Start(srvCtx)
 	broker.SetActivitySink(func(source, level, message string) {
 		if strings.TrimSpace(message) == "" {
 			return
@@ -125,6 +132,52 @@ func New(st *store.Store, d *deps.Manager, broker *events.Broker) *Server {
 		go notify.Send(wh, "engine_start", "🟢 KlipForge Engine Menyala", "Engine lokal siap menerima job & auto-catchup Autopilot aktif.")
 	}
 	return s
+}
+
+// Close shuts down background server-scoped tasks (CookieKeeper, etc.) cleanly.
+func (s *Server) Close() {
+	if s.closeCancel != nil {
+		s.closeCancel()
+	}
+}
+
+func (s *Server) putCachedSignals(projectID string, cs *cachedSignals) {
+	const maxCachedProjects = 8
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	s.rawSignals[projectID] = cs
+	// Move projectID to back of LRU slice
+	filtered := s.cacheOrder[:0]
+	for _, id := range s.cacheOrder {
+		if id != projectID {
+			filtered = append(filtered, id)
+		}
+	}
+	s.cacheOrder = append(filtered, projectID)
+	for len(s.cacheOrder) > maxCachedProjects {
+		evict := s.cacheOrder[0]
+		s.cacheOrder = s.cacheOrder[1:]
+		delete(s.rawSignals, evict)
+	}
+}
+
+func isHTTPSRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
+}
+
+func maskSettingsForRole(cfg model.AppSettings, role string) model.AppSettings {
+	if role != "owner" && role != "admin" {
+		if strings.TrimSpace(cfg.NotifyWebhookURL) != "" {
+			cfg.NotifyWebhookURL = "[masked]"
+		}
+	}
+	return cfg
 }
 
 func (s *Server) campaignForbiddenWords(campaignID string) []string {
@@ -219,6 +272,8 @@ func (s *Server) Handler() http.Handler {
 
 	// Native MCP Streamable HTTP Endpoint (Carbon / Muse / Claude / OpenClaw orchestrators)
 	mux.HandleFunc("POST /api/mcp", s.handleMCP)
+	mux.HandleFunc("GET /api/mcp", s.handleMCP)
+	mux.HandleFunc("DELETE /api/mcp", s.handleMCP)
 
 	// Kanban Board, Activity Feed & Home Metrics (B1)
 	mux.HandleFunc("GET /api/activity", s.handleListActivity)
@@ -330,31 +385,14 @@ func (s *Server) isValidAgentKey(provided string) bool {
 	return constantTimeMatch(s.AgentKey, provided)
 }
 
-// authRole resolves request privilege: "admin" (EngineToken), "agent" (scoped X-Agent-Key), or "" (unauthorized).
-func (s *Server) authRole(r *http.Request) string {
-	if s.EngineToken == "" {
-		return "admin"
-	}
-	if s.isValidToken(r.Header.Get("X-Engine-Token")) {
-		return "admin"
-	}
-	if ck, err := r.Cookie("kf_token"); err == nil && s.isValidToken(ck.Value) {
-		return "admin"
-	}
-	if q := r.URL.Query().Get("token"); q != "" && s.isValidToken(q) {
-		return "admin"
-	}
-	if ak := r.Header.Get("X-Agent-Key"); ak != "" && s.isValidAgentKey(ak) {
-		return "agent"
-	}
-	return ""
-}
-
 // isAgentAllowed enforces least-privilege scope for assistant agents (X-Agent-Key):
-// ALLOWED: Read (GET), Transcript Search, Analyze/Reanalyze/Scan-Audio/Grab-Frame, Render/Compile/Post-Edit/Retry.
-// DENIED (403): ALL DELETE, ALL PUT (settings/campaigns/autopilot), storage cleanup, uploads, review/reject deletes.
+// ALLOWED: Read (GET), Transcript Search, Analyze/Reanalyze/Scan-Audio/Grab-Frame, Render/Compile/Post-Edit/Retry, MCP.
+// DENIED (403): ALL DELETE (except session teardown DELETE /api/mcp), ALL PUT (settings/campaigns/autopilot), storage cleanup, uploads, review/reject deletes.
 func isAgentAllowed(method, path string) bool {
 	if method == http.MethodGet || method == http.MethodHead {
+		return true
+	}
+	if method == http.MethodDelete && path == "/api/mcp" {
 		return true
 	}
 	if method != http.MethodPost {
@@ -426,6 +464,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			}
 			r = r.WithContext(withPrincipal(r.Context(), principal))
 		}
+		// Bound JSON/API request bodies (2 MB) except multipart file upload routes
+		if r.Body != nil && strings.HasPrefix(r.URL.Path, "/api/") &&
+			!strings.Contains(r.URL.Path, "/upload/") &&
+			r.URL.Path != "/api/settings/cookies" {
+			r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -450,7 +494,7 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Engine-Token, X-Access-Key, X-Agent-Key")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Engine-Token, X-Access-Key, X-Agent-Key, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -495,12 +539,14 @@ func (s *Server) handleAuthUnlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tok := strings.TrimSpace(req.Token)
+	secureCookie := isHTTPSRequest(r)
 	if s.isValidToken(tok) {
 		http.SetCookie(w, &http.Cookie{
 			Name:     "kf_token",
 			Value:    s.EngineToken,
 			Path:     "/",
 			HttpOnly: true,
+			Secure:   secureCookie,
 			SameSite: http.SameSiteStrictMode,
 			MaxAge:   86400 * 30,
 		})
@@ -517,6 +563,7 @@ func (s *Server) handleAuthUnlock(w http.ResponseWriter, r *http.Request) {
 			Value:    m.AccessKey,
 			Path:     "/",
 			HttpOnly: true,
+			Secure:   secureCookie,
 			SameSite: http.SameSiteStrictMode,
 			MaxAge:   86400 * 30,
 		})
@@ -534,7 +581,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	p := getPrincipal(r)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"deps":     s.Deps.GetStatus(),
-		"settings": s.Store.GetSettings(),
+		"settings": maskSettingsForRole(s.Store.GetSettings(), p.Role),
 		"disk":     s.Store.DiskStats(),
 		"user":     p,
 		"security": map[string]interface{}{
@@ -595,7 +642,8 @@ func (s *Server) handleStorageCleanup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.Store.GetSettings())
+	p := getPrincipal(r)
+	writeJSON(w, http.StatusOK, maskSettingsForRole(s.Store.GetSettings(), p.Role))
 }
 
 func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
@@ -638,8 +686,12 @@ func (s *Server) handleCreateCampaign(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "Nama campaign wajib diisi")
 		return
 	}
+	camp.ID = strings.TrimSpace(camp.ID)
 	if camp.ID == "" {
 		camp.ID = fmt.Sprintf("camp-%d", time.Now().UnixNano())
+	} else if !validCampaignIDRe.MatchString(camp.ID) {
+		writeErr(w, http.StatusBadRequest, "ID campaign hanya boleh berisi huruf, angka, '-' dan '_' (maks 64 karakter)")
+		return
 	}
 	if camp.DefaultLayout.AspectRatio == "" {
 		camp.DefaultLayout = model.LayoutConfig{
@@ -1113,9 +1165,7 @@ func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat
 		Transcript:  subCues,
 		StreamURL:   meta.StreamURL,
 	}
-	s.cacheMu.Lock()
-	s.rawSignals[projectID] = cs
-	s.cacheMu.Unlock()
+	s.putCachedSignals(projectID, cs)
 
 	proj.Timeline = res.Timeline
 	proj.Candidates = res.Candidates
@@ -1128,7 +1178,7 @@ func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat
 	s.Broker.Log("analyzer", "success", fmt.Sprintf("Fase 1 selesai cepat: '%s' -> %d kandidat arc siap review!", proj.Title, len(res.Candidates)))
 
 	// Capture Start + Peak verification frames for top 5 candidates in background (for human visual review BEFORE rendering!)
-	go s.captureCandidateFrames(proj.ID, 5)
+	go s.captureCandidateFrames(proj.ID, 5, nil)
 
 	// ============ PHASE 2: NON-BLOCKING BACKGROUND LIVE CHAT (Smart Guard!) ============
 	// Live chat replay on viral 4-hour streams (14M+ views) has 10,000+ fragments & takes 20+ mins.
@@ -1163,16 +1213,18 @@ func (s *Server) runAnalysisPipeline(projectID string, downloadFull, includeChat
 			s.cacheMu.Unlock()
 
 			upgraded := analyzer.DetectHype(analyzer.AnalysisInput{
-				DurationSec: latestProj.DurationSec,
-				Heatmap:     cs.Heatmap,
-				Chats:       msgs,
-				AudioEnergy: cs.AudioEnergy,
-				Transcript:  cs.Transcript,
-				Chapters:    latestProj.Chapters,
-				Settings:    latestProj.DetectConfig,
+				DurationSec:    latestProj.DurationSec,
+				Heatmap:        cs.Heatmap,
+				Chats:          msgs,
+				AudioEnergy:    cs.AudioEnergy,
+				Transcript:     cs.Transcript,
+				Chapters:       latestProj.Chapters,
+				Settings:       latestProj.DetectConfig,
+				ForbiddenWords: s.campaignForbiddenWords(latestProj.CampaignID),
 			})
 			latestProj.Timeline = upgraded.Timeline
-			latestProj.Candidates = upgraded.Candidates
+			latestProj.Candidates = mergePreservedCandidateMeta(latestProj.Candidates, upgraded.Candidates)
+			s.enrichProjectAutoEdit(latestProj)
 			latestProj.Signals = upgraded.Signals
 			latestProj.StatusMessage = fmt.Sprintf("Diperkaya dengan %d pesan Live Chat! %d momen hits ditemukan.", len(msgs), len(upgraded.Candidates))
 			_ = s.Store.SaveProject(latestProj)
@@ -1201,7 +1253,13 @@ func (s *Server) loadCachedSignals(proj *model.Project) *cachedSignals {
 			cs.Chats = msgs
 		}
 	}
-	if proj.SubtitlePath != "" {
+	if b, err := os.ReadFile(filepath.Join(projDir, "diarized_cues.json")); err == nil {
+		var dc []model.TranscriptCue
+		if json.Unmarshal(b, &dc) == nil && len(dc) > 0 {
+			cs.Transcript = dc
+		}
+	}
+	if len(cs.Transcript) == 0 && proj.SubtitlePath != "" {
 		if cues, err := youtube.ParseSubtitleFile(proj.SubtitlePath); err == nil {
 			cs.Transcript = cues
 		}
@@ -1210,9 +1268,7 @@ func (s *Server) loadCachedSignals(proj *model.Project) *cachedSignals {
 		_ = json.Unmarshal(b, &cs.AudioEnergy)
 	}
 
-	s.cacheMu.Lock()
-	s.rawSignals[proj.ID] = cs
-	s.cacheMu.Unlock()
+	s.putCachedSignals(proj.ID, cs)
 	return cs
 }
 
@@ -1280,12 +1336,15 @@ func (s *Server) handleRenderCompile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "Format JSON compile tidak valid")
 		return
 	}
+	opts.ActorID = p.ID
+	opts.ActorName = p.Name
+	opts.ActorVia = p.Via
+	opts.InitialBoard = "render"
 	job, err := s.Worker.EnqueueCompilation(opts)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.tagJobWithPrincipal(job, p)
 	writeJSON(w, http.StatusAccepted, job)
 }
 
@@ -1340,26 +1399,34 @@ func (s *Server) handleScanAudioOnly(w http.ResponseWriter, r *http.Request) {
 
 		saveAudioCache(projDir, energy)
 		cs := s.loadCachedSignals(proj)
+		s.cacheMu.Lock()
 		cs.AudioEnergy = energy
+		heatSnap, chatSnap, transSnap := cs.Heatmap, cs.Chats, cs.Transcript
+		s.cacheMu.Unlock()
 
+		latestProj, ok := s.Store.GetProject(proj.ID)
+		if !ok {
+			return
+		}
 		res := analyzer.DetectHype(analyzer.AnalysisInput{
-			DurationSec:    proj.DurationSec,
-			Heatmap:        cs.Heatmap,
-			Chats:          cs.Chats,
+			DurationSec:    latestProj.DurationSec,
+			Heatmap:        heatSnap,
+			Chats:          chatSnap,
 			AudioEnergy:    energy,
-			Transcript:     cs.Transcript,
-			Chapters:       proj.Chapters,
-			Settings:       proj.DetectConfig,
-			ForbiddenWords: s.campaignForbiddenWords(proj.CampaignID),
+			Transcript:     transSnap,
+			Chapters:       latestProj.Chapters,
+			Settings:       latestProj.DetectConfig,
+			ForbiddenWords: s.campaignForbiddenWords(latestProj.CampaignID),
 		})
-		proj.Timeline = res.Timeline
-		proj.Candidates = res.Candidates
-		proj.Signals = res.Signals
-		proj.Status = "ready"
-		proj.StatusMessage = fmt.Sprintf("🔊 Audio Scream + Transcript siap! %d momen paling pecah ditemukan.", len(res.Candidates))
-		_ = s.Store.SaveProject(proj)
-		s.Broker.Publish("project_update", proj)
-		s.Broker.Log("analyzer", "success", proj.StatusMessage)
+		latestProj.Timeline = res.Timeline
+		latestProj.Candidates = mergePreservedCandidateMeta(latestProj.Candidates, res.Candidates)
+		s.enrichProjectAutoEdit(latestProj)
+		latestProj.Signals = res.Signals
+		latestProj.Status = "ready"
+		latestProj.StatusMessage = fmt.Sprintf("🔊 Audio Scream + Transcript siap! %d momen paling pecah ditemukan.", len(res.Candidates))
+		_ = s.Store.SaveProject(latestProj)
+		s.Broker.Publish("project_update", latestProj)
+		s.Broker.Log("analyzer", "success", latestProj.StatusMessage)
 	}()
 
 	writeJSON(w, http.StatusAccepted, proj)
@@ -1405,26 +1472,39 @@ func (s *Server) handleDownloadFull(w http.ResponseWriter, r *http.Request) {
 
 		cs := s.loadCachedSignals(proj)
 		if energy, err := analyzer.AnalyzeAudioEnergy(ctx, s.Deps.GetStatus().FFmpegPath, localMP4, proj.DurationSec); err == nil {
+			s.cacheMu.Lock()
 			cs.AudioEnergy = energy
+			s.cacheMu.Unlock()
 			saveAudioCache(projDir, energy)
 		}
 
+		s.cacheMu.RLock()
+		heatSnap, chatSnap, energySnap, transSnap := cs.Heatmap, cs.Chats, cs.AudioEnergy, cs.Transcript
+		s.cacheMu.RUnlock()
+
+		latestProj, ok := s.Store.GetProject(proj.ID)
+		if !ok {
+			return
+		}
+		latestProj.LocalVideoPath = localMP4
 		res := analyzer.DetectHype(analyzer.AnalysisInput{
-			DurationSec: proj.DurationSec,
-			Heatmap:     cs.Heatmap,
-			Chats:       cs.Chats,
-			AudioEnergy: cs.AudioEnergy,
-			Transcript:  cs.Transcript,
-			Chapters:    proj.Chapters,
-			Settings:    proj.DetectConfig,
+			DurationSec:    latestProj.DurationSec,
+			Heatmap:        heatSnap,
+			Chats:          chatSnap,
+			AudioEnergy:    energySnap,
+			Transcript:     transSnap,
+			Chapters:       latestProj.Chapters,
+			Settings:       latestProj.DetectConfig,
+			ForbiddenWords: s.campaignForbiddenWords(latestProj.CampaignID),
 		})
-		proj.Timeline = res.Timeline
-		proj.Candidates = res.Candidates
-		proj.Signals = res.Signals
-		proj.Status = "ready"
-		proj.StatusMessage = fmt.Sprintf("Full video + Audio Hype siap! %d momen terdeteksi.", len(res.Candidates))
-		_ = s.Store.SaveProject(proj)
-		s.Broker.Publish("project_update", proj)
+		latestProj.Timeline = res.Timeline
+		latestProj.Candidates = mergePreservedCandidateMeta(latestProj.Candidates, res.Candidates)
+		s.enrichProjectAutoEdit(latestProj)
+		latestProj.Signals = res.Signals
+		latestProj.Status = "ready"
+		latestProj.StatusMessage = fmt.Sprintf("Full video + Audio Hype siap! %d momen terdeteksi.", len(res.Candidates))
+		_ = s.Store.SaveProject(latestProj)
+		s.Broker.Publish("project_update", latestProj)
 	}()
 
 	writeJSON(w, http.StatusAccepted, proj)
@@ -1450,11 +1530,15 @@ func (s *Server) handleGrabFrame(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		cs := s.loadCachedSignals(proj)
+		s.cacheMu.RLock()
 		streamURL := cs.StreamURL
+		s.cacheMu.RUnlock()
 		if streamURL == "" {
 			if meta, err := s.YT.FetchMetadata(r.Context(), proj.SourceURL, s.Store.GetSettings()); err == nil {
 				streamURL = meta.StreamURL
+				s.cacheMu.Lock()
 				cs.StreamURL = streamURL
+				s.cacheMu.Unlock()
 			}
 		}
 		if err := s.YT.GrabPreviewFrame(r.Context(), streamURL, proj.ThumbnailURL, req.SeekSec, framePath); err != nil {
@@ -1477,27 +1561,54 @@ func maxInt64(a, b int64) int64 {
 }
 
 // captureCandidateFrames grabs 1 verification frame at ArcStartSec and 1 at PeakSec for the top N candidates
-// so human reviewers can verify visual context on frames BEFORE rendering (never auto-renders!).
-func (s *Server) captureCandidateFrames(projectID string, topN int) {
+// (or specific candidateIDs when provided) so human reviewers can verify visual context on frames BEFORE rendering.
+func (s *Server) captureCandidateFrames(projectID string, topN int, candidateIDs []string) {
 	proj, ok := s.Store.GetProject(projectID)
 	if !ok || len(proj.Candidates) == 0 {
 		return
 	}
-	if topN <= 0 || topN > len(proj.Candidates) {
-		topN = len(proj.Candidates)
+	var targetIdxs []int
+	if len(candidateIDs) > 0 {
+		want := make(map[string]bool, len(candidateIDs))
+		for _, id := range candidateIDs {
+			if t := strings.TrimSpace(id); t != "" {
+				want[t] = true
+			}
+		}
+		for i, c := range proj.Candidates {
+			if want[c.ID] {
+				targetIdxs = append(targetIdxs, i)
+			}
+		}
 	}
-	if topN > 8 {
-		topN = 8
+	if len(targetIdxs) == 0 {
+		if topN <= 0 || topN > len(proj.Candidates) {
+			topN = len(proj.Candidates)
+		}
+		if topN > 8 {
+			topN = 8
+		}
+		for i := 0; i < topN; i++ {
+			targetIdxs = append(targetIdxs, i)
+		}
 	}
+	if len(targetIdxs) > 12 {
+		targetIdxs = targetIdxs[:12]
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
 	cs := s.loadCachedSignals(proj)
+	s.cacheMu.RLock()
 	streamURL := cs.StreamURL
+	s.cacheMu.RUnlock()
 	if proj.LocalVideoPath == "" && streamURL == "" {
 		if meta, err := s.YT.FetchMetadata(ctx, proj.SourceURL, s.Store.GetSettings()); err == nil {
 			streamURL = meta.StreamURL
+			s.cacheMu.Lock()
 			cs.StreamURL = streamURL
+			s.cacheMu.Unlock()
 		}
 	}
 
@@ -1515,8 +1626,8 @@ func (s *Server) captureCandidateFrames(projectID string, topN int) {
 		return false
 	}
 
-	for i := 0; i < topN; i++ {
-		c := &proj.Candidates[i]
+	for _, idx := range targetIdxs {
+		c := &proj.Candidates[idx]
 		startSec := c.ArcStartSec
 		if startSec <= 0 {
 			startSec = c.StartSec
@@ -1544,9 +1655,9 @@ func (s *Server) captureCandidateFrames(projectID string, topN int) {
 	if changed {
 		// Re-fetch latest project to avoid clobbering concurrent updates, then copy frame URLs/paths
 		if latest, ok := s.Store.GetProject(projectID); ok {
-			frameByID := make(map[string]model.ClipCandidate, topN)
-			for i := 0; i < topN; i++ {
-				frameByID[proj.Candidates[i].ID] = proj.Candidates[i]
+			frameByID := make(map[string]model.ClipCandidate, len(targetIdxs))
+			for _, idx := range targetIdxs {
+				frameByID[proj.Candidates[idx].ID] = proj.Candidates[idx]
 			}
 			for i := range latest.Candidates {
 				if fc, ok := frameByID[latest.Candidates[i].ID]; ok {
@@ -1558,7 +1669,7 @@ func (s *Server) captureCandidateFrames(projectID string, topN int) {
 			}
 			_ = s.Store.SaveProject(latest)
 			s.Broker.Publish("project_update", latest)
-			s.Broker.Log("analyzer", "success", fmt.Sprintf("Frame verifikasi (Start + Peak) siap untuk Top %d kandidat!", topN))
+			s.Broker.Log("analyzer", "success", fmt.Sprintf("Frame verifikasi (Start + Peak) siap untuk %d kandidat!", len(targetIdxs)))
 		}
 	}
 }
@@ -1571,14 +1682,20 @@ func (s *Server) handleVerifyCandidateFrames(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var req struct {
-		TopN int `json:"topN"`
+		TopN         int      `json:"topN"`
+		CandidateIDs []string `json:"candidateIds"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	if req.TopN <= 0 {
 		req.TopN = 5
 	}
-	go s.captureCandidateFrames(proj.ID, req.TopN)
-	writeJSON(w, http.StatusAccepted, map[string]interface{}{"ok": true, "projectId": proj.ID, "topN": req.TopN})
+	go s.captureCandidateFrames(proj.ID, req.TopN, req.CandidateIDs)
+	writeJSON(w, http.StatusAccepted, map[string]interface{}{
+		"ok":           true,
+		"projectId":    proj.ID,
+		"topN":         req.TopN,
+		"candidateIds": req.CandidateIDs,
+	})
 }
 
 func (s *Server) handleServeCandidateFrame(w http.ResponseWriter, r *http.Request) {
@@ -1735,12 +1852,15 @@ func (s *Server) handleRenderSingle(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "Format render options tidak valid")
 		return
 	}
+	opts.ActorID = p.ID
+	opts.ActorName = p.Name
+	opts.ActorVia = p.Via
+	opts.InitialBoard = "render"
 	job, err := s.Worker.Enqueue(opts)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.tagJobWithPrincipal(job, p)
 	writeJSON(w, http.StatusAccepted, job)
 }
 
@@ -1762,11 +1882,14 @@ func (s *Server) handleRenderBatch(w http.ResponseWriter, r *http.Request) {
 		if err := s.checkMemberQueueLimit(p); err != nil {
 			break
 		}
+		item.ActorID = p.ID
+		item.ActorName = p.Name
+		item.ActorVia = p.Via
+		item.InitialBoard = "render"
 		job, err := s.Worker.Enqueue(item)
 		if err != nil {
 			continue
 		}
-		s.tagJobWithPrincipal(job, p)
 		jobs = append(jobs, job)
 	}
 	if len(jobs) == 0 {
@@ -1802,12 +1925,15 @@ func (s *Server) handlePostEditJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	opts.SourceJobID = id
+	opts.ActorID = p.ID
+	opts.ActorName = p.Name
+	opts.ActorVia = p.Via
+	opts.InitialBoard = "render"
 	job, err := s.Worker.EnqueuePostEdit(opts)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.tagJobWithPrincipal(job, p)
 	writeJSON(w, http.StatusAccepted, job)
 }
 
@@ -1827,17 +1953,31 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 		err    error
 	)
 	if oldJob.JobType == "compilation" && oldJob.CompileOpts != nil {
-		newJob, err = s.Worker.EnqueueCompilation(*oldJob.CompileOpts)
+		co := *oldJob.CompileOpts
+		co.ActorID = p.ID
+		co.ActorName = p.Name
+		co.ActorVia = p.Via
+		co.InitialBoard = "render"
+		newJob, err = s.Worker.EnqueueCompilation(co)
 	} else if oldJob.JobType == "post_edit" && oldJob.PostEditOpts != nil {
-		newJob, err = s.Worker.EnqueuePostEdit(*oldJob.PostEditOpts)
+		pe := *oldJob.PostEditOpts
+		pe.ActorID = p.ID
+		pe.ActorName = p.Name
+		pe.ActorVia = p.Via
+		pe.InitialBoard = "render"
+		newJob, err = s.Worker.EnqueuePostEdit(pe)
 	} else {
-		newJob, err = s.Worker.Enqueue(oldJob.Options)
+		ro := oldJob.Options
+		ro.ActorID = p.ID
+		ro.ActorName = p.Name
+		ro.ActorVia = p.Via
+		ro.InitialBoard = "render"
+		newJob, err = s.Worker.Enqueue(ro)
 	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.tagJobWithPrincipal(newJob, p)
 	writeJSON(w, http.StatusAccepted, newJob)
 }
 
@@ -2094,6 +2234,10 @@ func (s *Server) handleReviewJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if strings.TrimSpace(req.PostCaption) != "" {
+		if forbidden := s.campaignForbiddenWords(job.CampaignID); len(forbidden) > 0 && analyzer.ContainsForbiddenWord(req.PostCaption, forbidden) {
+			writeErr(w, http.StatusBadRequest, "postCaption mengandung kata terlarang campaign")
+			return
+		}
 		job.PostCaption = req.PostCaption
 	}
 	switch req.ReviewStatus {
@@ -2134,7 +2278,16 @@ func (s *Server) handleReviewJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListAutopilots(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.Store.ListAutopilots())
+	p := getPrincipal(r)
+	list := s.Store.ListAutopilots()
+	if p.Role != "owner" && p.Role != "admin" {
+		for _, rule := range list {
+			if strings.TrimSpace(rule.ApproveWebhookURL) != "" {
+				rule.ApproveWebhookURL = "[masked]"
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, list)
 }
 
 func (s *Server) handleCreateAutopilot(w http.ResponseWriter, r *http.Request) {
