@@ -2,6 +2,7 @@ package renderer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -451,12 +452,63 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 		seekStart = 0
 	}
 
+	// Step 1b (B3.2 & B3.3): Optional Scene-Cut Snapping + Silence Trim (NEVER trims inside peakSec window!)
+	relPeak := opts.VideoFX.PeakOffsetSec
+	if relPeak <= 0.5 || relPeak >= clipDur-0.5 {
+		relPeak = clipDur * 0.45
+	}
+	var detectedCuts []float64
+	if opts.SceneSnap && sourcePath != "" {
+		if scRes, err := analyzer.DetectSceneCuts(ctx, settings.SceneDetectBin, wp.Deps.GetStatus().FFmpegPath, sourcePath); err == nil && len(scRes.Cuts) > 0 {
+			detectedCuts = scRes.Cuts
+			ns, ne, snapped := analyzer.SnapBoundariesToScenes(seekStart, seekStart+clipDur, seekStart+relPeak, scRes.Cuts, 3.0, 8.0)
+			if snapped {
+				deltaStart := ns - seekStart
+				seekStart = ns
+				clipDur = ne - ns
+				opts.StartSec += deltaStart
+				opts.EndSec = opts.StartSec + clipDur
+				wp.Broker.Log("worker", "info", fmt.Sprintf("[W%d] Scene-Snap (%s): batas klip diselaraskan ke cut nyata [%.1f-%.1fs]", workerID, scRes.Engine, seekStart, seekStart+clipDur))
+			}
+		}
+	}
+	if opts.SilenceTrim && sourcePath != "" {
+		var segEnergy []float64
+		if seekStart == 0 {
+			if e, err := analyzer.AnalyzeAudioEnergy(ctx, wp.Deps.GetStatus().FFmpegPath, sourcePath, clipDur); err == nil {
+				segEnergy = e
+			}
+		} else {
+			if raw, err := os.ReadFile(filepath.Join(wp.Store.ProjectDir(proj.ID), "audio_energy.json")); err == nil {
+				_ = json.Unmarshal(raw, &segEnergy)
+			}
+		}
+		if len(segEnergy) > 0 {
+			ns, ne, trimmed, reason := analyzer.TrimSilenceFromEnergy(segEnergy, seekStart, seekStart+clipDur, seekStart+relPeak, analyzer.DefaultSilenceTrimConfig())
+			if trimmed {
+				deltaStart := ns - seekStart
+				seekStart = ns
+				clipDur = ne - ns
+				opts.StartSec += deltaStart
+				opts.EndSec = opts.StartSec + clipDur
+				wp.Broker.Log("worker", "info", fmt.Sprintf("[W%d] Silence-Trim: %s", workerID, reason))
+			}
+		}
+	}
+
 	// Step 2: Generate ASS Viral Word-by-Word Karaoke Subtitles + Animated Hook Banner (zero tofu boxes!)
 	subASS := ""
 	var cues []model.TranscriptCue
-	if opts.Subtitles.Enabled && proj.SubtitlePath != "" && fileExists(proj.SubtitlePath) {
-		if parsed, err := youtube.ParseSubtitleFile(proj.SubtitlePath); err == nil && len(parsed) > 0 {
-			cues = parsed
+	if opts.Subtitles.Enabled {
+		// Prefer speaker-diarized cues (B3.4) if available for speaker-colored karaoke!
+		diarPath := filepath.Join(wp.Store.ProjectDir(proj.ID), "diarized_cues.json")
+		if raw, err := os.ReadFile(diarPath); err == nil {
+			_ = json.Unmarshal(raw, &cues)
+		}
+		if len(cues) == 0 && proj.SubtitlePath != "" && fileExists(proj.SubtitlePath) {
+			if parsed, err := youtube.ParseSubtitleFile(proj.SubtitlePath); err == nil && len(parsed) > 0 {
+				cues = parsed
+			}
 		}
 	}
 	if len(cues) > 0 || strings.TrimSpace(opts.HookText) != "" {
@@ -629,6 +681,15 @@ func (wp *WorkerPool) processJob(workerID int, jobID string) {
 		job.BoardColumn = "review"
 	}
 	wp.grabPeekFrameOnce(ctx, job, outPath, math.Max(0.5, info.Duration*0.35))
+	// B3.2 Cover Picker: sharpest face-present frame near peakSec inside the same shot!
+	coverDir := filepath.Join(wp.Store.DataDir, "covers")
+	_ = os.MkdirAll(coverDir, 0o755)
+	coverPath := filepath.Join(coverDir, sanitizeFilename(job.ID)+".jpg")
+	shotS, shotE := analyzer.ShotBoundsAround(math.Min(info.Duration, relPeak), info.Duration, detectedCuts)
+	if covRes, err := PickSharpestCoverFrame(ctx, depSt.FFmpegPath, outPath, shotS, shotE, math.Min(info.Duration-0.5, relPeak), coverPath); err == nil && covRes.OK {
+		job.CoverFramePath = coverPath
+		job.CoverFrameURL = fmt.Sprintf("/api/jobs/%s/cover", job.ID)
+	}
 	job.Compliance = evaluateCompliance(opts, camp)
 	_ = wp.Store.SaveJob(job)
 	wp.Broker.Publish("job_update", job)

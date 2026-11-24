@@ -176,6 +176,8 @@ func isRoleAllowed(p model.Principal, method, path string) bool {
 				strings.HasSuffix(path, "/download-full") ||
 				strings.HasSuffix(path, "/verify-frames") ||
 				strings.HasSuffix(path, "/grab-frame") ||
+				strings.HasSuffix(path, "/detect-scenes") ||
+				strings.HasSuffix(path, "/diarize") ||
 				(strings.Contains(path, "/candidates/") && strings.HasSuffix(path, "/verdict")) {
 				return true
 			}
@@ -186,6 +188,7 @@ func isRoleAllowed(p model.Principal, method, path string) bool {
 				strings.HasSuffix(path, "/cancel") ||
 				strings.HasSuffix(path, "/publish-kit") ||
 				strings.HasSuffix(path, "/publish") ||
+				strings.HasSuffix(path, "/draft") ||
 				strings.HasSuffix(path, "/analytics/sync") {
 				return true
 			}

@@ -200,3 +200,66 @@ func TestB2_PublishKitAndApprovalOAuthGates(t *testing.T) {
 		t.Fatalf("expected 403 for agent GET /api/publish/accounts, got %d", accRec.Code)
 	}
 }
+
+func TestB3_DraftSceneAndDiarizationEndpoints(t *testing.T) {
+	srv, st, h := setupPhase4TestServer(t)
+
+	_ = st.SaveJob(&model.RenderJob{
+		ID:            "job-draft-1",
+		ProjectID:     "proj-test-windah",
+		CampaignID:    "windah-gtavi-motionklip",
+		Title:         "Windah Nabrak CapCut Draft",
+		FinalDuration: 22,
+		Options:       model.RenderOptions{StartSec: 1400, EndSec: 1422, HookText: "GUA JAGO NYETIR"},
+		Status:        "done",
+		CreatedAt:     time.Now(),
+	})
+
+	// 1. Agent exports Jianying draft -> 200 OK with pinned schemaVersion + downloadable ZIP!
+	dReq := httptest.NewRequest(http.MethodPost, "/api/jobs/job-draft-1/draft", nil)
+	dReq.Header.Set("X-Agent-Key", srv.AgentKey)
+	dRec := httptest.NewRecorder()
+	h.ServeHTTP(dRec, dReq)
+	if dRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on POST /api/jobs/job-draft-1/draft, got %d: %s", dRec.Code, dRec.Body.String())
+	}
+	if !bytes.Contains(dRec.Body.Bytes(), []byte("jianying-draft-5.9.0")) {
+		t.Fatalf("expected pinned schemaVersion in draft response: %s", dRec.Body.String())
+	}
+	dlReq := httptest.NewRequest(http.MethodGet, "/api/jobs/job-draft-1/draft/download", nil)
+	dlReq.Header.Set("X-Agent-Key", srv.AgentKey)
+	dlRec := httptest.NewRecorder()
+	h.ServeHTTP(dlRec, dlReq)
+	if dlRec.Code != http.StatusOK || dlRec.Body.Len() < 100 {
+		t.Fatalf("expected 200 ZIP download, got %d len=%d", dlRec.Code, dlRec.Body.Len())
+	}
+
+	// 2. Agent snaps candidate boundaries via POST /api/projects/{id}/detect-scenes
+	scReq := httptest.NewRequest(http.MethodPost, "/api/projects/proj-test-windah/detect-scenes",
+		bytes.NewBufferString(`{"cuts":[1398.5, 1420.5, 2261.0, 2319.5]}`))
+	scReq.Header.Set("X-Agent-Key", srv.AgentKey)
+	scRec := httptest.NewRecorder()
+	h.ServeHTTP(scRec, scReq)
+	if scRec.Code != http.StatusOK || !bytes.Contains(scRec.Body.Bytes(), []byte(`"snappedCount":2`)) {
+		t.Fatalf("expected 2 snapped candidates from detect-scenes, got %d: %s", scRec.Code, scRec.Body.String())
+	}
+
+	// 3. Agent runs diarization via POST /api/projects/{id}/diarize -> returns Windah/NPC turns + verified id_ID TTS info
+	srv.cacheMu.Lock()
+	srv.rawSignals["proj-test-windah"] = &cachedSignals{
+		Transcript: []model.TranscriptCue{
+			{Start: 1401, End: 1405, Text: "gua jago nyetir guys lihat nih"},
+			{Start: 1406, End: 1410, Text: "hey what's the problem you sure about that"},
+			{Start: 1411, End: 1416, Text: "anjir nabrak polisi wkwkwk"},
+		},
+	}
+	srv.cacheMu.Unlock()
+
+	diReq := httptest.NewRequest(http.MethodPost, "/api/projects/proj-test-windah/diarize", nil)
+	diReq.Header.Set("X-Agent-Key", srv.AgentKey)
+	diRec := httptest.NewRecorder()
+	h.ServeHTTP(diRec, diReq)
+	if diRec.Code != http.StatusOK || !bytes.Contains(diRec.Body.Bytes(), []byte("SPEAKER_0")) || !bytes.Contains(diRec.Body.Bytes(), []byte("SPEAKER_1")) {
+		t.Fatalf("expected SPEAKER_0 + SPEAKER_1 turns from /diarize, got %d: %s", diRec.Code, diRec.Body.String())
+	}
+}

@@ -229,6 +229,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/projects/{id}/download-full", s.handleDownloadFull)
 	mux.HandleFunc("POST /api/projects/{id}/grab-frame", s.handleGrabFrame)
 	mux.HandleFunc("POST /api/projects/{id}/verify-frames", s.handleVerifyCandidateFrames)
+	mux.HandleFunc("POST /api/projects/{id}/detect-scenes", s.handleDetectProjectScenes)
+	mux.HandleFunc("POST /api/projects/{id}/diarize", s.handleDiarizeProject)
 	mux.HandleFunc("POST /api/projects/{id}/candidates/{candId}/verdict", s.handleCandidateVerdict)
 	mux.HandleFunc("GET /api/projects/{id}/candidate-frame/{candId}/{kind}", s.handleServeCandidateFrame)
 	mux.HandleFunc("GET /api/projects/{id}/preview-frame", s.handleServePreviewFrame)
@@ -245,6 +247,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/jobs/{id}/review", s.handleReviewJob)
 	mux.HandleFunc("POST /api/jobs/review/batch", s.handleBatchReviewJobs)
 	mux.HandleFunc("GET /api/jobs/{id}/peek", s.handleJobPeek)
+	mux.HandleFunc("GET /api/jobs/{id}/cover", s.handleServeJobCover)
+	mux.HandleFunc("POST /api/jobs/{id}/draft", s.handleExportJianyingDraft)
+	mux.HandleFunc("GET /api/jobs/{id}/draft/download", s.handleDownloadJianyingDraft)
 	mux.HandleFunc("POST /api/jobs/{id}/publish-kit", s.handleGeneratePublishKit)
 	mux.HandleFunc("POST /api/jobs/{id}/publish", s.handlePublishJob)
 	mux.HandleFunc("POST /api/jobs/{id}/analytics/sync", s.handleSyncJobAnalytics)
@@ -355,6 +360,8 @@ func isAgentAllowed(method, path string) bool {
 			strings.HasSuffix(path, "/scan-audio") ||
 			strings.HasSuffix(path, "/verify-frames") ||
 			strings.HasSuffix(path, "/grab-frame") ||
+			strings.HasSuffix(path, "/detect-scenes") ||
+			strings.HasSuffix(path, "/diarize") ||
 			(strings.Contains(path, "/candidates/") && strings.HasSuffix(path, "/verdict")) {
 			return true
 		}
@@ -364,6 +371,7 @@ func isAgentAllowed(method, path string) bool {
 			strings.HasSuffix(path, "/retry") ||
 			strings.HasSuffix(path, "/publish-kit") ||
 			strings.HasSuffix(path, "/publish") ||
+			strings.HasSuffix(path, "/draft") ||
 			strings.HasSuffix(path, "/analytics/sync") {
 			return true
 		}

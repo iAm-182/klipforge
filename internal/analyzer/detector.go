@@ -20,7 +20,9 @@ type AnalysisInput struct {
 	Transcript     []model.TranscriptCue
 	Chapters       []model.Chapter
 	Settings       model.DetectionSettings
-	ForbiddenWords []string // Campaign-level words never allowed in auto-generated hooks
+	ForbiddenWords []string  // Campaign-level words never allowed in auto-generated hooks
+	SceneCuts      []float64 // Optional shot boundary timestamps (PySceneDetect / FFmpeg) for boundary snapping
+	PrimarySpeaker string    // Optional diarized primary speaker (e.g. "SPEAKER_0" = Windah)
 }
 
 // AnalysisResult contains the downsampled chart timeline, ranked viral candidates, and signal availability.
@@ -307,8 +309,8 @@ func DetectHype(in AnalysisInput) AnalysisResult {
 		combined[i] = score
 	}
 
-	// Extract arc-aware candidates with setup->payoff expansion & 15s peak merging
-	candidates := extractCandidates(dur, combined, heatGrid, chatGrid, audioGrid, transcriptGrid, viralityGrid, chatBucketSamples, in.Transcript, in.Chapters, cfg, hasHeatmap, hasChat, hasAudio, hasTranscript, in.ForbiddenWords)
+	// Extract arc-aware candidates with setup->payoff expansion, 15s peak merging, scene snapping & speaker turns
+	candidates := extractCandidates(dur, combined, heatGrid, chatGrid, audioGrid, transcriptGrid, viralityGrid, chatBucketSamples, in.Transcript, in.Chapters, cfg, hasHeatmap, hasChat, hasAudio, hasTranscript, in.ForbiddenWords, in.SceneCuts)
 
 	// 6. Downsample timeline to max ~360 chart points for buttery-smooth Canvas rendering
 	step := 1
@@ -377,6 +379,7 @@ func extractCandidates(
 	cfg model.DetectionSettings,
 	hasHeatmap, hasChat, hasAudio, hasTranscript bool,
 	forbiddenWords []string,
+	sceneCuts []float64,
 ) []model.ClipCandidate {
 	type peak struct {
 		sec               int
@@ -480,6 +483,17 @@ func extractCandidates(
 			right = clampInt(left+int(cfg.MaxDurationSec), pk.sec+6, dur)
 		}
 
+		// Optional scene-cut boundary snapping (B3.2): snap arcStart/arcEnd to nearest shot cut while protecting peakSec!
+		sceneSnapped := false
+		if len(sceneCuts) > 0 {
+			ns, ne, snapped := SnapBoundariesToScenes(float64(left), float64(right), float64(pk.sec), sceneCuts, 3.0, 15.0)
+			if snapped {
+				left = clampInt(int(math.Round(ns)), 0, dur-1)
+				right = clampInt(int(math.Round(ne)), left+1, dur)
+				sceneSnapped = true
+			}
+		}
+
 		// Check overlap against already selected arcs
 		overlaps := false
 		for _, ex := range selected {
@@ -531,6 +545,7 @@ func extractCandidates(
 
 		vbCopy := vBreakdown
 		momentType := ClassifyMomentType(speech, arcReason, samples)
+		spkSum := SummarizeSpeakersInWindow(transcript, float64(left), float64(right))
 		selected = append(selected, model.ClipCandidate{
 			ID:                fmt.Sprintf("clip-%d-%d", left, right),
 			Rank:              rank,
@@ -542,6 +557,8 @@ func extractCandidates(
 			ArcEndSec:         float64(right),
 			ArcReason:         arcReason,
 			MomentType:        momentType,
+			SceneSnapped:      sceneSnapped,
+			SpeakerSummary:    spkSum,
 			DurationSec:       float64(right - left),
 			Score:             score100,
 			HeatmapScore:      math.Round(maxH * 100),
@@ -626,24 +643,33 @@ func scoreTranscriptCue(cue model.TranscriptCue) float64 {
 	}
 	score += float64(kwHits) * 1.8
 
-	// Boost genuine Indonesian streamer commentary vs English NPC/cutscene dialogue!
-	indoHits := 0
-	for _, tk := range indoStreamerTokens {
-		if strings.Contains(lower, tk) {
-			indoHits++
+	// Use real diarized Speaker turns (B3.4 sherpa-onnx) when available; fall back to keyword heuristic otherwise.
+	if cue.Speaker != "" {
+		if cue.Speaker == "SPEAKER_0" {
+			score = score*1.35 + 1.2
+		} else if kwHits == 0 {
+			score *= 0.30
 		}
-	}
-	engHits := 0
-	for _, tk := range englishCutsceneTokens {
-		if strings.Contains(lower, tk) {
-			engHits++
+	} else {
+		// Boost genuine Indonesian streamer commentary vs English NPC/cutscene dialogue!
+		indoHits := 0
+		for _, tk := range indoStreamerTokens {
+			if strings.Contains(lower, tk) {
+				indoHits++
+			}
 		}
-	}
-	if indoHits > 0 {
-		score += float64(indoHits) * 0.9
-	} else if engHits > 0 && kwHits == 0 {
-		// Dampen pure English NPC cutscenes so real Windah moments float to #1!
-		score *= 0.25
+		engHits := 0
+		for _, tk := range englishCutsceneTokens {
+			if strings.Contains(lower, tk) {
+				engHits++
+			}
+		}
+		if indoHits > 0 {
+			score += float64(indoHits) * 0.9
+		} else if engHits > 0 && kwHits == 0 {
+			// Dampen pure English NPC cutscenes so real Windah moments float to #1!
+			score *= 0.25
+		}
 	}
 
 	if strings.Contains(txt, "!") || strings.Contains(txt, "?") {

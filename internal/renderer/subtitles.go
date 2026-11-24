@@ -244,7 +244,11 @@ func buildSubtitleEventLines(
 		maxWords = 3
 	}
 
-	var allWords []model.WordTiming
+	type styledWord struct {
+		model.WordTiming
+		Speaker string
+	}
+	var allWords []styledWord
 	for _, cue := range cues {
 		if cue.End <= clipStart || cue.Start >= clipEnd {
 			continue
@@ -267,7 +271,7 @@ func buildSubtitleEventLines(
 					if style.Uppercase {
 						txt = strings.ToUpper(txt)
 					}
-					allWords = append(allWords, model.WordTiming{Start: ws, End: we, Text: txt})
+					allWords = append(allWords, styledWord{WordTiming: model.WordTiming{Start: ws, End: we, Text: txt}, Speaker: cue.Speaker})
 				}
 			}
 		} else {
@@ -289,12 +293,26 @@ func buildSubtitleEventLines(
 			}
 			step := (ce - cs) / float64(len(toks))
 			for idx, tok := range toks {
-				allWords = append(allWords, model.WordTiming{
-					Start: cs + float64(idx)*step,
-					End:   cs + float64(idx+1)*step,
-					Text:  tok,
+				allWords = append(allWords, styledWord{
+					WordTiming: model.WordTiming{
+						Start: cs + float64(idx)*step,
+						End:   cs + float64(idx+1)*step,
+						Text:  tok,
+					},
+					Speaker: cue.Speaker,
 				})
 			}
+		}
+	}
+
+	speakerHighlight := func(spk, fallback string) string {
+		switch spk {
+		case "SPEAKER_1":
+			return "&H00FFD000" // Crisp Cyan for NPC / guest speaker
+		case "SPEAKER_2":
+			return "&H0066FF88" // Mint Green for 3rd speaker
+		default:
+			return fallback
 		}
 	}
 
@@ -306,7 +324,7 @@ func buildSubtitleEventLines(
 			endIdx = len(allWords)
 		}
 		for j := i + 1; j < endIdx; j++ {
-			if allWords[j].Start-allWords[j-1].End > 0.65 {
+			if allWords[j].Start-allWords[j-1].End > 0.65 || allWords[j].Speaker != allWords[j-1].Speaker {
 				endIdx = j
 				break
 			}
@@ -326,13 +344,14 @@ func buildSubtitleEventLines(
 			var lineParts []string
 			for k, gw := range group {
 				wordSafe := sanitizeASSText(gw.Text)
+				hiCol := speakerHighlight(gw.Speaker, highlightColor)
 				if k == activeIdx {
 					if isKaraoke && isPunchKeyWord(gw.Text) {
 						lineParts = append(lineParts, fmt.Sprintf("{\\c%s\\fscx132\\fscy132\\t(0,90,\\fscx118\\fscy118)\\t(90,210,\\fscx112\\fscy112)}%s{\\r}", keyPunchColor, wordSafe))
 					} else if isKaraoke {
-						lineParts = append(lineParts, fmt.Sprintf("{\\c%s\\fscx122\\fscy122\\t(0,85,\\fscx112\\fscy112)}%s{\\r}", highlightColor, wordSafe))
+						lineParts = append(lineParts, fmt.Sprintf("{\\c%s\\fscx122\\fscy122\\t(0,85,\\fscx112\\fscy112)}%s{\\r}", hiCol, wordSafe))
 					} else {
-						lineParts = append(lineParts, fmt.Sprintf("{\\c%s\\fscx114\\fscy114\\t(0,95,\\fscx104\\fscy104)}%s{\\r}", highlightColor, wordSafe))
+						lineParts = append(lineParts, fmt.Sprintf("{\\c%s\\fscx114\\fscy114\\t(0,95,\\fscx104\\fscy104)}%s{\\r}", hiCol, wordSafe))
 					}
 				} else {
 					lineParts = append(lineParts, fmt.Sprintf("{\\c%s}%s", baseColor, wordSafe))
