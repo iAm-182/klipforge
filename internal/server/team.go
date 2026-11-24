@@ -164,6 +164,7 @@ func isRoleAllowed(p model.Principal, method, path string) bool {
 			"/api/audio/presets":         true,
 			"/api/audio/trending/import": true,
 			"/api/board/move":            true,
+			"/api/mcp":                   true,
 		}
 		if allowedClipperExact[path] {
 			return true
@@ -178,6 +179,7 @@ func isRoleAllowed(p model.Principal, method, path string) bool {
 				strings.HasSuffix(path, "/verify-frames") ||
 				strings.HasSuffix(path, "/grab-frame") ||
 				strings.HasSuffix(path, "/detect-scenes") ||
+				strings.HasSuffix(path, "/detect-facecam") ||
 				strings.HasSuffix(path, "/diarize") ||
 				(strings.Contains(path, "/candidates/") && strings.HasSuffix(path, "/verdict")) {
 				return true

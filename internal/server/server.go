@@ -217,6 +217,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/team/{id}", s.handleDeleteTeamMember)
 	mux.HandleFunc("POST /api/team/sync-edge", s.handleSyncTeamEdge)
 
+	// Native MCP Streamable HTTP Endpoint (Carbon / Muse / Claude / OpenClaw orchestrators)
+	mux.HandleFunc("POST /api/mcp", s.handleMCP)
+
 	// Kanban Board, Activity Feed & Home Metrics (B1)
 	mux.HandleFunc("GET /api/activity", s.handleListActivity)
 	mux.HandleFunc("GET /api/metrics/home", s.handleHomeMetrics)
@@ -243,6 +246,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/projects/{id}/grab-frame", s.handleGrabFrame)
 	mux.HandleFunc("POST /api/projects/{id}/verify-frames", s.handleVerifyCandidateFrames)
 	mux.HandleFunc("POST /api/projects/{id}/detect-scenes", s.handleDetectProjectScenes)
+	mux.HandleFunc("POST /api/projects/{id}/detect-facecam", s.handleDetectProjectFacecam)
 	mux.HandleFunc("POST /api/projects/{id}/diarize", s.handleDiarizeProject)
 	mux.HandleFunc("POST /api/projects/{id}/candidates/{candId}/verdict", s.handleCandidateVerdict)
 	mux.HandleFunc("GET /api/projects/{id}/candidate-frame/{candId}/{kind}", s.handleServeCandidateFrame)
@@ -364,6 +368,7 @@ func isAgentAllowed(method, path string) bool {
 		"/api/jobs/edit-script":      true,
 		"/api/audio/trending/import": true,
 		"/api/board/move":            true,
+		"/api/mcp":                   true,
 	}
 	if allowedExact[path] {
 		return true
@@ -374,6 +379,7 @@ func isAgentAllowed(method, path string) bool {
 			strings.HasSuffix(path, "/verify-frames") ||
 			strings.HasSuffix(path, "/grab-frame") ||
 			strings.HasSuffix(path, "/detect-scenes") ||
+			strings.HasSuffix(path, "/detect-facecam") ||
 			strings.HasSuffix(path, "/diarize") ||
 			(strings.Contains(path, "/candidates/") && strings.HasSuffix(path, "/verdict")) {
 			return true
