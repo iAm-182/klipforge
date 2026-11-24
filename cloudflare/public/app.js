@@ -49,9 +49,20 @@
 
   const $ = (id) => document.getElementById(id);
 
-  // ==================== API Helper (with Engine Token & Local/Tunnel Unlock) ====================
+  // ==================== API Helper (with Engine Token, Team Access Key & Agent Key) ====================
   function getStoredEngineToken() {
     return (localStorage.getItem('kf_engine_token') || '').trim();
+  }
+
+  function applyAuthHeader(hdrs, tok) {
+    if (!tok) return;
+    if (tok.startsWith('kf_agt_')) {
+      if (!hdrs.has('X-Agent-Key')) hdrs.set('X-Agent-Key', tok);
+    } else if (tok.startsWith('kf_usr_')) {
+      if (!hdrs.has('X-Access-Key')) hdrs.set('X-Access-Key', tok);
+    } else if (!hdrs.has('X-Engine-Token')) {
+      hdrs.set('X-Engine-Token', tok);
+    }
   }
 
   async function saveAndUnlockEngineToken(rawTok) {
@@ -59,6 +70,14 @@
     if (!tok) {
       localStorage.removeItem('kf_engine_token');
       return { ok: false, error: 'Token kosong' };
+    }
+    if (tok.startsWith('kf_agt_')) {
+      const res = await fetch('/api/status', { headers: { 'X-Agent-Key': tok } });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return { ok: false, error: data.error || `HTTP ${res.status}` };
+      localStorage.setItem('kf_engine_token', tok);
+      window.dispatchEvent(new CustomEvent('kf:unlocked'));
+      return { ok: true, role: data.user?.role || 'agent' };
     }
     const res = await fetch('/api/auth/unlock', {
       method: 'POST',
@@ -70,6 +89,7 @@
       return { ok: false, error: data.error || `HTTP ${res.status}` };
     }
     localStorage.setItem('kf_engine_token', tok);
+    window.dispatchEvent(new CustomEvent('kf:unlocked'));
     return { ok: true, role: data.role || 'admin' };
   }
 
@@ -98,10 +118,7 @@
     const buildOpts = () => {
       const merged = { ...opts };
       const hdrs = new Headers(opts.headers || {});
-      const tok = getStoredEngineToken();
-      if (tok && !hdrs.has('X-Engine-Token')) {
-        hdrs.set('X-Engine-Token', tok);
-      }
+      applyAuthHeader(hdrs, getStoredEngineToken());
       merged.headers = hdrs;
       return merged;
     };
@@ -186,15 +203,21 @@
   });
 
   // ==================== SSE Real-Time Connection ====================
+  let activeSSE = null;
   function connectSSE() {
     const dot = $('sseDot');
+    if (activeSSE) {
+      try { activeSSE.close(); } catch {}
+      activeSSE = null;
+    }
     const es = new EventSource('/api/events');
+    activeSSE = es;
     es.onopen = () => {
-      dot.classList.add('online');
+      if (dot) dot.classList.add('online');
       appendLog('sse', 'success', 'Terhubung ke real-time Go engine stream.');
     };
     es.onerror = () => {
-      dot.classList.remove('online');
+      if (dot) dot.classList.remove('online');
     };
     es.onmessage = (ev) => {
       try {
@@ -208,9 +231,11 @@
         } else if (msg.type === 'autopilot_update') {
           onAutopilotUpdate(msg.payload);
         }
+        if (window.__kfOnSSE) window.__kfOnSSE(msg);
       } catch (e) {}
     };
   }
+  window.__kfGetJobs = () => state.jobs;
 
   function onProjectUpdate(proj) {
     const idx = state.projects.findIndex((p) => p.id === proj.id);
@@ -272,6 +297,7 @@
       state.settings = status.settings;
       state.disk = status.disk || null;
       state.security = status.security || null;
+      state.cookieHealth = status.cookieHealth || null;
       state.user = status.user || { id: 'owner', name: 'Owner', role: status.security?.role || 'owner', via: 'web' };
       state.campaigns = campaigns || [];
       state.projects = projects || [];
@@ -281,8 +307,9 @@
       state.audioPresets = audioPresets || [];
 
       renderUserIdentityAndRoleUI();
+      renderCookieHealthCard(state.cookieHealth);
       if (isOwnerRole()) {
-        await loadTeamData();
+        await Promise.all([loadTeamData(), loadPublishAccounts()]);
       }
       renderMemberFilterDropdowns();
       renderDepsAndSettings();
@@ -420,6 +447,7 @@
       $('rngBgmVol').value = bv;
       $('lblBgmVol').textContent = bv + '%';
       $('chkAutoDuck').checked = camp.defaultAudioFx.autoDuck !== false;
+      if ($('chkVocalEnhance')) $('chkVocalEnhance').checked = !!camp.defaultAudioFx.vocalEnhance;
       $('selSFXPreset').value = camp.defaultAudioFx.sfxAutoPreset || 'meme_punch';
       toggleCustomSFXUI();
     }
@@ -924,6 +952,12 @@
         : '';
 
       const verdictHtml = renderVerdictReadOnly(c.verdict, c.momentType, c.autoEdit);
+      const extraMetaBadges = [];
+      if (c.sceneSnapped) extraMetaBadges.push('<span class="reason-chip">Scene-Snapped</span>');
+      if (c.speakerSummary) extraMetaBadges.push(`<span class="reason-chip">${escapeHtml(c.speakerSummary)}</span>`);
+      const extraMetaHtml = extraMetaBadges.length > 0 ? `<div class="cand-reasons">${extraMetaBadges.join('')}</div>` : '';
+      const curVerdict = (c.verdict?.verdict || '').toLowerCase();
+      const curMoment = (c.momentType || 'hype').toLowerCase();
 
       const framesHtml = (c.startFrameUrl || c.peakFrameUrl)
         ? `<div class="cand-frames-row">
@@ -941,7 +975,17 @@
           <span class="${scoreCls}">⚡ ${Math.round(c.score)}</span>
         </div>
         <div class="cand-reasons">${reasonsHtml}</div>
+        ${extraMetaHtml}
         ${verdictHtml}
+        <div class="cand-verdict-bar">
+          <span class="text-xs muted">Verdict:</span>
+          <button type="button" class="cand-verdict-btn ${curVerdict === 'keep' ? 'active-keep' : ''}" data-v="keep">Keep</button>
+          <button type="button" class="cand-verdict-btn ${curVerdict === 'maybe' ? 'active-maybe' : ''}" data-v="maybe">Maybe</button>
+          <button type="button" class="cand-verdict-btn ${curVerdict === 'drop' ? 'active-drop' : ''}" data-v="drop">Drop</button>
+          <select class="input input-sm cand-moment-sel" style="width:auto;padding:2px 6px;font-size:11px;margin-left:auto;" title="Tipe Momen">
+            ${['hype', 'fail', 'crash', 'meme', 'twist', 'victory', 'custom'].map((m) => `<option value="${m}" ${curMoment === m ? 'selected' : ''}>${m}</option>`).join('')}
+          </select>
+        </div>
         ${arcHtml}
         <div class="text-xs muted">${sigLine}</div>
         ${framesHtml}
@@ -962,6 +1006,42 @@
           </div>
         </div>
       `;
+
+      const momentSel = el.querySelector('.cand-moment-sel');
+      el.querySelectorAll('.cand-verdict-btn').forEach((vb) => {
+        vb.addEventListener('click', async () => {
+          const v = vb.dataset.v;
+          try {
+            const res = await api(`/api/projects/${encodeURIComponent(proj.id)}/candidates/${encodeURIComponent(c.id)}/verdict`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ verdict: v, funny: v === 'keep' ? 4 : (v === 'maybe' ? 2 : 0), momentType: momentSel?.value || c.momentType || '' }),
+            });
+            c.verdict = res.verdict;
+            if (res.candidate) Object.assign(c, res.candidate);
+            toast(`Verdict #${c.rank}: ${v.toUpperCase()}`, v === 'drop' ? 'info' : 'ok');
+            renderCandidates();
+          } catch (err) {
+            toast('Gagal simpan verdict: ' + err.message, 'err');
+          }
+        });
+      });
+      if (momentSel) {
+        momentSel.addEventListener('change', async () => {
+          c.momentType = momentSel.value;
+          try {
+            const res = await api(`/api/projects/${encodeURIComponent(proj.id)}/candidates/${encodeURIComponent(c.id)}/verdict`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ verdict: c.verdict?.verdict || 'maybe', funny: c.verdict?.funny || 2, momentType: c.momentType }),
+            });
+            if (res.candidate) Object.assign(c, res.candidate);
+            toast(`Tipe momen #${c.rank} -> ${c.momentType}`, 'ok');
+          } catch (err) {
+            toast(err.message, 'err');
+          }
+        });
+      }
 
       el.querySelector('.cand-chk').addEventListener('change', (ev) => {
         c.selected = ev.target.checked;
@@ -1045,6 +1125,7 @@
         bgmAssetId: $('selBGM').value || '',
         bgmVolume: (parseInt($('rngBgmVol').value, 10) || 18) / 100,
         autoDuck: $('chkAutoDuck').checked,
+        vocalEnhance: Boolean($('chkVocalEnhance')?.checked),
         sfxAutoPreset: $('selSFXPreset').value || 'none',
         sfxCues: $('selSFXPreset').value === 'custom' ? state.customSFXCues : [],
       },
@@ -1059,6 +1140,9 @@
       useWatermark: $('chkUseWatermark').checked,
       useOutro: $('chkUseOutro').checked,
       useIntro: !!(camp?.intro?.enabled && camp?.intro?.fileName),
+      sceneSnap: Boolean($('chkSceneSnap')?.checked),
+      silenceTrim: Boolean($('chkSilenceTrim')?.checked),
+      pickCover: $('chkPickCover') ? $('chkPickCover').checked : true,
     };
   }
 
@@ -1151,7 +1235,7 @@
 
     const mode = $('selCropMode').value;
     const isSplit = mode.startsWith('split_');
-    const isFaceTop = mode.startsWith('facecam_top_');
+    const isFaceTop = mode.startsWith('facecam_top_') || mode === 'facecam_auto';
     const isCinema = mode === 'gaming_cinema';
     const { gp, fc } = getEffectiveBoxes();
 
@@ -1171,7 +1255,7 @@
     if (state.previewImg) {
       const iw = state.previewImg.naturalWidth || state.previewImg.width;
       const ih = state.previewImg.naturalHeight || state.previewImg.height;
-      if (mode === 'facecam_top_neon') {
+      if (mode === 'facecam_top_neon' || mode === 'facecam_auto') {
         const fcH = Math.round(oh * 0.33);
         const barH = Math.round(oh * 0.072);
         const gpH = oh - fcH - barH;
@@ -1367,15 +1451,16 @@
 
     const toNorm = (e) => {
       const r = canvas.getBoundingClientRect();
+      const pt = e.touches && e.touches[0] ? e.touches[0] : e;
       return {
-        x: Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)),
-        y: Math.max(0, Math.min(1, (e.clientY - r.top) / r.height)),
+        x: Math.max(0, Math.min(1, (pt.clientX - r.left) / Math.max(1, r.width))),
+        y: Math.max(0, Math.min(1, (pt.clientY - r.top) / Math.max(1, r.height))),
       };
     };
 
-    canvas.addEventListener('mousedown', (e) => {
+    const startDrag = (e) => {
       const curMode = $('selCropMode').value;
-      const keepModes = ['split_custom', 'gaming_cinema', 'facecam_top_neon', 'facecam_top_float', 'facecam_top_ribbon', 'facecam_top_clean'];
+      const keepModes = ['split_custom', 'gaming_cinema', 'facecam_auto', 'facecam_top_neon', 'facecam_top_float', 'facecam_top_ribbon', 'facecam_top_clean'];
       if (!keepModes.includes(curMode)) {
         const eff = getEffectiveBoxes();
         state.layout.gameplayBox = { ...eff.gp };
@@ -1384,9 +1469,9 @@
       }
       dragging = true;
       startPt = toNorm(e);
-    });
+    };
 
-    window.addEventListener('mousemove', (e) => {
+    const moveDrag = (e) => {
       if (!dragging || !startPt) return;
       const cur = toNorm(e);
       const box = {
@@ -1403,12 +1488,19 @@
         state.layout.gameplayBox = box;
       }
       drawCropCanvases();
-    });
+    };
 
-    window.addEventListener('mouseup', () => {
+    const endDrag = () => {
       dragging = false;
       startPt = null;
-    });
+    };
+
+    canvas.addEventListener('mousedown', startDrag);
+    canvas.addEventListener('touchstart', (e) => { startDrag(e); e.preventDefault(); }, { passive: false });
+    window.addEventListener('mousemove', moveDrag);
+    window.addEventListener('touchmove', (e) => { if (dragging) { moveDrag(e); e.preventDefault(); } }, { passive: false });
+    window.addEventListener('mouseup', endDrag);
+    window.addEventListener('touchend', endDrag);
 
     // Visual Drag-and-Drop Watermark directly on 9:16 Output Preview Canvas!
     const outCanvas = $('cropOutputCanvas');
@@ -1519,6 +1611,8 @@
     const owner = isOwnerRole();
     const teamCard = $('teamManagementCard');
     if (teamCard) teamCard.classList.toggle('hidden', !owner);
+    if ($('publishAccountsCard')) $('publishAccountsCard').classList.toggle('hidden', !owner);
+    if ($('btnRefreshCookiesNow')) $('btnRefreshCookiesNow').classList.toggle('hidden', !owner);
     // Softly hide owner-only destructive controls for clippers/QC (backend strictly enforces 403 too)
     ['btnSaveSettings', 'btnCleanupStorage', 'btnUpdateYtDlp', 'btnHomeUpdateYt', 'btnHomeCleanup', 'btnDeleteCamp', 'btnSaveCamp', 'btnNewCampaign', 'btnDeleteProject', 'btnSaveAutopilot', 'btnDeleteAutopilot', 'btnNewAutopilot'].forEach((id) => {
       if ($(id)) $(id).classList.toggle('hidden', !owner);
@@ -1574,6 +1668,7 @@
     list.forEach((j) => {
       const card = document.createElement('div');
       card.className = 'job-card';
+      card.dataset.jobId = j.id;
 
       const comp = j.compliance || {};
       const compBadges = [];
@@ -1583,8 +1678,9 @@
       if (comp.hashtagsReady) compBadges.push('<span class="comp-ok">✅ Hashtag Wajib</span>');
       (comp.warnings || []).forEach((w) => compBadges.push(`<span class="comp-warn">⚠️ ${escapeHtml(w)}</span>`));
 
+      const posterAttr = (j.coverFrameUrl || j.peekFrameUrl) ? ` poster="${escapeAttr(j.coverFrameUrl || j.peekFrameUrl)}"` : '';
       const videoHtml = j.status === 'done'
-        ? `<video class="job-video" src="/api/jobs/${encodeURIComponent(j.id)}/video" controls preload="metadata"></video>`
+        ? `<video class="job-video" src="/api/jobs/${encodeURIComponent(j.id)}/video"${posterAttr} controls preload="metadata"></video>`
         : '';
 
       const errHtml = j.error ? `<div class="text-xs" style="color:#fda4af;">Error: ${escapeHtml(j.error)}</div>` : '';
@@ -1647,6 +1743,7 @@
 
       box.appendChild(card);
     });
+    if (window.__kfEnhanceLibraryCards) window.__kfEnhanceLibraryCards(state.jobs);
   }
 
   // ==================== Settings, Disk & Dependencies ====================
@@ -1702,6 +1799,9 @@
       if ($('sRetentionDays')) $('sRetentionDays').value = s.outputRetentionDays || 0;
       if ($('sNotifyWebhook')) $('sNotifyWebhook').value = s.notifyWebhookUrl || '';
       if ($('sDisableAgentTrendImport')) $('sDisableAgentTrendImport').checked = !!s.disableAgentTrendingImport;
+      if ($('sSauPath')) $('sSauPath').value = s.sauPath || '';
+      if ($('sSherpaUrl')) $('sSherpaUrl').value = s.sherpaUrl || '';
+      if ($('sSceneDetectBin')) $('sSceneDetectBin').value = s.sceneDetectBin || '';
     }
   }
 
@@ -1857,6 +1957,57 @@
     }
   });
 
+  if ($('btnDetectScenes')) {
+    $('btnDetectScenes').addEventListener('click', async () => {
+      if (!state.activeProject) return;
+      toast('Mendeteksi perpindahan scene & menyelaraskan batas klip...', 'info');
+      try {
+        const res = await api(`/api/projects/${encodeURIComponent(state.activeProject.id)}/detect-scenes`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ maxSnapSec: 3.0 }),
+        });
+        const updated = await api(`/api/projects/${encodeURIComponent(state.activeProject.id)}`);
+        onProjectUpdate(updated);
+        toast(`Scene-Snap (${res.engine}): ${res.snappedCount} kandidat diselaraskan ke ${res.cutsCount} shot cut!`, 'ok');
+      } catch (e) {
+        toast('Scene-Snap gagal: ' + e.message, 'err');
+      }
+    });
+  }
+
+  if ($('btnDiarizeProj')) {
+    $('btnDiarizeProj').addEventListener('click', async () => {
+      if (!state.activeProject) return;
+      toast('Menjalankan diarisasi pembicara (Streamer vs NPC/Tamu)...', 'info');
+      try {
+        const res = await api(`/api/projects/${encodeURIComponent(state.activeProject.id)}/diarize`, { method: 'POST' });
+        const updated = await api(`/api/projects/${encodeURIComponent(state.activeProject.id)}`);
+        onProjectUpdate(updated);
+        toast(`Diarisasi (${res.engine}): ${res.turnCount} speaker turn · utama: ${res.primarySpeaker || 'SPEAKER_0'}`, 'ok');
+      } catch (e) {
+        toast('Diarisasi gagal: ' + e.message, 'err');
+      }
+    });
+  }
+
+  if ($('btnDetectFacecam')) {
+    $('btnDetectFacecam').addEventListener('click', async () => {
+      if (!state.activeProject) return;
+      toast('Mendeteksi posisi webcam (YuNet/OpenCV)...', 'info');
+      try {
+        const res = await api(`/api/projects/${encodeURIComponent(state.activeProject.id)}/detect-facecam`, { method: 'POST' });
+        if (res.facecamBox) state.layout.facecamBox = res.facecamBox;
+        if (res.gameplayBox) state.layout.gameplayBox = res.gameplayBox;
+        if (res.found && $('selCropMode').value === 'center') $('selCropMode').value = 'facecam_top_neon';
+        drawCropCanvases();
+        toast(res.found ? `Facecam terdeteksi di ${res.corner} (${res.engine})!` : `Facecam belum ketemu (${res.engine}) — pakai fallback default.`, res.found ? 'ok' : 'info');
+      } catch (e) {
+        toast('Auto Facecam gagal: ' + e.message, 'err');
+      }
+    });
+  }
+
   $('btnGrabFrame').addEventListener('click', async () => {
     if (!state.activeProject) return;
     let seek = state.currentSeekSec;
@@ -1939,6 +2090,7 @@
       bgmAssetId: $('selBGM').value || '',
       bgmVolume: (parseInt($('rngBgmVol').value, 10) || 18) / 100,
       autoDuck: $('chkAutoDuck').checked,
+      vocalEnhance: Boolean($('chkVocalEnhance')?.checked),
       sfxAutoPreset: $('selSFXPreset').value || 'none',
       sfxCues: $('selSFXPreset').value === 'custom' ? state.customSFXCues : [],
     };
@@ -2122,8 +2274,8 @@
   if ($('btnTestEngineToken')) {
     $('btnTestEngineToken').addEventListener('click', async () => {
       const val = ($('sEngineToken')?.value || '').trim();
-      const hdrs = {};
-      if (val) hdrs['X-Engine-Token'] = val;
+      const hdrs = new Headers();
+      applyAuthHeader(hdrs, val);
       try {
         const res = await fetch('/api/status', { headers: hdrs });
         const data = await res.json().catch(() => ({}));
@@ -2153,6 +2305,7 @@
 
   $('btnSaveSettings').addEventListener('click', async () => {
     const cfg = {
+      ...(state.settings || {}),
       maxWorkers: parseInt($('sWorkers').value, 10) || 2,
       defaultEncoder: $('sEncoder').value || 'libx264',
       defaultPreset: $('sPreset').value || 'veryfast',
@@ -2165,6 +2318,9 @@
       outputRetentionDays: parseInt($('sRetentionDays')?.value || '0', 10) || 0,
       notifyWebhookUrl: ($('sNotifyWebhook')?.value || '').trim(),
       disableAgentTrendingImport: Boolean($('sDisableAgentTrendImport')?.checked),
+      sauPath: ($('sSauPath')?.value || '').trim(),
+      sherpaUrl: ($('sSherpaUrl')?.value || '').trim(),
+      sceneDetectBin: ($('sSceneDetectBin')?.value || '').trim(),
     };
     try {
       state.settings = await api('/api/settings', {
@@ -2178,7 +2334,7 @@
     }
   });
 
-  // Upload YouTube cookies.txt (1-click VPS anti-bot setup)
+  // Upload YouTube cookies.txt or Cookie-Editor JSON (1-click VPS anti-bot setup)
   if ($('fileUploadCookies')) {
     $('fileUploadCookies').addEventListener('change', async (e) => {
       const f = e.target.files?.[0];
@@ -2190,11 +2346,136 @@
         const res = await api('/api/settings/cookies', { method: 'POST', body: fd });
         if ($('sCookiesFile')) $('sCookiesFile').value = res.cookiesFile || '';
         if (state.settings) state.settings.cookiesFile = res.cookiesFile || '';
-        toast('✅ cookies.txt aktif untuk yt-dlp (anti-bot VPS siap)!', 'ok');
+        if (res.cookieHealth) renderCookieHealthCard(res.cookieHealth);
+        toast(res.convertedFromJson ? '✅ Cookie JSON dikonversi & diaktifkan!' : '✅ cookies.txt aktif untuk yt-dlp (anti-bot VPS siap)!', 'ok');
       } catch (err) {
         toast('Upload cookies gagal: ' + err.message, 'err');
       } finally {
         e.target.value = '';
+      }
+    });
+  }
+
+  // ==================== Cookie Keeper Health Card & Publish Accounts (Settings) ====================
+  function fmtShortTime(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '—';
+    return d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function renderCookieHealthCard(ch) {
+    if (!ch || !$('cookieHealthCard')) return;
+    const badge = $('chStateBadge');
+    if (badge) {
+      const cls = ch.state === 'healthy' ? 'awake' : ((ch.state === 'expired' || ch.state === 'missing') ? 'cooldown' : 'asleep');
+      const lbl = ch.state === 'healthy' ? 'Aktif & Sehat' : (ch.state === 'expired' ? 'Expired' : (ch.state === 'missing' ? 'Belum Ada' : (ch.state || 'Cek...')));
+      badge.className = `engine-pill ${cls}`;
+      badge.innerHTML = `<i class="dot"></i><span>${escapeHtml(lbl)}</span>`;
+    }
+    if ($('chCookieCount')) $('chCookieCount').textContent = String(ch.cookieCount ?? 0);
+    if ($('chIntervalMin')) $('chIntervalMin').textContent = ch.intervalMin ? `${ch.intervalMin} mnt` : '—';
+    if ($('chLastRefreshed')) $('chLastRefreshed').textContent = fmtShortTime(ch.lastRefreshedAt || ch.lastCheckedAt);
+    if ($('chNextCheck')) $('chNextCheck').textContent = fmtShortTime(ch.nextCheckAt);
+    if ($('chMessage')) $('chMessage').textContent = ch.message || 'Status keep-alive aktif di server.';
+  }
+
+  if ($('btnRefreshCookiesNow')) {
+    $('btnRefreshCookiesNow').addEventListener('click', async () => {
+      toast('Memeriksa & menyegarkan cookie YouTube di server...', 'info');
+      try {
+        const res = await api('/api/settings/cookies/refresh', { method: 'POST' });
+        if (res.cookieHealth) renderCookieHealthCard(res.cookieHealth);
+        toast(res.ok ? 'Cookie YouTube sehat & segar!' : ('Catatan cookie: ' + (res.error || 'perlu upload ulang')), res.ok ? 'ok' : 'err');
+      } catch (e) {
+        toast('Gagal cek cookie: ' + e.message, 'err');
+      }
+    });
+  }
+
+  function syncPublishAccountFields() {
+    const plat = $('paPlatform')?.value || 'youtube';
+    if ($('paFieldsYoutube')) $('paFieldsYoutube').classList.toggle('hidden', plat !== 'youtube');
+    if ($('paFieldsInstagram')) $('paFieldsInstagram').classList.toggle('hidden', plat !== 'instagram');
+    if ($('paFieldsTiktokSau')) $('paFieldsTiktokSau').classList.toggle('hidden', plat !== 'tiktok_sau');
+  }
+  if ($('paPlatform')) $('paPlatform').addEventListener('change', syncPublishAccountFields);
+
+  async function loadPublishAccounts() {
+    const box = $('publishAccountsList');
+    if (!box) return;
+    try {
+      const res = await api('/api/publish/accounts');
+      const list = res.accounts || [];
+      if (list.length === 0) {
+        box.innerHTML = '<div class="muted text-xs">Belum ada akun OAuth / sau tersimpan.</div>';
+        return;
+      }
+      box.innerHTML = '';
+      list.forEach((a) => {
+        const row = document.createElement('div');
+        row.className = 'pa-item';
+        const statusTxt = a.platform === 'youtube'
+          ? (a.hasRefreshToken ? 'OAuth OK' : 'Belum ada token')
+          : (a.platform === 'instagram' ? (a.hasAccessToken ? `IG ${a.igUserId || ''}` : 'Belum ada token') : `sau: ${a.sauAccount || '-'}`);
+        row.innerHTML = `
+          <div>
+            <strong>${escapeHtml(a.name)}</strong>
+            <span class="strip-role" style="margin-left:6px;">${escapeHtml(a.platform)}</span>
+            <div class="text-xs muted">${escapeHtml(a.channelTitle || statusTxt)}</div>
+          </div>
+          <button class="btn btn-2xs btn-danger-ghost btn-del-pa" type="button">Hapus</button>
+        `;
+        row.querySelector('.btn-del-pa').addEventListener('click', async () => {
+          if (!confirm(`Hapus akun publish "${a.name}"?`)) return;
+          try {
+            await api(`/api/publish/accounts/${encodeURIComponent(a.id)}`, { method: 'DELETE' });
+            toast('Akun publish dihapus.', 'info');
+            loadPublishAccounts();
+          } catch (e) {
+            toast(e.message, 'err');
+          }
+        });
+        box.appendChild(row);
+      });
+    } catch {
+      if ($('publishAccountsCard')) $('publishAccountsCard').classList.add('hidden');
+    }
+  }
+
+  if ($('btnAddPublishAccount')) {
+    $('btnAddPublishAccount').addEventListener('click', async () => {
+      const plat = $('paPlatform')?.value || 'youtube';
+      const name = ($('paName')?.value || '').trim();
+      if (!name) {
+        toast('Nama label akun wajib diisi!', 'err');
+        return;
+      }
+      const payload = {
+        platform: plat,
+        name,
+        channelTitle: ($('paChannelTitle')?.value || '').trim(),
+        clientId: ($('paClientId')?.value || '').trim(),
+        clientSecret: ($('paClientSecret')?.value || '').trim(),
+        refreshToken: ($('paRefreshToken')?.value || '').trim(),
+        igUserId: ($('paIgUserId')?.value || '').trim(),
+        pageId: ($('paPageId')?.value || '').trim(),
+        accessToken: ($('paAccessToken')?.value || '').trim(),
+        sauAccount: ($('paSauAccount')?.value || '').trim(),
+      };
+      try {
+        await api('/api/publish/accounts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        ['paName', 'paChannelTitle', 'paClientId', 'paClientSecret', 'paRefreshToken', 'paIgUserId', 'paPageId', 'paAccessToken', 'paSauAccount'].forEach((id) => {
+          if ($(id)) $(id).value = '';
+        });
+        toast(`Akun publish "${name}" tersimpan!`, 'ok');
+        loadPublishAccounts();
+      } catch (e) {
+        toast('Gagal simpan akun: ' + e.message, 'err');
       }
     });
   }
@@ -3229,6 +3510,13 @@
         cropMode: $('topNLayout').value,
       },
       subtitles: { enabled: false },
+      audioFx: {
+        bgmAssetId: $('selBGM')?.value || '',
+        bgmVolume: (parseInt($('rngBgmVol')?.value, 10) || 18) / 100,
+        autoDuck: $('chkAutoDuck') ? $('chkAutoDuck').checked : true,
+        vocalEnhance: Boolean($('topNVocalEnhance')?.checked),
+        sfxAutoPreset: $('selSFXPreset')?.value || 'auto_by_moment',
+      },
       videoFx: {
         colorPreset: $('topNVivid').checked ? 'vivid_gaming' : 'none',
         motionPreset: 'none',
@@ -3240,6 +3528,9 @@
       audioNorm: $('topNAudioNorm').checked,
       useWatermark: $('topNWatermark').checked,
       useOutro: $('topNOutro').checked,
+      sceneSnap: Boolean($('topNSceneSnap')?.checked),
+      silenceTrim: Boolean($('topNSilenceTrim')?.checked),
+      pickCover: $('topNPickCover') ? $('topNPickCover').checked : true,
     };
     try {
       await api('/api/jobs/compile', {
@@ -3315,6 +3606,8 @@
     if ($('peBgmFadeIn')) $('peBgmFadeIn').value = '0.35';
     if ($('peBgmFadeOut')) $('peBgmFadeOut').value = '0.85';
     $('peBgmDuck').checked = true;
+    if ($('peVocalEnhance')) $('peVocalEnhance').checked = false;
+    if ($('peAudioNorm')) $('peAudioNorm').checked = false;
     if ($('peWmEnabled')) $('peWmEnabled').checked = false;
     if ($('peWmFullFrame')) $('peWmFullFrame').checked = false;
     if ($('peSafeZoneToggle')) $('peSafeZoneToggle').checked = false;
@@ -3612,6 +3905,10 @@
       $('topNOutro').checked = !!co.useOutro;
       $('topNAudioNorm').checked = !!co.audioNorm;
       $('topNVivid').checked = co.videoFx?.colorPreset === 'vivid_gaming';
+      if ($('topNSceneSnap')) $('topNSceneSnap').checked = !!co.sceneSnap;
+      if ($('topNSilenceTrim')) $('topNSilenceTrim').checked = !!co.silenceTrim;
+      if ($('topNPickCover')) $('topNPickCover').checked = co.pickCover !== false;
+      if ($('topNVocalEnhance')) $('topNVocalEnhance').checked = !!co.audioFx?.vocalEnhance;
       renderTopNBuilder();
       switchTab('topn');
       toast(`🔄 ${state.topNSlots.length} slot Top-N dimuat ulang! Silakan ubah menit/SFX lalu render lagi.`, 'ok');
@@ -3623,11 +3920,16 @@
       const proj = state.projects.find((p) => p.id === (o.projectId || job.projectId));
       if (proj) {
         state.activeProject = proj;
-        renderProjectWorkspace(proj);
+        if ($('projectHistorySelect')) $('projectHistorySelect').value = proj.id;
+        renderActiveProject();
       }
       $('manualStart').value = Math.round(o.startSec || 0);
       $('manualEnd').value = Math.round(o.endSec || 0);
       $('manualHook').value = o.hookText || job.title || '';
+      if ($('chkSceneSnap')) $('chkSceneSnap').checked = !!o.sceneSnap;
+      if ($('chkSilenceTrim')) $('chkSilenceTrim').checked = !!o.silenceTrim;
+      if ($('chkPickCover')) $('chkPickCover').checked = o.pickCover !== false;
+      if ($('chkVocalEnhance')) $('chkVocalEnhance').checked = !!o.audioFx?.vocalEnhance;
       if (o.layout) {
         state.layout = { ...state.layout, ...o.layout };
         if (o.layout.aspectRatio) $('selAspect').value = o.layout.aspectRatio;
@@ -3865,6 +4167,11 @@
   $('postEditModal').addEventListener('click', (e) => {
     if (e.target === $('postEditModal')) closePostEditModal();
   });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && $('postEditModal') && !$('postEditModal').classList.contains('hidden')) {
+      closePostEditModal();
+    }
+  });
   document.querySelectorAll('.pe-nudge').forEach((btn) => {
     btn.addEventListener('click', () => {
       const vid = $('peVideo');
@@ -4015,6 +4322,8 @@
       bgmFadeInSec: parseFloat($('peBgmFadeIn')?.value) || 0.35,
       bgmFadeOutSec: parseFloat($('peBgmFadeOut')?.value) || 0.85,
       bgmAutoDuck: $('peBgmDuck').checked,
+      audioNorm: Boolean($('peAudioNorm')?.checked),
+      vocalEnhance: Boolean($('peVocalEnhance')?.checked),
       speed: parseFloat($('peSpeed').value) || 1.0,
     };
     if (peWmState.enabled) {

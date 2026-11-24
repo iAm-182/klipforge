@@ -36,10 +36,20 @@
     return (localStorage.getItem('kf_engine_token') || '').trim();
   }
 
+  function applyAuthHeader(hdrs, tok) {
+    if (!tok) return;
+    if (tok.startsWith('kf_agt_')) {
+      if (!hdrs.has('X-Agent-Key')) hdrs.set('X-Agent-Key', tok);
+    } else if (tok.startsWith('kf_usr_')) {
+      if (!hdrs.has('X-Access-Key')) hdrs.set('X-Access-Key', tok);
+    } else if (!hdrs.has('X-Engine-Token')) {
+      hdrs.set('X-Engine-Token', tok);
+    }
+  }
+
   async function apiB1(path, opts = {}) {
     const hdrs = new Headers(opts.headers || {});
-    const tok = getTok();
-    if (tok && !hdrs.has('X-Engine-Token')) hdrs.set('X-Engine-Token', tok);
+    applyAuthHeader(hdrs, getTok());
     const res = await fetch(path, { ...opts, headers: hdrs });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -86,7 +96,9 @@
     return r === 'owner' || r === 'admin' || r === 'qc';
   }
 
-  // ==================== Navigation (Left Rail + Mobile Bottom Bar + Contextual) ====================
+  // ==================== Navigation (Left Rail + Mobile Bottom Bar + Contextual Sheet) ====================
+  const CONTEXTUAL_TABS = new Set(['studio', 'topn', 'campaigns', 'audio', 'autopilot', 'settings']);
+
   function openTab(tab) {
     b1.activeTab = tab;
     document.querySelectorAll('.tab-panel').forEach((p) => {
@@ -95,6 +107,12 @@
     document.querySelectorAll('[data-tab]').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.tab === tab);
     });
+    if ($('btnMobMore')) {
+      $('btnMobMore').classList.toggle('active', CONTEXTUAL_TABS.has(tab));
+    }
+    if ($('b1MobileMenuSheet')) {
+      $('b1MobileMenuSheet').classList.add('hidden');
+    }
     if (tab === 'home') refreshHome();
     if (tab === 'board') refreshBoard();
     if (tab === 'review') refreshReviewEnhancements();
@@ -105,11 +123,22 @@
   window.__kfSwitchTab = openTab;
 
   function wireNavigation() {
-    document.querySelectorAll('.rail-nav-btn, .mob-nav-btn').forEach((btn) => {
+    document.querySelectorAll('.rail-nav-btn, .mob-nav-btn, .b1-mob-menu-item').forEach((btn) => {
       btn.addEventListener('click', () => {
         if (btn.dataset.tab) openTab(btn.dataset.tab);
       });
     });
+    const mobMore = $('btnMobMore');
+    const mobSheet = $('b1MobileMenuSheet');
+    if (mobMore && mobSheet) {
+      mobMore.addEventListener('click', () => mobSheet.classList.toggle('hidden'));
+      mobSheet.addEventListener('click', (e) => {
+        if (e.target === mobSheet) mobSheet.classList.add('hidden');
+      });
+    }
+    if ($('btnCloseMobMenu') && mobSheet) {
+      $('btnCloseMobMenu').addEventListener('click', () => mobSheet.classList.add('hidden'));
+    }
   }
 
   // ==================== B1.1 Persistent Status Strip + Live Cooldown Countdown ====================
@@ -122,9 +151,12 @@
         const rem = Math.ceil((b1.cooldownUntil - now) / 1000);
         pill.className = 'engine-pill cooldown';
         txt.textContent = `Cooldown ${fmtMMSS(rem)}`;
-      } else if (b1.statusRaw && b1.statusRaw.deps) {
+      } else if (b1.statusRaw?.deps?.ready) {
         pill.className = 'engine-pill awake';
         txt.textContent = 'Bangun';
+      } else if (b1.statusRaw && b1.statusRaw.deps) {
+        pill.className = 'engine-pill cooldown';
+        txt.textContent = 'Tools Kurang';
       } else {
         pill.className = 'engine-pill asleep';
         txt.textContent = 'Tidur';
@@ -331,7 +363,7 @@
 
   function renderBoardFilters() {
     const selProj = $('boardFilterProject');
-    if (selProj && selProj.options.length <= 1) {
+    if (selProj) {
       apiB1('/api/projects').then((projs) => {
         selProj.innerHTML = '<option value="all">Semua Project</option>';
         (projs || []).forEach((p) => {
@@ -340,11 +372,11 @@
           opt.textContent = p.title || p.id;
           selProj.appendChild(opt);
         });
-        selProj.value = b1.boardFilter.projectId;
+        selProj.value = Array.from(selProj.options).some((o) => o.value === b1.boardFilter.projectId) ? b1.boardFilter.projectId : 'all';
       }).catch(() => {});
     }
     const selMem = $('boardFilterMember');
-    if (selMem && selMem.options.length <= 1) {
+    if (selMem) {
       apiB1('/api/team/metrics').then((tm) => {
         selMem.innerHTML = '<option value="all">Semua Anggota</option>';
         (tm.members || []).forEach((m) => {
@@ -353,7 +385,7 @@
           opt.textContent = `${m.name} (${m.role})`;
           selMem.appendChild(opt);
         });
-        selMem.value = b1.boardFilter.member;
+        selMem.value = Array.from(selMem.options).some((o) => o.value === b1.boardFilter.member) ? b1.boardFilter.member : 'all';
       }).catch(() => {});
     }
   }
@@ -419,13 +451,55 @@
               <span class="via-tag ${c.createdVia === 'agent' ? 'agent' : ''}">${esc(c.createdVia || 'web')}</span>
               <span class="kanban-age muted">${fmtAge(c.ageHours)}</span>
             </div>
-            <div style="display:flex;gap:4px;">
+            <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;justify-content:flex-end;">
+              <select class="input kanban-move-sel" title="Pindah kolom (ramah ponsel)">
+                <option value="">Pindah...</option>
+                ${(data.columns || []).filter((mc) => mc.id !== col.id).map((mc) => `<option value="${esc(mc.id)}">${esc(mc.label)}</option>`).join('')}
+              </select>
               <button class="btn btn-2xs btn-ghost btn-k-edit" title="Buka di Studio">Edit</button>
               ${c.jobId && col.id === 'review' ? '<button class="btn btn-2xs btn-secondary btn-k-rev">Review</button>' : ''}
               ${c.jobId && (col.id === 'siap_posting' || col.id === 'diposting') ? '<button class="btn btn-2xs btn-secondary btn-k-kit">Kit</button>' : ''}
             </div>
           </div>
         `;
+
+        const moveSel = card.querySelector('.kanban-move-sel');
+        if (moveSel) {
+          moveSel.addEventListener('click', (ev) => ev.stopPropagation());
+          moveSel.addEventListener('change', async (ev) => {
+            ev.stopPropagation();
+            const toCol = ev.target.value;
+            if (!toCol) return;
+            let reason = '';
+            if (col.id === 'review' && toCol === 'kandidat') {
+              reason = window.prompt('Alasan penolakan (wajib):') || '';
+              if (!reason.trim()) {
+                ev.target.value = '';
+                showToast('Penolakan butuh alasan', 'err');
+                return;
+              }
+            }
+            const payload = { toColumn: toCol, reason: reason.trim() };
+            if (c.jobId) payload.jobId = c.jobId;
+            else {
+              payload.candidateId = c.candidateId;
+              payload.projectId = c.projectId;
+            }
+            try {
+              await apiB1('/api/board/move', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+              });
+              showToast(`Kartu dipindah ke ${toCol}`, 'ok');
+              refreshBoard();
+              refreshHome();
+            } catch (err) {
+              showToast(err.message, 'err');
+              ev.target.value = '';
+            }
+          });
+        }
 
         card.querySelector('.btn-k-edit').addEventListener('click', (ev) => {
           ev.stopPropagation();
@@ -523,6 +597,13 @@
     if ($('cntPending')) $('cntPending').textContent = String(jobs.filter((j) => j.status === 'done' && (!j.reviewStatus || j.reviewStatus === 'pending_review')).length);
     if ($('cntApproved')) $('cntApproved').textContent = String(jobs.filter((j) => j.reviewStatus === 'approved').length);
     if ($('cntRejected')) $('cntRejected').textContent = String(jobs.filter((j) => j.reviewStatus === 'rejected').length);
+
+    // Prune stale IDs that are no longer in current pending list
+    const validIds = new Set(list.filter((j) => !(!isOwner() && j.createdById && j.createdById === b1.user?.id)).map((j) => j.id));
+    b1.selectedBatchReview.forEach((id) => {
+      if (!validIds.has(id)) b1.selectedBatchReview.delete(id);
+    });
+    b1.visibleBatchIds = Array.from(validIds);
 
     if ($('b1BatchReviewBar')) {
       $('b1BatchReviewBar').classList.toggle('hidden', !canQC() || filter !== 'pending_review' || list.length === 0);
@@ -688,7 +769,8 @@
     const members = b1.teamMetrics.members || [];
 
     const sel = $('activityMemberFilter');
-    if (sel && sel.options.length <= 1) {
+    if (sel) {
+      const prev = sel.value || 'all';
       sel.innerHTML = '<option value="all">Semua Aktivitas</option>';
       members.forEach((m) => {
         const o = document.createElement('option');
@@ -696,6 +778,7 @@
         o.textContent = m.name;
         sel.appendChild(o);
       });
+      sel.value = Array.from(sel.options).some((o) => o.value === prev) ? prev : 'all';
     }
 
     box.innerHTML = members.map((m) => {
@@ -751,21 +834,45 @@
   }
 
   // ==================== B2.1 + B3.1 Library SOP Checklist, Publish Kit & Jianying Draft ====================
-  async function enhanceLibraryCards() {
+  function closeReviewSheet() {
+    const vid = $('rsVideo');
+    if (vid) {
+      vid.pause();
+      vid.removeAttribute('src');
+      vid.load();
+    }
+    if ($('b1ReviewSheet')) $('b1ReviewSheet').classList.add('hidden');
+    b1.reviewSheetJob = null;
+  }
+
+  function closePublishKitModal() {
+    if ($('b1PublishKitModal')) $('b1PublishKitModal').classList.add('hidden');
+    b1.publishKitJob = null;
+    b1.publishModalJob = null;
+  }
+
+  async function enhanceLibraryCards(jobsOverride) {
     const box = $('jobsList');
     if (!box) return;
     try {
-      const jobs = await apiB1('/api/jobs');
-      const byTitleOrIdx = new Map((jobs || []).map((j) => [j.id, j]));
+      let jobs = Array.isArray(jobsOverride) ? jobsOverride : (window.__kfGetJobs ? window.__kfGetJobs() : null);
+      if (!jobs || jobs.length === 0) {
+        jobs = await apiB1('/api/jobs?limit=100');
+      }
+      const byId = new Map((jobs || []).map((j) => [j.id, j]));
       const cards = box.querySelectorAll('.job-card');
       cards.forEach((card) => {
         if (card.dataset.b2Enhanced) return;
-        const vid = card.querySelector('video.job-video');
-        const dl = card.querySelector('a[href*="/api/jobs/"]');
-        const href = vid?.getAttribute('src') || dl?.getAttribute('href') || '';
-        const m = href.match(/\/api\/jobs\/([^/]+)\/video/);
-        if (!m) return;
-        const job = byTitleOrIdx.get(decodeURIComponent(m[1]));
+        let jid = card.dataset.jobId || '';
+        if (!jid) {
+          const vid = card.querySelector('video.job-video');
+          const dl = card.querySelector('a[href*="/api/jobs/"]');
+          const href = vid?.getAttribute('src') || dl?.getAttribute('href') || '';
+          const m = href.match(/\/api\/jobs\/([^/]+)\/video/);
+          if (m) jid = decodeURIComponent(m[1]);
+        }
+        if (!jid) return;
+        const job = byId.get(jid);
         if (!job) return;
         card.dataset.b2Enhanced = '1';
 
@@ -778,7 +885,7 @@
 
         const sopDiv = document.createElement('div');
         sopDiv.innerHTML = `
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;margin-top:6px;">
             <span class="${ready ? 'sop-ready-pill' : 'sop-notready-pill'}">${ready ? 'SIAP POSTING' : 'CEK SOP'}</span>
             ${job.analytics ? `<span class="analytics-chip">YT ${job.analytics.views} views · ${job.analytics.likes} likes · ${job.analytics.comments} komen</span>` : ''}
           </div>
@@ -804,29 +911,108 @@
 
           actions.appendChild(btnKit);
           actions.appendChild(btnDraft);
+          if (job.coverFrameUrl) {
+            const aCov = document.createElement('a');
+            aCov.className = 'btn btn-xs btn-ghost';
+            aCov.href = job.coverFrameUrl;
+            aCov.download = `${job.id}_cover.jpg`;
+            aCov.textContent = 'Cover JPG';
+            actions.appendChild(aCov);
+          }
         }
+      });
+    } catch {}
+  }
+  window.__kfEnhanceLibraryCards = enhanceLibraryCards;
+
+  function renderPublishKitState(job, kit) {
+    if ($('pkTikTok')) $('pkTikTok').value = kit.tiktok?.caption || '';
+    if ($('pkShortsTitle')) $('pkShortsTitle').value = kit.shorts?.title || '';
+    if ($('pkShortsDesc')) $('pkShortsDesc').value = kit.shorts?.description || '';
+    if ($('pkReels')) $('pkReels').value = kit.reels?.caption || '';
+    if ($('pkChecklist')) {
+      $('pkChecklist').innerHTML = `
+        <span class="${kit.checklist?.readyToPost ? 'sop-ready-pill' : 'sop-notready-pill'}">
+          ${kit.checklist?.readyToPost ? 'SEMUA 4 CEK SOP LOLOS — SIAP POSTING' : 'BELUM LENGKAP: ' + esc((kit.checklist?.missing || []).join(', '))}
+        </span>
+      `;
+    }
+
+    const isApproved = job?.reviewStatus === 'approved';
+    const gate = $('pkApprovalGateBanner');
+    if (gate) {
+      gate.classList.remove('hidden');
+      gate.classList.toggle('approved', isApproved);
+      gate.textContent = isApproved
+        ? `Disetujui QC (${job.reviewedBy || 'Owner'}) — siap publish ke TikTok, YouTube Shorts, atau Instagram Reels.`
+        : 'Klip belum disetujui QC (ReviewStatus != approved). Salin caption manual boleh, tetapi tombol Publish otomatis dikunci sampai disetujui di tab Review.';
+    }
+    ['btnPkPublishTikTok', 'btnPkPublishYT', 'btnPkPublishIG'].forEach((id) => {
+      if ($(id)) $(id).disabled = !isApproved;
+    });
+
+    const covUrl = job?.coverFrameUrl || kit?.reels?.coverUrl || '';
+    const covWrap = $('pkCoverWrap');
+    if (covWrap) {
+      covWrap.classList.toggle('hidden', !covUrl);
+      if (covUrl) {
+        if ($('pkCoverPreview')) $('pkCoverPreview').src = covUrl;
+        if ($('pkCoverDownload')) {
+          $('pkCoverDownload').href = covUrl;
+          $('pkCoverDownload').download = `${job?.id || 'clip'}_cover.jpg`;
+        }
+      }
+    }
+
+    const recBox = $('pkPublishRecords');
+    const recs = job?.publishRecords || [];
+    if (recBox) {
+      recBox.classList.toggle('hidden', recs.length === 0);
+      recBox.innerHTML = recs.map((r) => {
+        const lbl = `${(r.platform || '').toUpperCase()}: ${r.status}${r.accountName ? ' (' + r.accountName + ')' : ''}`;
+        if (r.publishedUrl && /^https?:\/\//i.test(r.publishedUrl)) {
+          return `<a class="pk-record-pill ${esc(r.status)}" href="${esc(r.publishedUrl)}" target="_blank" rel="noopener">${esc(lbl)} ↗</a>`;
+        }
+        return `<span class="pk-record-pill ${esc(r.status)}" title="${esc(r.error || '')}">${esc(lbl)}</span>`;
+      }).join('');
+    }
+  }
+
+  async function populatePublishAccountSelect() {
+    const sel = $('pkAccountSelect');
+    const wrap = $('pkAccountWrap');
+    if (!sel) return;
+    if (!isOwner()) {
+      if (wrap) wrap.classList.add('hidden');
+      return;
+    }
+    if (wrap) wrap.classList.remove('hidden');
+    try {
+      const res = await apiB1('/api/publish/accounts');
+      sel.innerHTML = '<option value="">Default Engine / Otomatis</option>';
+      (res.accounts || []).forEach((a) => {
+        const opt = document.createElement('option');
+        opt.value = a.id;
+        opt.textContent = `[${a.platform}] ${a.name}`;
+        sel.appendChild(opt);
       });
     } catch {}
   }
 
   async function openPublishKitModalById(jobId) {
     try {
-      const res = await apiB1(`/api/jobs/${encodeURIComponent(jobId)}/publish-kit`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}',
-      });
+      const [job, res] = await Promise.all([
+        apiB1(`/api/jobs/${encodeURIComponent(jobId)}`),
+        apiB1(`/api/jobs/${encodeURIComponent(jobId)}/publish-kit`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        }),
+      ]);
       b1.publishKitJob = jobId;
-      const kit = res.publishKit;
-      $('pkTikTok').value = kit.tiktok?.caption || '';
-      $('pkShortsTitle').value = kit.shorts?.title || '';
-      $('pkShortsDesc').value = kit.shorts?.description || '';
-      $('pkReels').value = kit.reels?.caption || '';
-      $('pkChecklist').innerHTML = `
-        <span class="${kit.checklist?.readyToPost ? 'sop-ready-pill' : 'sop-notready-pill'}">
-          ${kit.checklist?.readyToPost ? 'SEMUA 4 CEK SOP LOLOS — SIAP POSTING' : 'BELUM LENGKAP: ' + esc((kit.checklist?.missing || []).join(', '))}
-        </span>
-      `;
+      b1.publishModalJob = job;
+      renderPublishKitState(job, res.publishKit);
+      populatePublishAccountSelect();
       $('b1PublishKitModal').classList.remove('hidden');
     } catch (e) {
       showToast('Gagal membuat Publish Kit: ' + e.message, 'err');
@@ -844,6 +1030,33 @@
     }
   }
 
+  // ==================== Real-Time SSE Bridge from app.js ====================
+  let sseTimer = null;
+  window.__kfOnSSE = (msg) => {
+    if (!msg || !msg.type) return;
+    if (msg.type === 'activity' && msg.payload) {
+      b1.activity.unshift(msg.payload);
+      if (b1.activity.length > 80) b1.activity.length = 80;
+      if (b1.activeTab === 'team') renderActivityFeed();
+      return;
+    }
+    if (msg.type === 'job_update' || msg.type === 'project_update') {
+      if (sseTimer) clearTimeout(sseTimer);
+      sseTimer = setTimeout(() => {
+        if (b1.activeTab === 'home') refreshHome();
+        else if (b1.activeTab === 'board') refreshBoard();
+        else if (b1.activeTab === 'review') refreshReviewEnhancements();
+        else if (b1.activeTab === 'team') refreshTeamAndActivity();
+      }, 500);
+    }
+  };
+  window.addEventListener('kf:unlocked', () => {
+    refreshHome();
+    if (b1.activeTab === 'board') refreshBoard();
+    if (b1.activeTab === 'review') refreshReviewEnhancements();
+    if (b1.activeTab === 'team') refreshTeamAndActivity();
+  });
+
   // ==================== Wire Modal & Filter Events ====================
   function wireEvents() {
     if ($('boardFilterProject')) $('boardFilterProject').addEventListener('change', (e) => { b1.boardFilter.projectId = e.target.value; refreshBoard(); });
@@ -860,8 +1073,13 @@
     if ($('activityMemberFilter')) $('activityMemberFilter').addEventListener('change', refreshTeamAndActivity);
     if ($('btnRefreshActivity')) $('btnRefreshActivity').addEventListener('click', refreshTeamAndActivity);
 
-    // Review Sheet events
-    if ($('btnCloseReviewSheet')) $('btnCloseReviewSheet').addEventListener('click', () => $('b1ReviewSheet').classList.add('hidden'));
+    // Review Sheet events (pause video cleanly + backdrop & Escape close!)
+    if ($('btnCloseReviewSheet')) $('btnCloseReviewSheet').addEventListener('click', closeReviewSheet);
+    if ($('b1ReviewSheet')) {
+      $('b1ReviewSheet').addEventListener('click', (e) => {
+        if (e.target === $('b1ReviewSheet')) closeReviewSheet();
+      });
+    }
     document.querySelectorAll('.reject-chip').forEach((chip) => {
       chip.addEventListener('click', () => {
         document.querySelectorAll('.reject-chip').forEach((c) => c.classList.remove('active'));
@@ -878,7 +1096,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ reviewStatus: 'approved', reviewNote: $('rsNote').value.trim() }),
           });
-          $('b1ReviewSheet').classList.add('hidden');
+          closeReviewSheet();
           showToast('Disetujui -> Siap Posting', 'ok');
           refreshReviewEnhancements();
           refreshHome();
@@ -902,7 +1120,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ jobId: b1.reviewSheetJob.id, toColumn: 'kandidat', reason }),
           });
-          $('b1ReviewSheet').classList.add('hidden');
+          closeReviewSheet();
           showToast('Dikembalikan ke Kandidat dengan alasan', 'info');
           refreshReviewEnhancements();
           refreshHome();
@@ -912,29 +1130,64 @@
       });
     }
 
-    // Batch Review Approve
-    if ($('btnB1BatchApprove')) {
-      $('btnB1BatchApprove').addEventListener('click', async () => {
-        const ids = Array.from(b1.selectedBatchReview);
-        if (ids.length === 0) return;
-        try {
-          const res = await apiB1('/api/jobs/review/batch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ jobIds: ids, reviewStatus: 'approved' }),
-          });
-          b1.selectedBatchReview.clear();
-          showToast(`Batch approve selesai (${(res.updated || []).length} klip disetujui)`, 'ok');
-          refreshReviewEnhancements();
-          refreshHome();
-        } catch (e) {
-          showToast(e.message, 'err');
-        }
+    // Batch Review (Select All / Reset / Approve / Reject with note)
+    if ($('btnB1BatchSelectAll')) {
+      $('btnB1BatchSelectAll').addEventListener('click', () => {
+        (b1.visibleBatchIds || []).forEach((id) => b1.selectedBatchReview.add(id));
+        document.querySelectorAll('#b1ReviewList .b1-rev-chk').forEach((c) => { c.checked = true; });
+        if ($('b1BatchCount')) $('b1BatchCount').textContent = String(b1.selectedBatchReview.size);
       });
     }
+    if ($('btnB1BatchClear')) {
+      $('btnB1BatchClear').addEventListener('click', () => {
+        b1.selectedBatchReview.clear();
+        document.querySelectorAll('#b1ReviewList .b1-rev-chk').forEach((c) => { c.checked = false; });
+        if ($('b1BatchCount')) $('b1BatchCount').textContent = '0';
+      });
+    }
+    async function runBatchReview(status) {
+      const ids = Array.from(b1.selectedBatchReview);
+      if (ids.length === 0) {
+        showToast('Pilih minimal 1 klip dulu', 'err');
+        return;
+      }
+      const note = ($('inpB1BatchNote')?.value || '').trim();
+      if (status === 'rejected' && !note) {
+        showToast('Isi alasan penolakan batch terlebih dahulu', 'err');
+        return;
+      }
+      try {
+        const res = await apiB1('/api/jobs/review/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jobIds: ids, reviewStatus: status, reviewNote: note, rejectReason: status === 'rejected' ? note : '' }),
+        });
+        b1.selectedBatchReview.clear();
+        if ($('inpB1BatchNote')) $('inpB1BatchNote').value = '';
+        showToast(`Batch ${status === 'approved' ? 'approve' : 'reject'} selesai (${(res.updated || []).length} klip)`, status === 'approved' ? 'ok' : 'info');
+        refreshReviewEnhancements();
+        refreshHome();
+      } catch (e) {
+        showToast(e.message, 'err');
+      }
+    }
+    if ($('btnB1BatchApprove')) $('btnB1BatchApprove').addEventListener('click', () => runBatchReview('approved'));
+    if ($('btnB1BatchReject')) $('btnB1BatchReject').addEventListener('click', () => runBatchReview('rejected'));
 
-    // Publish Kit modal copy & close
-    if ($('btnClosePublishKit')) $('btnClosePublishKit').addEventListener('click', () => $('b1PublishKitModal').classList.add('hidden'));
+    // Publish Kit modal: save/validate, analytics sync, copy, TikTok/YT/IG publish & close
+    if ($('btnClosePublishKit')) $('btnClosePublishKit').addEventListener('click', closePublishKitModal);
+    if ($('b1PublishKitModal')) {
+      $('b1PublishKitModal').addEventListener('click', (e) => {
+        if (e.target === $('b1PublishKitModal')) closePublishKitModal();
+      });
+    }
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      if ($('b1ReviewSheet') && !$('b1ReviewSheet').classList.contains('hidden')) closeReviewSheet();
+      if ($('b1PublishKitModal') && !$('b1PublishKitModal').classList.contains('hidden')) closePublishKitModal();
+      if ($('b1MobileMenuSheet') && !$('b1MobileMenuSheet').classList.contains('hidden')) $('b1MobileMenuSheet').classList.add('hidden');
+    });
+
     const copyVal = (id, label) => {
       const txt = $(id)?.value || '';
       if (!txt) return;
@@ -943,6 +1196,58 @@
     if ($('btnCopyPkTikTok')) $('btnCopyPkTikTok').addEventListener('click', () => copyVal('pkTikTok', 'Caption TikTok'));
     if ($('btnCopyPkShorts')) $('btnCopyPkShorts').addEventListener('click', () => copyVal('pkShortsTitle', 'Judul Shorts'));
     if ($('btnCopyPkReels')) $('btnCopyPkReels').addEventListener('click', () => copyVal('pkReels', 'Caption Reels'));
+
+    if ($('btnPkRegenerate')) {
+      $('btnPkRegenerate').addEventListener('click', async () => {
+        if (!b1.publishKitJob) return;
+        try {
+          const res = await apiB1(`/api/jobs/${encodeURIComponent(b1.publishKitJob)}/publish-kit`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              tiktokCaption: $('pkTikTok')?.value || '',
+              shortsTitle: $('pkShortsTitle')?.value || '',
+              shortsDescription: $('pkShortsDesc')?.value || '',
+              reelsCaption: $('pkReels')?.value || '',
+            }),
+          });
+          renderPublishKitState(b1.publishModalJob, res.publishKit);
+          showToast('Caption disimpan & divalidasi SOP!', 'ok');
+        } catch (e) {
+          showToast(e.message, 'err');
+        }
+      });
+    }
+    if ($('btnPkSyncAnalytics')) {
+      $('btnPkSyncAnalytics').addEventListener('click', async () => {
+        if (!b1.publishKitJob) return;
+        try {
+          const res = await apiB1(`/api/jobs/${encodeURIComponent(b1.publishKitJob)}/analytics/sync`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ accountId: $('pkAccountSelect')?.value || '' }),
+          });
+          const a = res.analytics || {};
+          showToast(`YouTube Stats: ${a.views || 0} views · ${a.likes || 0} likes · ${a.comments || 0} komen`, 'ok');
+        } catch (e) {
+          showToast(e.message, 'err');
+        }
+      });
+    }
+
+    function buildPublishCommonPayload() {
+      const p = {
+        accountId: $('pkAccountSelect')?.value || '',
+        privacyStatus: $('pkPrivacyStatus')?.value || 'public',
+      };
+      const sched = ($('pkScheduledAt')?.value || '').trim();
+      if (sched) {
+        const dt = new Date(sched);
+        if (!Number.isNaN(dt.getTime())) p.scheduledAt = dt.toISOString();
+      }
+      return p;
+    }
+
     if ($('btnPkPublishTikTok')) {
       $('btnPkPublishTikTok').addEventListener('click', async () => {
         if (!b1.publishKitJob) return;
@@ -950,7 +1255,7 @@
           await apiB1(`/api/jobs/${encodeURIComponent(b1.publishKitJob)}/publish`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ platform: 'tiktok', caption: $('pkTikTok').value }),
+            body: JSON.stringify({ ...buildPublishCommonPayload(), platform: 'tiktok', caption: $('pkTikTok').value }),
           });
           showToast('Publish TikTok (sau sidecar) dimulai', 'ok');
         } catch (e) {
@@ -965,7 +1270,7 @@
           await apiB1(`/api/jobs/${encodeURIComponent(b1.publishKitJob)}/publish`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ platform: 'youtube', title: $('pkShortsTitle').value, caption: $('pkShortsDesc').value }),
+            body: JSON.stringify({ ...buildPublishCommonPayload(), platform: 'youtube', title: $('pkShortsTitle').value, caption: $('pkShortsDesc').value }),
           });
           showToast('Upload YouTube Shorts dimulai', 'ok');
         } catch (e) {
@@ -973,11 +1278,20 @@
         }
       });
     }
-
-    // Observe Library re-renders from app.js so SOP checklist + Draft/Kit buttons stay attached
-    const jobsBox = $('jobsList');
-    if (jobsBox && window.MutationObserver) {
-      new MutationObserver(() => enhanceLibraryCards()).observe(jobsBox, { childList: true });
+    if ($('btnPkPublishIG')) {
+      $('btnPkPublishIG').addEventListener('click', async () => {
+        if (!b1.publishKitJob) return;
+        try {
+          await apiB1(`/api/jobs/${encodeURIComponent(b1.publishKitJob)}/publish`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...buildPublishCommonPayload(), platform: 'instagram', caption: $('pkReels').value }),
+          });
+          showToast('Upload Instagram Reels dimulai', 'ok');
+        } catch (e) {
+          showToast(e.message, 'err');
+        }
+      });
     }
 
     // Re-filter review queue when filter tabs change

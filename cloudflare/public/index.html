@@ -342,6 +342,8 @@
             </div>
             <div class="proj-actions">
               <button class="btn btn-sm btn-accent" id="btnScanAudioFast" title="Download audio super ringan (<=64kbps) untuk cari momen teriakan/ketawa Windah secara akurat!">🔊 Scan Teriakan Audio (Cepat)</button>
+              <button class="btn btn-sm btn-secondary" id="btnDetectScenes" title="Deteksi pergantian scene &amp; snap titik potong agar tidak tanggung">Snap Scene Cut</button>
+              <button class="btn btn-sm btn-secondary" id="btnDiarizeProj" title="Pisahkan pembicara (Streamer vs NPC/Teman) di tiap kandidat">Diarisasi Speaker</button>
               <button class="btn btn-sm btn-secondary" id="btnToggleTuning">🎚️ Tuning Deteksi</button>
               <button class="btn btn-sm btn-secondary" id="btnDownloadFullProj">⬇️ Download Full MP4</button>
             </div>
@@ -469,6 +471,7 @@
               <div class="layout-controls-grid">
                 <label>Mode Layout
                   <select id="selCropMode" class="input input-sm">
+                    <option value="facecam_auto">Auto Facecam Split (Deteksi Webcam)</option>
                     <option value="facecam_top_neon">🌴 Facecam Atas + Dark Vice Neon Bar (Signature ATM — Best!)</option>
                     <option value="facecam_top_float">⚡ Facecam Atas + Floating Viral Title (Tanpa Pita, Full-Bleed!)</option>
                     <option value="facecam_top_clean">🏆 Facecam Atas Bersih (Minimalis / Ideal Top-5)</option>
@@ -505,8 +508,9 @@
                 <div class="crop-source-col">
                   <div class="mini-label">
                     <span>Sumber 16:9 — Drag kotak:</span>
-                    <button class="btn btn-2xs btn-blue active" id="btnEditGameplay">🟦 Gameplay</button>
-                    <button class="btn btn-2xs btn-green" id="btnEditFacecam">🟩 Facecam</button>
+                    <button class="btn btn-2xs btn-blue active" id="btnEditGameplay" type="button">🟦 Gameplay</button>
+                    <button class="btn btn-2xs btn-green" id="btnEditFacecam" type="button">🟩 Facecam</button>
+                    <button class="btn btn-2xs btn-secondary" id="btnDetectFacecam" type="button" title="Deteksi posisi kotak webcam otomatis dari video">Auto Facecam</button>
                   </div>
                   <canvas id="cropSourceCanvas" width="480" height="270"></canvas>
                 </div>
@@ -539,6 +543,22 @@
                 <label class="check-box">
                   <input type="checkbox" id="chkUseOutro" checked />
                   <span>Pasang Outro 4s (Akhir)</span>
+                </label>
+                <label class="check-box">
+                  <input type="checkbox" id="chkSceneSnap" />
+                  <span>Snap Scene Cut</span>
+                </label>
+                <label class="check-box">
+                  <input type="checkbox" id="chkSilenceTrim" />
+                  <span>Trim Jeda Hening</span>
+                </label>
+                <label class="check-box">
+                  <input type="checkbox" id="chkPickCover" checked />
+                  <span>Auto Cover Frame Terbaik</span>
+                </label>
+                <label class="check-box">
+                  <input type="checkbox" id="chkVocalEnhance" />
+                  <span>Vocal Enhance (Denoise)</span>
                 </label>
               </div>
 
@@ -604,6 +624,7 @@
               <div class="layout-controls-grid">
                 <label>Preset Auto-SFX
                   <select id="selSFXPreset" class="input input-sm">
+                    <option value="auto_by_moment">Auto Sesuai Momen (Crash/Fail/Hype/Meme/Twist/Victory)</option>
                     <option value="none">Tanpa SFX</option>
                     <option value="meme_punch" selected>Meme Punch (Whoosh + Bass Boom di Peak + Ding)</option>
                     <option value="hype_epic">Hype Epic (Tension Riser + Jedag-Jedug Bass di Peak)</option>
@@ -714,6 +735,7 @@
             </label>
             <label>Layout Kompilasi
               <select id="topNLayout" class="input">
+                <option value="facecam_auto">Auto Facecam Split (Deteksi Webcam)</option>
                 <option value="facecam_top_neon">🌴 Facecam Atas + Dark Vice Neon Bar (Signature ATM — Best!)</option>
                 <option value="facecam_top_float">⚡ Facecam Atas + Garis Cyan Neon (Tanpa Pita!)</option>
                 <option value="facecam_top_clean">🏆 Facecam Atas Bersih (Minimalis)</option>
@@ -740,6 +762,10 @@
             <label class="check-box"><input type="checkbox" id="topNOutro" checked /><span>Pasang Outro 4s Bersih di Akhir</span></label>
             <label class="check-box"><input type="checkbox" id="topNAudioNorm" checked /><span>Audio Loudnorm (-14 LUFS)</span></label>
             <label class="check-box"><input type="checkbox" id="topNVivid" checked /><span>Vivid Gaming Color</span></label>
+            <label class="check-box"><input type="checkbox" id="topNSceneSnap" /><span>Snap Scene Cut</span></label>
+            <label class="check-box"><input type="checkbox" id="topNSilenceTrim" /><span>Trim Jeda Hening</span></label>
+            <label class="check-box"><input type="checkbox" id="topNPickCover" checked /><span>Auto Cover Frame Terbaik</span></label>
+            <label class="check-box"><input type="checkbox" id="topNVocalEnhance" /><span>Vocal Enhance (Denoise)</span></label>
           </div>
 
           <div class="topn-summary-bar mt-16">
@@ -847,14 +873,22 @@
             <select id="reviewMemberFilter" class="input input-sm" style="width:auto;min-width:135px;" title="Filter klip berdasarkan anggota pembuat">
               <option value="all">Semua Anggota</option>
             </select>
-            <button class="btn btn-xs btn-secondary review-filter active" data-rfilter="pending_review">Menunggu (<span id="cntPending">0</span>)</button>
+            <button class="btn btn-xs btn-ghost review-filter active" data-rfilter="pending_review">Menunggu (<span id="cntPending">0</span>)</button>
             <button class="btn btn-xs btn-ghost review-filter" data-rfilter="approved">Disetujui (<span id="cntApproved">0</span>)</button>
             <button class="btn btn-xs btn-ghost review-filter" data-rfilter="rejected">Ditolak (<span id="cntRejected">0</span>)</button>
           </div>
         </div>
         <div id="b1BatchReviewBar" class="review-batch-bar hidden">
-          <span class="text-xs">Mode Batch QC · <strong id="b1BatchCount">0</strong> klip dipilih</span>
-          <button class="btn btn-xs btn-primary" id="btnB1BatchApprove">Setujui Terpilih</button>
+          <div class="review-batch-left">
+            <span class="text-xs">Mode Batch QC · <strong id="b1BatchCount">0</strong> klip dipilih</span>
+            <button class="btn btn-2xs btn-secondary" id="btnB1BatchSelectAll" type="button">Pilih Semua</button>
+            <button class="btn btn-2xs btn-ghost" id="btnB1BatchClear" type="button">Reset</button>
+          </div>
+          <div class="review-batch-right">
+            <input type="text" id="inpB1BatchNote" class="input input-sm" placeholder="Catatan QC / alasan penolakan batch..." />
+            <button class="btn btn-xs btn-danger-solid" id="btnB1BatchReject" type="button">Tolak Terpilih</button>
+            <button class="btn btn-xs btn-primary" id="btnB1BatchApprove" type="button">Setujui Terpilih</button>
+          </div>
         </div>
         <div id="b1ReviewList" class="jobs-grid"></div>
         <div id="reviewInboxList" class="hidden"></div>
@@ -1111,7 +1145,7 @@
           </div>
         </div>
         <div class="lib-filters mt-8" style="margin-bottom:12px;align-items:center;">
-          <button class="btn btn-xs btn-secondary lib-filter active" data-lfilter="all">Semua</button>
+          <button class="btn btn-xs btn-ghost lib-filter active" data-lfilter="all">Semua</button>
           <button class="btn btn-xs btn-ghost lib-filter" data-lfilter="active">⚡ Berjalan</button>
           <button class="btn btn-xs btn-ghost lib-filter" data-lfilter="done">✅ Selesai</button>
           <button class="btn btn-xs btn-ghost lib-filter" data-lfilter="approved">🏆 Approved</button>
@@ -1171,7 +1205,7 @@
             Via <code>klip.breakthematrix.id</code> token sudah otomatis disuntik Cloudflare Worker. Jika kamu membuka lewat <code>127.0.0.1:8787</code> atau URL tunnel langsung, masukkan isi file <code>.engine-token</code> sekali di sini (tersimpan aman di browser).
           </p>
           <div class="input-with-btn">
-            <input type="password" id="sEngineToken" class="input input-sm" placeholder="Tempel isi file .engine-token (48 karakter)..." autocomplete="off" />
+            <input type="password" id="sEngineToken" class="input input-sm" placeholder="Tempel .engine-token, Access Key (kf_usr_...), atau Agent Key (kf_agt_...)..." autocomplete="off" />
             <button class="btn btn-xs btn-primary" id="btnSaveEngineToken">💾 Simpan</button>
             <button class="btn btn-xs btn-accent" id="btnTestEngineToken">🔌 Test Koneksi</button>
             <button class="btn btn-xs btn-ghost" id="btnClearEngineToken" title="Hapus token tersimpan di browser">✕</button>
@@ -1226,12 +1260,23 @@
           <label class="mt-12">Output Folder
             <input type="text" id="sOutputDir" class="input" />
           </label>
-          <label class="mt-12">Path File cookies.txt (Opsional — <strong>WAJIB direkomendasikan di VPS Linux</strong> agar yt-dlp bebas bot-check YouTube!)
+          <div class="form-grid-2 mt-12">
+            <label>Sidecar TikTok Uploader Path (sau — Opsional)
+              <input type="text" id="sSauPath" class="input input-sm" placeholder="/opt/social-auto-upload atau E:\sau" />
+            </label>
+            <label>Sherpa-ONNX Sidecar URL (Diarisasi — Opsional)
+              <input type="text" id="sSherpaUrl" class="input input-sm" placeholder="http://127.0.0.1:8791" />
+            </label>
+          </div>
+          <label class="mt-12">PySceneDetect Binary Path (Opsional — fallback otomatis ke FFmpeg scdet)
+            <input type="text" id="sSceneDetectBin" class="input input-sm" placeholder="scenedetect" />
+          </label>
+          <label class="mt-12">Path File Cookies YouTube (Opsional — <strong>WAJIB direkomendasikan di VPS Linux</strong> agar yt-dlp bebas bot-check YouTube!)
             <div class="input-with-btn">
               <input type="text" id="sCookiesFile" class="input" placeholder="E:\klipforge\cookies.txt atau /app/data/cookies.txt" />
               <label class="btn btn-xs btn-secondary" style="cursor:pointer;white-space:nowrap;">
-                ⬆️ Upload cookies.txt
-                <input type="file" id="fileUploadCookies" accept=".txt,text/plain" class="hidden" />
+                ⬆️ Upload cookies (.txt/.json)
+                <input type="file" id="fileUploadCookies" accept=".txt,.json,text/plain,application/json" class="hidden" />
               </label>
             </div>
           </label>
@@ -1244,13 +1289,96 @@
           </div>
         </section>
 
-        <section class="card">
-          <div class="card-head">
-            <h3>📡 Live Go Engine Console</h3>
-            <button class="btn btn-xs btn-ghost" id="btnClearLogs">Clear</button>
-          </div>
-          <div id="liveConsole" class="live-console"></div>
-        </section>
+        <div style="display:flex;flex-direction:column;gap:14px;">
+          <!-- Cookie Health Keep-Alive Card -->
+          <section class="card" id="cookieHealthCard" style="margin-bottom:0;">
+            <div class="card-head">
+              <div>
+                <h3>YouTube Cookie Health &amp; Keep-Alive</h3>
+                <div class="muted text-xs">Status sesi YouTube di server untuk mencegah bot-check yt-dlp.</div>
+              </div>
+              <span class="engine-pill" id="chStateBadge"><i class="dot"></i><span>Memeriksa</span></span>
+            </div>
+            <div class="cookie-health-grid mt-8">
+              <div class="tim-metric-box"><div class="lbl">Jumlah Cookie</div><div class="val" id="chCookieCount">0</div></div>
+              <div class="tim-metric-box"><div class="lbl">Interval Keep-Alive</div><div class="val" id="chIntervalMin">—</div></div>
+              <div class="tim-metric-box"><div class="lbl">Segar Terakhir</div><div class="val text-xs" id="chLastRefreshed">—</div></div>
+              <div class="tim-metric-box"><div class="lbl">Cek Berikutnya</div><div class="val text-xs" id="chNextCheck">—</div></div>
+            </div>
+            <div class="text-xs muted mt-8" id="chMessage">Memuat status cookie...</div>
+            <div class="head-actions mt-12">
+              <button class="btn btn-xs btn-primary" id="btnRefreshCookiesNow" type="button">Cek &amp; Segarkan Cookie Sekarang</button>
+            </div>
+          </section>
+
+          <!-- Owner-Only Publish Accounts Card -->
+          <section class="card" id="publishAccountsCard" style="margin-bottom:0;">
+            <div class="card-head">
+              <div>
+                <h3>Akun Publish Multi-Platform (Owner)</h3>
+                <div class="muted text-xs">Kelola kredensial YouTube Shorts, Instagram Reels, dan TikTok (sau sidecar).</div>
+              </div>
+            </div>
+            <div class="form-grid-2 mt-8">
+              <label class="text-xs">Platform
+                <select id="paPlatform" class="input input-sm">
+                  <option value="youtube">YouTube Shorts (OAuth2)</option>
+                  <option value="instagram">Instagram Reels (Graph API)</option>
+                  <option value="tiktok_sau">TikTok (sau Sidecar)</option>
+                </select>
+              </label>
+              <label class="text-xs">Nama Label Akun
+                <input type="text" id="paName" class="input input-sm" placeholder="cth: Channel Klip Utama" />
+              </label>
+            </div>
+
+            <div id="paFieldsYoutube" class="form-grid-2 mt-8">
+              <label class="text-xs">Judul Channel (Opsional)
+                <input type="text" id="paChannelTitle" class="input input-sm" placeholder="cth: MotionKlip Gaming" />
+              </label>
+              <label class="text-xs">Google OAuth Client ID
+                <input type="text" id="paClientId" class="input input-sm" placeholder="...apps.googleusercontent.com" autocomplete="off" />
+              </label>
+              <label class="text-xs">Google OAuth Client Secret
+                <input type="password" id="paClientSecret" class="input input-sm" placeholder="GOCSPX-..." autocomplete="off" />
+              </label>
+              <label class="text-xs">OAuth Refresh Token
+                <input type="password" id="paRefreshToken" class="input input-sm" placeholder="1//0g..." autocomplete="off" />
+              </label>
+            </div>
+
+            <div id="paFieldsInstagram" class="form-grid-2 mt-8 hidden">
+              <label class="text-xs">Instagram Business User ID
+                <input type="text" id="paIgUserId" class="input input-sm" placeholder="178414..." autocomplete="off" />
+              </label>
+              <label class="text-xs">Facebook Page ID (Opsional)
+                <input type="text" id="paPageId" class="input input-sm" placeholder="102938..." autocomplete="off" />
+              </label>
+              <label class="text-xs" style="grid-column:1/-1;">Long-Lived Access Token
+                <input type="password" id="paAccessToken" class="input input-sm" placeholder="EAAG..." autocomplete="off" />
+              </label>
+            </div>
+
+            <div id="paFieldsTiktokSau" class="mt-8 hidden">
+              <label class="text-xs">Nama Profil Cookie di sau Sidecar
+                <input type="text" id="paSauAccount" class="input input-sm" placeholder="cth: tiktok_windah_01" autocomplete="off" />
+              </label>
+            </div>
+
+            <div class="head-actions mt-12">
+              <button class="btn btn-xs btn-primary" id="btnAddPublishAccount" type="button">Simpan Akun Publish</button>
+            </div>
+            <div id="publishAccountsList" class="publish-accounts-list mt-12"></div>
+          </section>
+
+          <section class="card" style="margin-bottom:0;">
+            <div class="card-head">
+              <h3>📡 Live Go Engine Console</h3>
+              <button class="btn btn-xs btn-ghost" id="btnClearLogs">Clear</button>
+            </div>
+            <div id="liveConsole" class="live-console"></div>
+          </section>
+        </div>
       </div>
     </main>
     </div><!-- /.main-viewport -->
@@ -1278,8 +1406,48 @@
         <svg viewBox="0 0 24 24"><circle cx="9" cy="7" r="3"/><path d="M3 20v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/><circle cx="17" cy="8" r="2.5"/><path d="M17 13a4 4 0 0 1 4 4v3"/></svg>
         <span>Tim</span>
       </button>
+      <button class="mob-nav-btn" id="btnMobMore" type="button" aria-label="Menu Kontekstual">
+        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        <span>Menu</span>
+      </button>
     </nav>
   </div><!-- /.app-shell -->
+
+  <!-- Mobile Contextual Menu Bottom Sheet -->
+  <div id="b1MobileMenuSheet" class="b1-sheet-backdrop hidden">
+    <div class="b1-sheet-card b1-mob-menu-card">
+      <div class="card-head" style="margin-bottom:10px;">
+        <h3>Menu Studio &amp; Pengaturan</h3>
+        <button class="btn btn-xs btn-ghost" id="btnCloseMobMenu" type="button">Tutup</button>
+      </div>
+      <div class="b1-mob-menu-grid">
+        <button class="b1-mob-menu-item" data-tab="studio" type="button">
+          <strong>Studio Klip</strong>
+          <span class="muted text-xs">Scan VOD, Crop 9:16 &amp; Render</span>
+        </button>
+        <button class="b1-mob-menu-item" data-tab="topn" type="button">
+          <strong>Top-N Builder</strong>
+          <span class="muted text-xs">Kompilasi Countdown &amp; Montage</span>
+        </button>
+        <button class="b1-mob-menu-item" data-tab="campaigns" type="button">
+          <strong>Campaign &amp; Rules</strong>
+          <span class="muted text-xs">Watermark, Outro &amp; Hashtag</span>
+        </button>
+        <button class="b1-mob-menu-item" data-tab="audio" type="button">
+          <strong>Audio &amp; Radar</strong>
+          <span class="muted text-xs">SFX, BGM &amp; Sound Trend</span>
+        </button>
+        <button class="b1-mob-menu-item" data-tab="autopilot" type="button">
+          <strong>Autopilot</strong>
+          <span class="muted text-xs">Jadwal Pantau Channel Otomatis</span>
+        </button>
+        <button class="b1-mob-menu-item" data-tab="settings" type="button">
+          <strong>Pengaturan Engine</strong>
+          <span class="muted text-xs">Tim, Cookie YT, Akun Publish &amp; Disk</span>
+        </button>
+      </div>
+    </div>
+  </div>
 
   <!-- ==================== POST-CLIP MANUAL EDITOR MODAL (Trim + +SFX + Drag-Drop Watermark + Safe-Zone) ==================== -->
   <div id="postEditModal" class="modal-backdrop hidden">
@@ -1467,6 +1635,16 @@
               <label class="check-inline text-xs"><input type="checkbox" id="peBgmDuck" checked /> Duck</label>
             </div>
             <div class="text-xs muted mt-4">Kolom kanan: Vol (%) · Fade-In (dtk) · Fade-Out (dtk) · Auto-Duck</div>
+            <div class="edit-options-grid mt-8">
+              <label class="check-box">
+                <input type="checkbox" id="peVocalEnhance" />
+                <span>Vocal Enhance (Denoise)</span>
+              </label>
+              <label class="check-box">
+                <input type="checkbox" id="peAudioNorm" />
+                <span>Audio Loudnorm (-14 LUFS)</span>
+              </label>
+            </div>
           </div>
 
           <div class="pe-footer mt-16">
@@ -1517,15 +1695,46 @@
     <div class="b1-sheet-card">
       <div class="card-head">
         <h3>Publish Kit (TikTok · Shorts · Reels)</h3>
-        <button class="btn btn-xs btn-ghost" id="btnClosePublishKit">Tutup</button>
+        <button class="btn btn-xs btn-ghost" id="btnClosePublishKit" type="button">Tutup</button>
       </div>
+      <div id="pkApprovalGateBanner" class="pk-gate-banner hidden"></div>
       <div id="pkChecklist" style="margin-bottom:10px;"></div>
+      <div id="pkCoverWrap" class="pk-cover-wrap hidden">
+        <img id="pkCoverPreview" src="" alt="Cover Frame" />
+        <div>
+          <div class="text-xs" style="font-weight:600;">Cover Frame Terbaik</div>
+          <div class="text-xs muted" style="margin-bottom:6px;">Thumbnail tajam otomatis dari klip ini.</div>
+          <a id="pkCoverDownload" class="btn btn-xs btn-secondary" href="#" download>Unduh Cover</a>
+        </div>
+      </div>
+      <div id="pkPublishRecords" class="pk-records-row hidden"></div>
+      <div class="pk-options-grid mt-8">
+        <label class="text-xs" id="pkAccountWrap">Akun Publish
+          <select id="pkAccountSelect" class="input input-sm">
+            <option value="">Default Engine / Otomatis</option>
+          </select>
+        </label>
+        <label class="text-xs">Privasi (YouTube / Platform)
+          <select id="pkPrivacyStatus" class="input input-sm">
+            <option value="public">Public</option>
+            <option value="unlisted">Unlisted</option>
+            <option value="private">Private</option>
+          </select>
+        </label>
+        <label class="text-xs">Jadwal Tayang (Opsional)
+          <input type="datetime-local" id="pkScheduledAt" class="input input-sm" />
+        </label>
+      </div>
+      <div class="head-actions mt-8" style="justify-content:space-between;flex-wrap:wrap;">
+        <button class="btn btn-xs btn-secondary" id="btnPkRegenerate" type="button">Simpan &amp; Validasi Caption</button>
+        <button class="btn btn-xs btn-secondary" id="btnPkSyncAnalytics" type="button">Sync YouTube Stats</button>
+      </div>
       <label class="mt-8">TikTok Caption &amp; Hashtags
         <textarea id="pkTikTok" class="input textarea" rows="3"></textarea>
       </label>
       <div class="head-actions mt-4">
-        <button class="btn btn-xs btn-secondary" id="btnCopyPkTikTok">Salin TikTok</button>
-        <button class="btn btn-xs btn-primary" id="btnPkPublishTikTok">Publish TikTok (sau)</button>
+        <button class="btn btn-xs btn-secondary" id="btnCopyPkTikTok" type="button">Salin TikTok</button>
+        <button class="btn btn-xs btn-primary" id="btnPkPublishTikTok" type="button">Publish TikTok (sau)</button>
       </div>
       <label class="mt-12">YouTube Shorts Title (&le;100 karakter)
         <input type="text" id="pkShortsTitle" class="input input-sm" maxlength="100" />
@@ -1534,14 +1743,15 @@
         <textarea id="pkShortsDesc" class="input textarea" rows="2"></textarea>
       </label>
       <div class="head-actions mt-4">
-        <button class="btn btn-xs btn-secondary" id="btnCopyPkShorts">Salin Shorts</button>
-        <button class="btn btn-xs btn-primary" id="btnPkPublishYT">Publish YouTube Shorts</button>
+        <button class="btn btn-xs btn-secondary" id="btnCopyPkShorts" type="button">Salin Shorts</button>
+        <button class="btn btn-xs btn-primary" id="btnPkPublishYT" type="button">Publish YouTube Shorts</button>
       </div>
       <label class="mt-12">Instagram Reels Caption
         <textarea id="pkReels" class="input textarea" rows="3"></textarea>
       </label>
       <div class="head-actions mt-4">
-        <button class="btn btn-xs btn-secondary" id="btnCopyPkReels">Salin Reels</button>
+        <button class="btn btn-xs btn-secondary" id="btnCopyPkReels" type="button">Salin Reels</button>
+        <button class="btn btn-xs btn-primary" id="btnPkPublishIG" type="button">Publish Instagram Reels</button>
       </div>
     </div>
   </div>
