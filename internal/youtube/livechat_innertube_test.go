@@ -66,7 +66,9 @@ func TestFetchLiveChatReplayFast_ParallelSeekingAndParse(t *testing.T) {
 				},
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(resp)
+			// Emit pretty-printed multi-line JSON (matching real YouTube Innertube responses!) to verify json.Compact NDJSON!
+			pretty, _ := json.MarshalIndent(resp, "", "  ")
+			_, _ = w.Write(pretty)
 			return
 		}
 		http.NotFound(w, r)

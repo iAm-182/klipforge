@@ -317,13 +317,21 @@ func FetchLiveChatReplayFast(
 	}
 	bw := bufio.NewWriterSize(f, 256*1024)
 	seen := make(map[string]struct{}, len(collected))
+	var compactBuf bytes.Buffer
 	written := 0
 	for _, item := range collected {
-		compact := bytes.TrimSpace(item.raw)
+		compactBuf.Reset()
+		if err := json.Compact(&compactBuf, item.raw); err != nil {
+			continue
+		}
+		compact := compactBuf.Bytes()
 		if len(compact) == 0 {
 			continue
 		}
-		key := fmt.Sprintf("%d:%d:%s", item.offsetMs, len(compact), string(compact[:minInt(96, len(compact))]))
+		// Deduplicate by offsetMs + payload length + suffix/prefix slice (YouTube's pretty JSON starts identically!)
+		mid := len(compact) / 2
+		midEnd := minInt(len(compact), mid+64)
+		key := fmt.Sprintf("%d:%d:%s:%s", item.offsetMs, len(compact), string(compact[:minInt(64, len(compact))]), string(compact[mid:midEnd]))
 		if _, dup := seen[key]; dup {
 			continue
 		}
