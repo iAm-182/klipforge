@@ -45,6 +45,13 @@
     previewImg: null,
     wmImg: null,
     currentSeekSec: 0,
+    transcriptBrowser: {
+      projectId: '',
+      offset: 0,
+      limit: 60,
+      total: 0,
+      loaded: false,
+    },
   };
 
   const $ = (id) => document.getElementById(id);
@@ -709,8 +716,20 @@
     // Load preview frame image into Cropper Canvas
     loadPreviewFrame(`/api/projects/${encodeURIComponent(p.id)}/preview-frame?t=${Date.now()}`);
 
+    // Reset transcript browser state if switching to a different project
+    if (state.transcriptBrowser.projectId !== p.id) {
+      state.transcriptBrowser = { projectId: p.id, offset: 0, limit: 60, total: 0, loaded: false };
+      if ($('transBrowserList')) $('transBrowserList').innerHTML = '';
+      if ($('transBrowserStatus')) $('transBrowserStatus').textContent = 'Klik "Muat Transkrip" untuk membaca baris dialog kronologis.';
+      if ($('btnTransPrevPage')) $('btnTransPrevPage').disabled = true;
+      if ($('btnTransNextPage')) $('btnTransNextPage').disabled = true;
+    }
+
     // Setup video player
     setupPlayer(p, p.candidates?.[0]?.startSec || 0, false);
+
+    // Keep human-friendly cutter UI synced with backing seconds
+    syncManualRangeUI();
 
     // Draw chart & candidates
     drawHypeChart();
@@ -727,9 +746,199 @@
     img.src = url;
   }
 
+  function fmtTC(sec) {
+    if (window.KFCutter && typeof window.KFCutter.formatTimecode === 'function') {
+      return window.KFCutter.formatTimecode(sec);
+    }
+    return fmtTime(sec);
+  }
+
+  function updateManualRangeBadge(startSec, endSec) {
+    const badge = $('manualDurBadge');
+    if (!badge) return;
+    if (window.KFCutter && typeof window.KFCutter.formatRangeSummary === 'function') {
+      const summary = window.KFCutter.formatRangeSummary(startSec, endSec);
+      if (!summary.valid) {
+        badge.textContent = `⚠️ ${summary.warning || 'End harus lebih besar dari Start'}`;
+        badge.classList.add('err');
+        badge.classList.remove('warn');
+      } else if (summary.warning) {
+        badge.textContent = `${summary.label} · ⚠️ ${summary.warning}`;
+        badge.classList.add('warn');
+        badge.classList.remove('err');
+      } else {
+        badge.textContent = summary.label;
+        badge.classList.remove('warn', 'err');
+      }
+      return;
+    }
+    const dur = Math.max(0, Math.round((Number(endSec) || 0) - (Number(startSec) || 0)));
+    badge.textContent = `Durasi: ${dur} dtk (${fmtTC(startSec)} → ${fmtTC(endSec)})`;
+  }
+
+  function setManualRangeSec(startSec, endSec) {
+    const maxDur = Number(state.activeProject?.durationSec) || 0;
+    let s = Number(startSec);
+    let e = Number(endSec);
+    if (!Number.isFinite(s) || s < 0) s = 0;
+    if (!Number.isFinite(e) || e < 0) e = 0;
+    if (maxDur > 0) {
+      s = Math.min(s, maxDur);
+      e = Math.min(e, maxDur);
+    }
+    s = Math.round(s * 1000) / 1000;
+    e = Math.round(e * 1000) / 1000;
+
+    if ($('manualStart')) $('manualStart').value = String(s);
+    if ($('manualEnd')) $('manualEnd').value = String(e);
+    if ($('manualStartTC')) {
+      $('manualStartTC').value = fmtTC(s);
+      $('manualStartTC').classList.remove('tc-invalid');
+    }
+    if ($('manualEndTC')) {
+      $('manualEndTC').value = fmtTC(e);
+      $('manualEndTC').classList.remove('tc-invalid');
+    }
+    updateManualRangeBadge(s, e);
+    return { startSec: s, endSec: e };
+  }
+
+  function getManualRangeSec() {
+    let s = parseFloat($('manualStart')?.value);
+    let e = parseFloat($('manualEnd')?.value);
+    if (window.KFCutter && typeof window.KFCutter.parseTimecode === 'function') {
+      if ($('manualStartTC')) {
+        const ps = window.KFCutter.parseTimecode($('manualStartTC').value);
+        if (ps !== null) s = ps;
+      }
+      if ($('manualEndTC')) {
+        const pe = window.KFCutter.parseTimecode($('manualEndTC').value);
+        if (pe !== null) e = pe;
+      }
+    }
+    if (!Number.isFinite(s) || s < 0) s = 0;
+    if (!Number.isFinite(e) || e < 0) e = 0;
+    const summary = window.KFCutter && typeof window.KFCutter.formatRangeSummary === 'function'
+      ? window.KFCutter.formatRangeSummary(s, e)
+      : { valid: e > s, durationSec: Math.max(0, e - s), label: '', warning: e > s ? '' : 'End harus lebih besar dari Start' };
+    return { startSec: s, endSec: e, valid: summary.valid, summary };
+  }
+
+  function syncManualRangeUI() {
+    const s = parseFloat($('manualStart')?.value);
+    const e = parseFloat($('manualEnd')?.value);
+    setManualRangeSec(Number.isFinite(s) ? s : 30, Number.isFinite(e) ? e : 75);
+  }
+
+  function commitManualTimecodeInput(which) {
+    const inp = which === 'start' ? $('manualStartTC') : $('manualEndTC');
+    if (!inp) return false;
+    const parsed = window.KFCutter && typeof window.KFCutter.parseTimecode === 'function'
+      ? window.KFCutter.parseTimecode(inp.value)
+      : parseFloat(inp.value);
+    if (parsed === null || !Number.isFinite(parsed) || parsed < 0) {
+      inp.classList.add('tc-invalid');
+      toast('Format waktu tidak valid. Contoh: 00:30, 1:28:38, atau 90.', 'err');
+      return false;
+    }
+    const maxDur = Number(state.activeProject?.durationSec) || 0;
+    const clamped = maxDur > 0 ? Math.min(parsed, maxDur) : parsed;
+    inp.classList.remove('tc-invalid');
+    const curStart = parseFloat($('manualStart')?.value) || 0;
+    const curEnd = parseFloat($('manualEnd')?.value) || 0;
+    const nextStart = which === 'start' ? clamped : curStart;
+    const nextEnd = which === 'end' ? clamped : curEnd;
+    setManualRangeSec(nextStart, nextEnd);
+    return true;
+  }
+
+  function getCurrentPlayerSec() {
+    const localVid = $('localVideo');
+    if (localVid && !localVid.classList.contains('hidden') && Number.isFinite(localVid.currentTime)) {
+      return Math.max(0, Math.round(localVid.currentTime));
+    }
+    return Math.max(0, Math.round(state.currentSeekSec || 0));
+  }
+
+  function markInAtPlayer() {
+    if (!state.activeProject) return;
+    const t = getCurrentPlayerSec();
+    const cur = getManualRangeSec();
+    const maxDur = Number(state.activeProject?.durationSec) || 0;
+    let endSec = cur.endSec;
+    if (!Number.isFinite(endSec) || endSec <= t) {
+      endSec = maxDur > 0 ? Math.min(maxDur, t + 30) : (t + 30);
+      if (endSec <= t) endSec = t + 1;
+    }
+    setManualRangeSec(t, endSec);
+    toast(`⏮ Start diset ke ${fmtTC(t)}`, 'info');
+  }
+
+  function markOutAtPlayer() {
+    if (!state.activeProject) return;
+    const t = getCurrentPlayerSec();
+    const cur = getManualRangeSec();
+    const endSec = Math.max(1, t);
+    let startSec = cur.startSec;
+    if (!Number.isFinite(startSec) || startSec >= endSec) {
+      startSec = Math.max(0, endSec - 20);
+    }
+    setManualRangeSec(startSec, endSec);
+    toast(`⏭ End diset ke ${fmtTC(endSec)}`, 'info');
+  }
+
+  function bindPlayerPlayheadListeners() {
+    const localVid = $('localVideo');
+    if (localVid && !localVid.dataset.kfTimeBound) {
+      localVid.dataset.kfTimeBound = '1';
+      localVid.addEventListener('timeupdate', () => {
+        if (!localVid.classList.contains('hidden') && Number.isFinite(localVid.currentTime)) {
+          state.currentSeekSec = localVid.currentTime;
+          if ($('previewTimeBadge')) $('previewTimeBadge').textContent = fmtTC(localVid.currentTime);
+        }
+      });
+    }
+    const iframe = $('ytIframe');
+    if (iframe && !iframe.dataset.kfYtBound) {
+      iframe.dataset.kfYtBound = '1';
+      const sendYtListening = () => {
+        try {
+          if (iframe.contentWindow && iframe.src && iframe.src.includes('youtube.com/embed/')) {
+            iframe.contentWindow.postMessage(JSON.stringify({ event: 'listening', id: 1, channel: 'widget' }), '*');
+          }
+        } catch {}
+      };
+      iframe.addEventListener('load', () => {
+        sendYtListening();
+        setTimeout(sendYtListening, 700);
+      });
+    }
+    if (!window.__kfYtMsgBound) {
+      window.__kfYtMsgBound = true;
+      window.addEventListener('message', (ev) => {
+        if (!ev.origin) return;
+        let host = '';
+        try { host = new URL(ev.origin).hostname; } catch { return; }
+        if (!/(^|\.)youtube(-nocookie)?\.com$/i.test(host)) return;
+        let msg = ev.data;
+        if (typeof msg === 'string') {
+          try { msg = JSON.parse(msg); } catch { return; }
+        }
+        if (!msg || typeof msg !== 'object') return;
+        if (msg.event === 'infoDelivery' && msg.info && typeof msg.info.currentTime === 'number' && Number.isFinite(msg.info.currentTime)) {
+          const lv = $('localVideo');
+          if (lv && !lv.classList.contains('hidden')) return;
+          state.currentSeekSec = msg.info.currentTime;
+          if ($('previewTimeBadge')) $('previewTimeBadge').textContent = fmtTC(msg.info.currentTime);
+        }
+      });
+    }
+  }
+
   function setupPlayer(proj, startSec, autoplay) {
+    bindPlayerPlayheadListeners();
     state.currentSeekSec = Math.max(0, Math.floor(startSec || 0));
-    $('previewTimeBadge').textContent = fmtTime(state.currentSeekSec);
+    $('previewTimeBadge').textContent = fmtTC(state.currentSeekSec);
     const iframe = $('ytIframe');
     const localVid = $('localVideo');
 
@@ -747,7 +956,8 @@
       localVid.classList.add('hidden');
       localVid.pause();
       iframe.classList.remove('hidden');
-      iframe.src = `https://www.youtube.com/embed/${encodeURIComponent(proj.videoId)}?start=${state.currentSeekSec}&autoplay=${autoplay ? 1 : 0}&rel=0`;
+      const originParam = (location.origin && location.origin !== 'null') ? `&origin=${encodeURIComponent(location.origin)}` : '';
+      iframe.src = `https://www.youtube.com/embed/${encodeURIComponent(proj.videoId)}?start=${state.currentSeekSec}&autoplay=${autoplay ? 1 : 0}&rel=0&enablejsapi=1${originParam}`;
     }
   }
 
@@ -897,8 +1107,7 @@
         drawHypeChart();
         renderCandidates();
       }
-      $('manualStart').value = Math.max(0, sec - 10);
-      $('manualEnd').value = Math.min(Math.floor(proj.durationSec), sec + 30);
+      setManualRangeSec(Math.max(0, sec - 10), Math.min(Math.floor(proj.durationSec), sec + 30));
       setupPlayer(proj, sec, true);
     });
   }
@@ -972,8 +1181,9 @@
           <span class="cand-rank">#${c.rank}</span>
           <strong>${fmtTime(c.startSec)} – ${fmtTime(c.endSec)}</strong>
           <span class="muted text-xs">(${Math.round(c.endSec - c.startSec)}s)</span>
-          <span class="${scoreCls}">⚡ ${Math.round(c.score)}</span>
+          <span class="${scoreCls}" title="Radar sinyal saja (Live Chat/Audio/Transkrip) — wajib cek transkrip &amp; frame sebelum potong!">📡 Radar ${Math.round(c.score)}</span>
         </div>
+        <div class="cand-radar-note">Panduan lokasi radar saja — cek transkrip &amp; frame sebelum potong.</div>
         <div class="cand-reasons">${reasonsHtml}</div>
         ${extraMetaHtml}
         ${verdictHtml}
@@ -999,7 +1209,10 @@
           </label>
         </div>
         <div class="cand-actions">
-          <button class="btn btn-xs btn-secondary btn-preview-cand">▶ Preview (${fmtTime(c.peakSec)})</button>
+          <div style="display:flex;gap:5px;flex-wrap:wrap;">
+            <button class="btn btn-xs btn-secondary btn-preview-cand">▶ Preview (${fmtTime(c.peakSec)})</button>
+            <button class="btn btn-xs btn-secondary btn-load-cutter" title="Salin Start/End kandidat ini ke Human-Friendly Cutter untuk penyesuaian akurat">✂️ Muat ke Cutter</button>
+          </div>
           <div style="display:flex;gap:5px;">
             <button class="btn btn-xs btn-secondary btn-add-topn" title="Masukkan momen ini ke Top-N / Kompilasi Builder">➕ Top-N</button>
             <button class="btn btn-xs btn-primary btn-render-cand">🎬 Render</button>
@@ -1067,6 +1280,18 @@
         renderCandidates();
         setupPlayer(proj, c.startSec, true);
       });
+      const loadCutterBtn = el.querySelector('.btn-load-cutter');
+      if (loadCutterBtn) {
+        loadCutterBtn.addEventListener('click', () => {
+          state.selectedCandidateId = c.id;
+          setManualRangeSec(c.startSec, c.endSec);
+          if ($('manualHook')) $('manualHook').value = c.hookText || '';
+          drawHypeChart();
+          renderCandidates();
+          setupPlayer(proj, c.startSec, true);
+          toast(`✂️ Range #${c.rank} (${fmtTC(c.startSec)} → ${fmtTC(c.endSec)}) dimuat ke Cutter!`, 'ok');
+        });
+      }
       el.querySelector('.btn-add-topn').addEventListener('click', () => {
         // Default tight 18s window around peak for snappy Top-N compilation!
         const s = Math.max(0, Math.round(c.peakSec - 7));
@@ -1991,11 +2216,12 @@
     bar.innerHTML = '';
     const payload = { count: 9, cols: 3 };
     if (useManualRange) {
-      const s = Math.max(0, parseFloat($('manualStart')?.value) || 0);
-      const e = Math.max(s + 2, parseFloat($('manualEnd')?.value) || (s + 45));
+      const range = getManualRangeSec();
+      const s = Math.max(0, range.startSec || 0);
+      const e = Math.max(s + 2, range.endSec || (s + 45));
       payload.startSec = s;
       payload.endSec = e;
-      st.textContent = `Mengekstrak 9 frame contact-sheet pada range ${fmtTime(s)} – ${fmtTime(e)}...`;
+      st.textContent = `Mengekstrak 9 frame contact-sheet pada range ${fmtTC(s)} – ${fmtTC(e)}...`;
     } else {
       st.textContent = 'Mengekstrak 9 frame momen teratas sepanjang VOD menjadi contact-sheet 3×3...';
     }
@@ -2009,16 +2235,17 @@
       img.classList.remove('hidden');
       st.textContent = `Siap! Contact-sheet ${res.cols}×${res.rows} (${res.width}×${res.height}px) · ${(res.frames || []).length} frame. Klik timestamp untuk lompat & set range manual:`;
       bar.innerHTML = (res.frames || []).map((f) =>
-        `<button type="button" class="btn btn-xs btn-secondary sb-jump-btn" data-sec="${Number(f.sec) || 0}">#${(f.index || 0) + 1} · ${escapeHtml(f.timeText || fmtTime(f.sec))}</button>`
+        `<button type="button" class="btn btn-xs btn-secondary sb-jump-btn" data-sec="${Number(f.sec) || 0}">#${(f.index || 0) + 1} · ${escapeHtml(f.timeText || fmtTC(f.sec))}</button>`
       ).join('');
       bar.querySelectorAll('.sb-jump-btn').forEach((btn) => {
         btn.addEventListener('click', () => {
           const sec = Math.max(0, Math.floor(parseFloat(btn.dataset.sec) || 0));
-          $('manualStart').value = Math.max(0, sec - 10);
-          $('manualEnd').value = Math.min(Math.floor(proj.durationSec || (sec + 30)), sec + 25);
+          const ns = Math.max(0, sec - 10);
+          const ne = Math.min(Math.floor(proj.durationSec || (sec + 30)), sec + 25);
+          setManualRangeSec(ns, ne);
           setupPlayer(proj, sec, true);
           closeStoryboardModal();
-          toast(`Lompat ke ${fmtTime(sec)} & range manual diset (${fmtTime(Math.max(0, sec - 10))} – ${fmtTime(sec + 25)})`, 'ok');
+          toast(`Lompat ke ${fmtTC(sec)} & range manual diset (${fmtTC(ns)} – ${fmtTC(ne)})`, 'ok');
         });
       });
     } catch (e) {
@@ -2126,11 +2353,18 @@
 
   $('btnRenderManual').addEventListener('click', async () => {
     if (!state.activeProject) return;
-    const s = parseFloat($('manualStart').value) || 0;
-    const e = parseFloat($('manualEnd').value) || s + 30;
+    if ($('manualStartTC') && !commitManualTimecodeInput('start')) return;
+    if ($('manualEndTC') && !commitManualTimecodeInput('end')) return;
+    const range = getManualRangeSec();
+    if (!range.valid) {
+      toast(range.summary?.warning || 'Range tidak valid: End harus lebih besar dari Start!', 'err');
+      return;
+    }
+    const s = range.startSec;
+    const e = range.endSec;
     const hook = $('manualHook').value.trim();
     try {
-      const opts = buildRenderOptions(`Custom Clip ${fmtTime(s)}-${fmtTime(e)}`, s, e, hook);
+      const opts = buildRenderOptions(`Custom Clip ${fmtTC(s)}-${fmtTC(e)}`, s, e, hook);
       await api('/api/jobs/render', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2142,6 +2376,99 @@
       toast(err.message, 'err');
     }
   });
+
+  // Human-Friendly Manual Cutter Wiring (Timecodes, Mark In/Out, Nudge, Storyboard Range, 16:9 Preset, I/O shortcuts)
+  ['manualStartTC', 'manualEndTC'].forEach((id) => {
+    const inp = $(id);
+    if (!inp) return;
+    const which = id === 'manualStartTC' ? 'start' : 'end';
+    inp.addEventListener('change', () => commitManualTimecodeInput(which));
+    inp.addEventListener('blur', () => commitManualTimecodeInput(which));
+    inp.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        commitManualTimecodeInput(which);
+      }
+    });
+  });
+
+  if ($('btnMarkIn')) $('btnMarkIn').addEventListener('click', markInAtPlayer);
+  if ($('btnMarkOut')) $('btnMarkOut').addEventListener('click', markOutAtPlayer);
+
+  document.querySelectorAll('[data-nudge-which]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const which = btn.dataset.nudgeWhich;
+      const delta = parseFloat(btn.dataset.nudgeDelta) || 0;
+      const cur = getManualRangeSec();
+      const maxDur = Number(state.activeProject?.durationSec) || 0;
+      if (window.KFCutter && typeof window.KFCutter.nudgeRange === 'function') {
+        const next = window.KFCutter.nudgeRange(cur.startSec, cur.endSec, which, delta, maxDur || undefined);
+        setManualRangeSec(next.startSec, next.endSec);
+      } else {
+        const nextStart = which === 'start' ? Math.max(0, cur.startSec + delta) : cur.startSec;
+        const nextEnd = which === 'end' ? Math.max(nextStart + 1, cur.endSec + delta) : Math.max(nextStart + 1, cur.endSec);
+        setManualRangeSec(nextStart, nextEnd);
+      }
+    });
+  });
+
+  if ($('btnPreviewRangeSB')) {
+    $('btnPreviewRangeSB').addEventListener('click', () => {
+      if ($('manualStartTC')) commitManualTimecodeInput('start');
+      if ($('manualEndTC')) commitManualTimecodeInput('end');
+      openStoryboardModal(true);
+    });
+  }
+
+  if ($('btnPreset16x9WM')) {
+    $('btnPreset16x9WM').addEventListener('click', () => {
+      const preset = window.KFCutter && typeof window.KFCutter.preset16x9TopCenterWM === 'function'
+        ? window.KFCutter.preset16x9TopCenterWM()
+        : { aspectRatio: '16:9', cropMode: 'original', resolution: '1080p', watermark: { position: 'custom', customX: 0.40, customY: 0.36 } };
+      if ($('selAspect')) $('selAspect').value = preset.aspectRatio;
+      if ($('selCropMode')) $('selCropMode').value = preset.cropMode;
+      if ($('selRes')) $('selRes').value = preset.resolution;
+      if ($('chkUseWatermark')) $('chkUseWatermark').checked = true;
+      state.layout.aspectRatio = preset.aspectRatio;
+      state.layout.cropMode = preset.cropMode;
+      state.layout.resolution = preset.resolution;
+      // In-memory Studio preview only — does NOT mutate campaign on server unless user explicitly clicks Save!
+      const camp = getActiveCampaign();
+      if (camp) {
+        camp.watermark = {
+          ...(camp.watermark || {}),
+          enabled: true,
+          position: preset.watermark.position,
+          customX: preset.watermark.customX,
+          customY: preset.watermark.customY,
+        };
+        if (state.editingCampaignId === camp.id && $('cWmPos')) {
+          $('cWmPos').value = preset.watermark.position;
+          if ($('wmCustomXY')) $('wmCustomXY').classList.remove('hidden');
+          if ($('cWmCustomX')) $('cWmCustomX').value = camp.watermark.customX;
+          if ($('cWmCustomY')) $('cWmCustomY').value = camp.watermark.customY;
+        }
+      }
+      drawCropCanvases();
+      toast('🎬 Preset 16:9 + WM Tengah-Atas (X 40%, Y 36%) aktif di Studio! (Campaign server tidak diubah.)', 'ok');
+    });
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const key = String(e.key || '').toLowerCase();
+    if (key !== 'i' && key !== 'o') return;
+    if (!$('tab-studio')?.classList.contains('active') || !state.activeProject) return;
+    const activeEl = document.activeElement;
+    if (activeEl && (['INPUT', 'TEXTAREA', 'SELECT'].includes(activeEl.tagName) || activeEl.isContentEditable)) return;
+    const modals = ['postEditModal', 'storyboardModal', 'b1ReviewSheet', 'b1PublishKitModal', 'p0MarkPostedModal'];
+    if (modals.some((id) => $(id) && !$(id).classList.contains('hidden'))) return;
+    e.preventDefault();
+    if (key === 'i') markInAtPlayer();
+    else if (key === 'o') markOutAtPlayer();
+  });
+
+  syncManualRangeUI();
 
   // Layout controls live redraw (including TikTok Safe Zone toggle)
   ['selCropMode', 'selAspect', 'selRes', 'chkSubtitles', 'chkUseWatermark', 'selSubPreset', 'selSubPos', 'chkSafeZone'].forEach((id) => {
@@ -3344,17 +3671,43 @@
           <span class="trans-hit-time">${escapeHtml(h.timeText)}</span>
           <span class="trans-hit-ctx">${escapeHtml(h.context)}</span>
           <div class="trans-hit-acts">
-            <button class="btn btn-2xs btn-secondary btn-th-prev">▶ Preview</button>
-            <button class="btn btn-2xs btn-accent btn-th-topn">➕ Top-N</button>
-            <button class="btn btn-2xs btn-primary btn-th-clip">🎬 Klip</button>
+            <button class="btn btn-2xs btn-secondary btn-th-prev" type="button">▶ Preview</button>
+            <button class="btn btn-2xs btn-secondary btn-th-start" type="button" title="Set batas Start ke baris transkrip ini">⏮ Set Start</button>
+            <button class="btn btn-2xs btn-secondary btn-th-end" type="button" title="Set batas End ke baris transkrip ini">⏭ Set End</button>
+            <button class="btn btn-2xs btn-accent btn-th-topn" type="button">➕ Top-N</button>
+            <button class="btn btn-2xs btn-primary btn-th-clip" type="button">🎬 Klip</button>
           </div>
         `;
         const startS = Math.max(0, Math.floor(h.startSec - 4));
         const endS = Math.min(Math.floor(state.activeProject.durationSec || h.startSec + 25), startS + 22);
         row.querySelector('.btn-th-prev').addEventListener('click', () => {
-          $('manualStart').value = startS;
-          $('manualEnd').value = endS;
+          setManualRangeSec(startS, endS);
           setupPlayer(state.activeProject, startS, true);
+        });
+        row.querySelector('.btn-th-start').addEventListener('click', () => {
+          const lineStart = Math.max(0, Math.floor(h.startSec || 0));
+          const cur = getManualRangeSec();
+          const maxDur = Number(state.activeProject?.durationSec) || 0;
+          let nextEnd = cur.endSec;
+          if (!Number.isFinite(nextEnd) || nextEnd <= lineStart) {
+            nextEnd = maxDur > 0 ? Math.min(maxDur, lineStart + 30) : (lineStart + 30);
+            if (nextEnd <= lineStart) nextEnd = lineStart + 1;
+          }
+          setManualRangeSec(lineStart, nextEnd);
+          setupPlayer(state.activeProject, lineStart, false);
+          toast(`⏮ Start diset dari pencarian: ${fmtTC(lineStart)}`, 'info');
+        });
+        row.querySelector('.btn-th-end').addEventListener('click', () => {
+          const maxDur = Number(state.activeProject?.durationSec) || 0;
+          let lineEnd = Math.max(1, Math.ceil(h.endSec || ((h.startSec || 0) + 4)));
+          if (maxDur > 0) lineEnd = Math.min(maxDur, lineEnd);
+          const cur = getManualRangeSec();
+          let nextStart = cur.startSec;
+          if (!Number.isFinite(nextStart) || nextStart >= lineEnd) {
+            nextStart = Math.max(0, lineEnd - 25);
+          }
+          setManualRangeSec(nextStart, lineEnd);
+          toast(`⏭ End diset dari pencarian: ${fmtTC(lineEnd)}`, 'info');
         });
         row.querySelector('.btn-th-topn').addEventListener('click', () => {
           addSlotToTopN({
@@ -3377,6 +3730,128 @@
     } catch (e) {
       toast('Gagal cari transkrip: ' + e.message, 'err');
     }
+  }
+
+  // Interactive Chronological Transcript Browser (GET /api/projects/{id}/transcript)
+  async function loadTranscriptBrowserPage(opts = {}) {
+    const proj = state.activeProject;
+    const listBox = $('transBrowserList');
+    const stEl = $('transBrowserStatus');
+    if (!proj || !listBox) return;
+
+    const limit = state.transcriptBrowser.limit || 60;
+    const qs = new URLSearchParams({ limit: String(limit) });
+    if (opts.fromSec !== undefined && opts.fromSec !== null) {
+      qs.set('fromSec', String(Math.max(0, Math.floor(opts.fromSec))));
+    } else {
+      qs.set('offset', String(Math.max(0, Math.floor(opts.offset || 0))));
+    }
+
+    if (stEl) stEl.textContent = 'Memuat transkrip...';
+    try {
+      const res = await api(`/api/projects/${encodeURIComponent(proj.id)}/transcript?${qs.toString()}`);
+      const cues = res.cues || res.items || res.lines || [];
+      const offset = Number(res.offset ?? opts.offset ?? 0);
+      const total = Number(res.total ?? res.totalCount ?? cues.length);
+      const hasMore = typeof res.hasMore === 'boolean' ? res.hasMore : (offset + cues.length < total);
+
+      state.transcriptBrowser = {
+        projectId: proj.id,
+        offset,
+        limit,
+        total,
+        loaded: true,
+      };
+
+      if ($('btnTransPrevPage')) $('btnTransPrevPage').disabled = offset <= 0;
+      if ($('btnTransNextPage')) $('btnTransNextPage').disabled = !hasMore;
+
+      if (cues.length === 0) {
+        if (stEl) stEl.textContent = total === 0 ? 'Transkrip tidak tersedia pada project ini.' : `0 baris pada halaman ini (total ${total}).`;
+        listBox.innerHTML = '<div class="muted text-xs" style="padding:10px;">Belum ada baris transkrip pada rentang ini. Pastikan VOD memiliki subtitle/transkrip YouTube.</div>';
+        return;
+      }
+
+      if (stEl) stEl.textContent = `Menampilkan ${offset + 1}–${offset + cues.length} dari ${total} baris`;
+      listBox.innerHTML = '';
+      cues.forEach((cue) => {
+        const startVal = Number(cue.startSec ?? cue.start ?? 0);
+        const endVal = Number(cue.endSec ?? cue.end ?? (startVal + 4));
+        const timeText = cue.timeText || fmtTC(startVal);
+        const speaker = (cue.speaker || '').trim();
+        const text = cue.text || '';
+
+        const row = document.createElement('div');
+        row.className = 'trans-browser-row';
+        row.innerHTML = `
+          <span class="tb-time">[${escapeHtml(timeText)}]</span>
+          <div class="tb-text">${speaker ? `<span class="tb-speaker">${escapeHtml(speaker)}</span>` : ''}${escapeHtml(text)}</div>
+          <div class="tb-acts">
+            <button class="btn btn-2xs btn-secondary btn-tb-play" type="button" title="Putar dari baris ini">▶</button>
+            <button class="btn btn-2xs btn-secondary btn-tb-start" type="button" title="Set Start ke baris ini">⏮ Start</button>
+            <button class="btn btn-2xs btn-secondary btn-tb-end" type="button" title="Set End ke baris ini">⏭ End</button>
+          </div>
+        `;
+        row.querySelector('.btn-tb-play').addEventListener('click', () => {
+          setupPlayer(proj, Math.max(0, Math.floor(startVal)), true);
+        });
+        row.querySelector('.btn-tb-start').addEventListener('click', () => {
+          const s = Math.max(0, Math.floor(startVal));
+          const cur = getManualRangeSec();
+          const maxDur = Number(proj.durationSec) || 0;
+          let e = cur.endSec;
+          if (!Number.isFinite(e) || e <= s) {
+            e = maxDur > 0 ? Math.min(maxDur, s + 30) : (s + 30);
+            if (e <= s) e = s + 1;
+          }
+          setManualRangeSec(s, e);
+          setupPlayer(proj, s, false);
+          toast(`⏮ Start diset: ${fmtTC(s)}`, 'info');
+        });
+        row.querySelector('.btn-tb-end').addEventListener('click', () => {
+          const maxDur = Number(proj.durationSec) || 0;
+          let e = Math.max(1, Math.ceil(endVal));
+          if (maxDur > 0) e = Math.min(maxDur, e);
+          const cur = getManualRangeSec();
+          let s = cur.startSec;
+          if (!Number.isFinite(s) || s >= e) {
+            s = Math.max(0, e - 25);
+          }
+          setManualRangeSec(s, e);
+          toast(`⏭ End diset: ${fmtTC(e)}`, 'info');
+        });
+        listBox.appendChild(row);
+      });
+    } catch (e) {
+      if (stEl) stEl.textContent = 'Gagal memuat transkrip: ' + e.message;
+      listBox.innerHTML = `<div class="muted text-xs" style="padding:10px;color:#fca5a5;">${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  if ($('btnLoadTranscript')) {
+    $('btnLoadTranscript').addEventListener('click', () => loadTranscriptBrowserPage({ offset: 0 }));
+  }
+  if ($('btnTransNearPlayer')) {
+    $('btnTransNearPlayer').addEventListener('click', () => loadTranscriptBrowserPage({ fromSec: getCurrentPlayerSec() }));
+  }
+  if ($('btnTransPrevPage')) {
+    $('btnTransPrevPage').addEventListener('click', () => {
+      const nextOff = Math.max(0, (state.transcriptBrowser.offset || 0) - (state.transcriptBrowser.limit || 60));
+      loadTranscriptBrowserPage({ offset: nextOff });
+    });
+  }
+  if ($('btnTransNextPage')) {
+    $('btnTransNextPage').addEventListener('click', () => {
+      const nextOff = (state.transcriptBrowser.offset || 0) + (state.transcriptBrowser.limit || 60);
+      loadTranscriptBrowserPage({ offset: nextOff });
+    });
+  }
+  if ($('transcriptBrowserDrawer')) {
+    $('transcriptBrowserDrawer').addEventListener('toggle', (ev) => {
+      if (ev.currentTarget.open && state.activeProject && (!state.transcriptBrowser.loaded || state.transcriptBrowser.projectId !== state.activeProject.id)) {
+        loadTranscriptBrowserPage({ offset: 0 });
+      }
+    });
   }
 
   $('btnTransSearch').addEventListener('click', () => runTranscriptSearch());
@@ -3508,10 +3983,13 @@
 
   $('btnAddManualToTopN').addEventListener('click', () => {
     if (!state.activeProject) return;
-    const s = Math.max(0, parseFloat($('manualStart').value) || 0);
-    const rawE = parseFloat($('manualEnd').value) || (s + 18);
+    if ($('manualStartTC')) commitManualTimecodeInput('start');
+    if ($('manualEndTC')) commitManualTimecodeInput('end');
+    const range = getManualRangeSec();
+    const s = Math.max(0, range.startSec || 0);
+    const rawE = range.endSec || (s + 18);
     const e = rawE > s + 2 ? rawE : (s + 18);
-    const lbl = $('manualHook').value.trim() || `momen ${fmtTime(s)}`;
+    const lbl = $('manualHook').value.trim() || `momen ${fmtTC(s)}`;
     addSlotToTopN({ projectId: state.activeProject.id, startSec: s, endSec: e, label: lbl, endSfxId: 'sfx-metal-pipe', endSfxOffset: 1.0 });
   });
 
@@ -4021,8 +4499,7 @@
         if ($('projectHistorySelect')) $('projectHistorySelect').value = proj.id;
         renderActiveProject();
       }
-      $('manualStart').value = Math.round(o.startSec || 0);
-      $('manualEnd').value = Math.round(o.endSec || 0);
+      setManualRangeSec(Math.round(o.startSec || 0), Math.round(o.endSec || 0));
       $('manualHook').value = o.hookText || job.title || '';
       if ($('chkSceneSnap')) $('chkSceneSnap').checked = !!o.sceneSnap;
       if ($('chkSilenceTrim')) $('chkSilenceTrim').checked = !!o.silenceTrim;

@@ -30,6 +30,10 @@
     selectedRejectReason: '',
     publishKitJob: null,
     publishModalJob: null,
+    p0Inventory: null,
+    p0Publishable: [],
+    p0Ledger: { entries: [], summary: null },
+    markPostedJob: null,
   };
 
   function getTok() {
@@ -116,7 +120,10 @@
     if (tab === 'home') refreshHome();
     if (tab === 'board') refreshBoard();
     if (tab === 'review') refreshReviewEnhancements();
-    if (tab === 'queue') enhanceLibraryCards();
+    if (tab === 'queue') {
+      enhanceLibraryCards();
+      refreshP0Ops();
+    }
     if (tab === 'team') refreshTeamAndActivity();
     if (tab === 'studio') window.dispatchEvent(new Event('resize'));
   }
@@ -1030,6 +1037,368 @@
     }
   }
 
+  // ==================== P0 Operations: Inventory (I-02), Publishable Queue (I-03), Views Ledger (I-04) ====================
+  function fmtBytesB1(b) {
+    const n = Number(b || 0);
+    if (!n) return '0 B';
+    if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(2) + ' MB';
+    return (n / 1024).toFixed(1) + ' KB';
+  }
+
+  function copyTextB1(txt, okMsg) {
+    if (!txt) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(txt).then(() => showToast(okMsg, 'ok')).catch(() => {
+        const ta = document.createElement('textarea');
+        ta.value = txt;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+        showToast(okMsg, 'ok');
+      });
+      return;
+    }
+    const ta = document.createElement('textarea');
+    ta.value = txt;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    showToast(okMsg, 'ok');
+  }
+
+  function openMarkPostedModal(item) {
+    if (!item) return;
+    const modal = $('p0MarkPostedModal');
+    if (!modal) return;
+    b1.markPostedJob = item;
+    if ($('p0MpJobTitle')) $('p0MpJobTitle').textContent = item.title || item.id || item.jobId || '—';
+    if ($('p0MpPlatform')) $('p0MpPlatform').value = 'tiktok';
+    if ($('p0MpUrl')) $('p0MpUrl').value = '';
+    if ($('p0MpViews')) $('p0MpViews').value = '';
+    if ($('p0MpNote')) $('p0MpNote').value = '';
+    modal.classList.remove('hidden');
+  }
+
+  function closeMarkPostedModal() {
+    if ($('p0MarkPostedModal')) $('p0MarkPostedModal').classList.add('hidden');
+    b1.markPostedJob = null;
+  }
+
+  async function submitMarkPosted() {
+    if (!b1.markPostedJob) return;
+    const jobId = b1.markPostedJob.id || b1.markPostedJob.jobId;
+    if (!jobId) return;
+    const platform = ($('p0MpPlatform')?.value || 'tiktok').trim().toLowerCase();
+    const publishedUrl = ($('p0MpUrl')?.value || '').trim();
+    const note = ($('p0MpNote')?.value || '').trim();
+    const rawViews = ($('p0MpViews')?.value || '').trim();
+
+    const payload = { platform, publishedUrl, note };
+    if (rawViews !== '') {
+      const v = parseInt(rawViews, 10);
+      if (Number.isNaN(v) || v < 0) {
+        showToast('Views awal harus angka >= 0', 'err');
+        return;
+      }
+      payload.views = v;
+    }
+
+    const btn = $('btnSubmitMarkPosted');
+    if (btn) btn.disabled = true;
+    try {
+      await apiB1(`/api/jobs/${encodeURIComponent(jobId)}/mark-posted`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      closeMarkPostedModal();
+      showToast('✓ Klip ditandai Diposting Manual!', 'ok');
+      refreshP0Ops();
+      refreshHome();
+      if ($('btnRefreshJobs')) $('btnRefreshJobs').click();
+    } catch (e) {
+      showToast('Gagal tandai diposting: ' + e.message, 'err');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function renderP0Inventory() {
+    const box = $('p0InvSummary');
+    if (!box) return;
+    const raw = b1.p0Inventory;
+    if (!raw) {
+      box.innerHTML = '<span class="p0-inv-pill">Inventory: <strong>—</strong></span>';
+      return;
+    }
+    const inv = raw.summary || raw.counts || raw;
+    const countOf = (...vals) => {
+      for (const v of vals) {
+        if (typeof v === 'number' && Number.isFinite(v)) return v;
+        if (Array.isArray(v)) return v.length;
+      }
+      return 0;
+    };
+    const publishable = countOf(inv.publishableCount, inv.publishable, inv.readyToPost, raw.publishableCount, raw.publishable);
+    const posted = countOf(inv.postedCount, inv.posted, inv.publishedCount, inv.published, raw.postedCount, raw.posted);
+    const rejected = countOf(inv.rejectedCount, inv.rejected, raw.rejectedCount, raw.rejected);
+    const missing = countOf(inv.missingCount, inv.missingFileCount, inv.missingFiles, inv.missing, raw.missingCount, raw.missing);
+    const orphans = countOf(inv.orphanCount, inv.orphans, inv.orphanFiles, raw.orphanCount, raw.orphanFiles, raw.orphans);
+
+    box.innerHTML = `
+      <span class="p0-inv-pill ok" title="done + approved + file ada di disk">Publishable: <strong>${publishable}</strong></span>
+      <span class="p0-inv-pill" title="Sudah ditandai diposting manual">Posted: <strong>${posted}</strong></span>
+      <span class="p0-inv-pill" title="Ditolak QC">Rejected: <strong>${rejected}</strong></span>
+      <span class="p0-inv-pill ${missing > 0 ? 'warn' : ''}" title="Job tanpa file MP4 di disk">Missing: <strong>${missing}</strong></span>
+      ${orphans > 0 ? `<span class="p0-inv-pill warn" title="File MP4 orphan di folder outputs">Orphan: <strong>${orphans}</strong></span>` : ''}
+    `;
+  }
+
+  function renderP0Publishable() {
+    const box = $('p0PublishableList');
+    const cnt = $('p0PubCountBadge');
+    if (!box) return;
+    const items = Array.isArray(b1.p0Publishable) ? b1.p0Publishable : [];
+    if (cnt) cnt.textContent = `${items.length} klip`;
+
+    if (items.length === 0) {
+      box.innerHTML = '<div class="muted text-xs" style="padding:10px;">Belum ada klip siap posting (butuh status <code>done + approved</code> dengan file MP4 tersedia di disk).</div>';
+      return;
+    }
+
+    box.innerHTML = '';
+    items.forEach((item) => {
+      const jid = item.id || item.jobId || '';
+      const title = item.title || jid;
+      const dur = Number(item.finalDuration ?? item.durationSec ?? 0);
+      const size = Number(item.fileSizeBytes ?? item.sizeBytes ?? 0);
+      const fmt = item.format || item.options?.layout?.aspectRatio || '';
+      const thumb = item.coverFrameUrl || item.thumbnailUrl || item.peekFrameUrl || '';
+      const dlUrl = item.downloadUrl || `/api/jobs/${encodeURIComponent(jid)}/video?download=1`;
+      const caption = item.postCaption || item.caption || item.publishKit?.tiktok?.caption || [title, item.hashtagLine].filter(Boolean).join('\n\n');
+
+      const row = document.createElement('div');
+      row.className = 'p0-pub-item';
+      row.innerHTML = `
+        <div class="p0-pub-thumb">
+          ${thumb ? `<img src="${esc(thumb)}" loading="lazy" alt="Cover" onerror="this.style.display='none';this.parentElement.textContent='MP4';" />` : 'MP4'}
+        </div>
+        <div style="min-width:0;">
+          <div class="p0-pub-title">${esc(title)}</div>
+          <div class="p0-pub-meta">${dur > 0 ? dur.toFixed(1) + 's' : '—'} · ${fmtBytesB1(size)}${fmt ? ' · ' + esc(fmt) : ''}${item.campaignName ? ' · ' + esc(item.campaignName) : ''}</div>
+          <div class="p0-pub-acts">
+            <a class="btn btn-2xs btn-secondary" href="${esc(dlUrl)}" download>⬇️ Download MP4</a>
+            <button class="btn btn-2xs btn-secondary btn-p0-copy-cap" type="button">📋 Copy Caption</button>
+            <button class="btn btn-2xs btn-primary btn-p0-mark-posted" type="button" ${canQC() ? '' : 'disabled title="Khusus Owner atau QC Reviewer"'}>✓ Tandai Diposting Manual</button>
+            <button class="btn btn-2xs btn-ghost btn-p0-log-views" type="button">📊 Catat Views</button>
+          </div>
+        </div>
+      `;
+
+      row.querySelector('.btn-p0-copy-cap').addEventListener('click', () => {
+        copyTextB1(caption, 'Caption siap tempel disalin!');
+      });
+      const mpBtn = row.querySelector('.btn-p0-mark-posted');
+      if (mpBtn && canQC()) {
+        mpBtn.addEventListener('click', () => openMarkPostedModal(item));
+      }
+      row.querySelector('.btn-p0-log-views').addEventListener('click', () => {
+        const sel = $('p0LedgerJobSel');
+        if (sel) {
+          if (!Array.from(sel.options).some((o) => o.value === jid)) {
+            const opt = document.createElement('option');
+            opt.value = jid;
+            opt.textContent = title;
+            sel.appendChild(opt);
+          }
+          sel.value = jid;
+        }
+        if ($('p0LedgerViews')) {
+          $('p0LedgerViews').focus();
+          $('p0LedgerViews').scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      });
+      box.appendChild(row);
+    });
+  }
+
+  function populateP0LedgerJobSelect(allJobs) {
+    const sel = $('p0LedgerJobSel');
+    if (!sel) return;
+    const prev = sel.value;
+    const byId = new Map();
+    (b1.p0Publishable || []).forEach((it) => {
+      const id = it.id || it.jobId;
+      if (id) byId.set(id, { id, title: it.title || id, tag: 'Siap Posting', projectId: it.projectId || '', format: it.format || it.options?.layout?.aspectRatio || '' });
+    });
+    (allJobs || []).forEach((j) => {
+      if (!j || !j.id || j.status !== 'done') return;
+      if (!byId.has(j.id)) {
+        const tag = j.boardColumn === 'diposting' ? 'Diposting' : (j.reviewStatus === 'approved' ? 'Approved' : 'Done');
+        byId.set(j.id, { id: j.id, title: j.title || j.id, tag, projectId: j.projectId || '', format: j.options?.layout?.aspectRatio || '' });
+      }
+    });
+    b1.p0LedgerJobsMap = byId;
+
+    sel.innerHTML = '<option value="">— Pilih klip selesai —</option>';
+    byId.forEach((info) => {
+      const opt = document.createElement('option');
+      opt.value = info.id;
+      opt.textContent = `[${info.tag}] ${info.title}`;
+      sel.appendChild(opt);
+    });
+    if (prev && byId.has(prev)) sel.value = prev;
+  }
+
+  function renderP0Ledger() {
+    const sumBox = $('p0LedgerSummary');
+    const listBox = $('p0LedgerList');
+    const summary = b1.p0Ledger?.summary || {};
+    const entries = Array.isArray(b1.p0Ledger?.entries) ? b1.p0Ledger.entries : [];
+
+    if (sumBox) {
+      const totalViews = Number(summary.totalViews || 0);
+      const medianViews = Number(summary.medianViews || 0);
+      const totalEntries = Number(summary.totalEntries ?? entries.length);
+      const bySplit = summary.bySplit || {};
+      const inStats = bySplit['IN-SAMPLE'] || { entries: 0, totalViews: 0 };
+      const hoStats = bySplit['HELD-OUT'] || { entries: 0, totalViews: 0 };
+      const scopeNote = summary.dataScopeNote || 'PERINGATAN DATA SCOPE: Metrik IN-SAMPLE hanya observasi historis/internal dan TIDAK BOLEH dianggap sebagai bukti performa HELD-OUT.';
+
+      sumBox.innerHTML = `
+        <div class="p0-ledger-kpis">
+          <div class="tim-metric-box"><div class="lbl">Total Views</div><div class="val">${totalViews.toLocaleString('id-ID')}</div></div>
+          <div class="tim-metric-box"><div class="lbl">Median Views</div><div class="val">${medianViews.toLocaleString('id-ID')}</div></div>
+          <div class="tim-metric-box"><div class="lbl">Total Entri</div><div class="val">${totalEntries}</div></div>
+        </div>
+        <div class="p0-split-row">
+          <span class="p0-split-badge">IN-SAMPLE: ${inStats.entries || 0} entri (${Number(inStats.totalViews || 0).toLocaleString('id-ID')} views)</span>
+          <span class="p0-split-badge held-out">HELD-OUT: ${hoStats.entries || 0} entri (${Number(hoStats.totalViews || 0).toLocaleString('id-ID')} views)</span>
+        </div>
+        <div class="p0-scope-warn">${esc(scopeNote)}</div>
+      `;
+    }
+
+    if (listBox) {
+      if (entries.length === 0) {
+        listBox.innerHTML = '<div class="muted text-xs" style="padding:8px;">Belum ada catatan views. Setelah posting manual, catat views &amp; split (IN-SAMPLE / HELD-OUT) di atas.</div>';
+        return;
+      }
+      listBox.innerHTML = entries.slice(0, 12).map((e) => {
+        const split = String(e.sampleSplit || 'IN-SAMPLE').toUpperCase();
+        const isHeldOut = split === 'HELD-OUT';
+        const ts = e.recordedAt ? new Date(e.recordedAt).toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+        const urlHtml = e.postUrl && /^https?:\/\//i.test(e.postUrl)
+          ? ` · <a href="${esc(e.postUrl)}" target="_blank" rel="noopener" style="color:#38bdf8;">Link ↗</a>`
+          : '';
+        return `
+          <div class="p0-ledger-row">
+            <div style="min-width:0;">
+              <div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(e.title || e.jobId)}</div>
+              <div class="text-xs muted" style="display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin-top:2px;">
+                <span class="strip-role">${esc((e.platform || '').toUpperCase())}</span>
+                <span class="p0-split-badge ${isHeldOut ? 'held-out' : ''}">${esc(split)}</span>
+                <span>${esc(ts)}${urlHtml}</span>
+                ${e.note ? `<span>· ${esc(e.note)}</span>` : ''}
+              </div>
+            </div>
+            <div class="mono" style="text-align:right;flex-shrink:0;">
+              <div style="font-weight:700;color:var(--text);">${Number(e.views || 0).toLocaleString('id-ID')} views</div>
+              <div class="text-xs muted">${Number(e.likes || 0).toLocaleString('id-ID')} likes</div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+  }
+
+  async function submitLedgerEntry() {
+    const jobId = ($('p0LedgerJobSel')?.value || '').trim();
+    if (!jobId) {
+      showToast('Pilih klip (Job) terlebih dahulu!', 'err');
+      return;
+    }
+    const platform = ($('p0LedgerPlatform')?.value || 'tiktok').trim().toLowerCase();
+    const views = parseInt($('p0LedgerViews')?.value || '0', 10);
+    const likes = parseInt($('p0LedgerLikes')?.value || '0', 10);
+    const sampleSplit = ($('p0LedgerSplit')?.value || 'IN-SAMPLE').trim().toUpperCase();
+    const postUrl = ($('p0LedgerUrl')?.value || '').trim();
+    const note = ($('p0LedgerNote')?.value || '').trim();
+
+    if (Number.isNaN(views) || views < 0 || Number.isNaN(likes) || likes < 0) {
+      showToast('Views dan Likes harus angka >= 0!', 'err');
+      return;
+    }
+
+    const meta = b1.p0LedgerJobsMap?.get(jobId) || {};
+    const btn = $('btnSaveLedgerEntry');
+    if (btn) btn.disabled = true;
+    try {
+      await apiB1('/api/ledger/views', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jobId,
+          projectId: meta.projectId || '',
+          title: meta.title || jobId,
+          platform,
+          views,
+          likes,
+          sampleSplit,
+          postUrl,
+          note,
+          format: meta.format || '',
+        }),
+      });
+      if ($('p0LedgerViews')) $('p0LedgerViews').value = '';
+      if ($('p0LedgerLikes')) $('p0LedgerLikes').value = '';
+      if ($('p0LedgerUrl')) $('p0LedgerUrl').value = '';
+      if ($('p0LedgerNote')) $('p0LedgerNote').value = '';
+      showToast(`📊 Catatan views (${sampleSplit}) tersimpan!`, 'ok');
+      refreshP0Ops();
+    } catch (e) {
+      showToast('Gagal simpan views ledger: ' + e.message, 'err');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function refreshP0Ops() {
+    if (!$('p0PublishableCard')) return;
+    const jobsKnown = window.__kfGetJobs ? window.__kfGetJobs() : [];
+    const [invRes, pubRes, ledRes, jobsRes] = await Promise.allSettled([
+      apiB1('/api/inventory'),
+      apiB1('/api/publishable'),
+      apiB1('/api/ledger/views'),
+      jobsKnown && jobsKnown.length > 0 ? Promise.resolve(jobsKnown) : apiB1('/api/jobs?limit=150'),
+    ]);
+
+    if (invRes.status === 'fulfilled') {
+      b1.p0Inventory = invRes.value;
+    }
+    if (pubRes.status === 'fulfilled') {
+      const pv = pubRes.value;
+      b1.p0Publishable = Array.isArray(pv) ? pv : (pv.items || pv.jobs || []);
+    } else if ($('p0PublishableList')) {
+      $('p0PublishableList').innerHTML = `<div class="muted text-xs" style="padding:10px;">Gagal memuat antrean siap posting: ${esc(pubRes.reason?.message || 'endpoint belum siap')}</div>`;
+    }
+    if (ledRes.status === 'fulfilled') {
+      const lv = ledRes.value || {};
+      b1.p0Ledger = {
+        entries: Array.isArray(lv) ? lv : (lv.entries || lv.items || []),
+        summary: lv.summary || null,
+      };
+    }
+
+    renderP0Inventory();
+    if (pubRes.status === 'fulfilled') renderP0Publishable();
+    renderP0Ledger();
+    populateP0LedgerJobSelect(jobsRes.status === 'fulfilled' ? jobsRes.value : jobsKnown);
+  }
+  window.__kfRefreshP0Ops = refreshP0Ops;
+
   // ==================== Real-Time SSE Bridge from app.js ====================
   let sseTimer = null;
   window.__kfOnSSE = (msg) => {
@@ -1046,6 +1415,7 @@
         if (b1.activeTab === 'home') refreshHome();
         else if (b1.activeTab === 'board') refreshBoard();
         else if (b1.activeTab === 'review') refreshReviewEnhancements();
+        else if (b1.activeTab === 'queue') refreshP0Ops();
         else if (b1.activeTab === 'team') refreshTeamAndActivity();
       }, 500);
     }
@@ -1054,6 +1424,7 @@
     refreshHome();
     if (b1.activeTab === 'board') refreshBoard();
     if (b1.activeTab === 'review') refreshReviewEnhancements();
+    if (b1.activeTab === 'queue') refreshP0Ops();
     if (b1.activeTab === 'team') refreshTeamAndActivity();
   });
 
@@ -1185,8 +1556,27 @@
       if (e.key !== 'Escape') return;
       if ($('b1ReviewSheet') && !$('b1ReviewSheet').classList.contains('hidden')) closeReviewSheet();
       if ($('b1PublishKitModal') && !$('b1PublishKitModal').classList.contains('hidden')) closePublishKitModal();
+      if ($('p0MarkPostedModal') && !$('p0MarkPostedModal').classList.contains('hidden')) closeMarkPostedModal();
       if ($('b1MobileMenuSheet') && !$('b1MobileMenuSheet').classList.contains('hidden')) $('b1MobileMenuSheet').classList.add('hidden');
     });
+
+    // P0 Operations (Publishable Queue + Manual Mark-Posted Modal + Views Ledger)
+    if ($('btnRefreshP0Ops')) $('btnRefreshP0Ops').addEventListener('click', refreshP0Ops);
+    if ($('btnToggleP0Ops') && $('p0OpsBody')) {
+      $('btnToggleP0Ops').addEventListener('click', () => {
+        const hidden = $('p0OpsBody').classList.toggle('hidden');
+        $('btnToggleP0Ops').textContent = hidden ? 'Buka' : 'Tutup';
+      });
+    }
+    if ($('btnSaveLedgerEntry')) $('btnSaveLedgerEntry').addEventListener('click', submitLedgerEntry);
+    if ($('btnCloseMarkPosted')) $('btnCloseMarkPosted').addEventListener('click', closeMarkPostedModal);
+    if ($('btnCancelMarkPosted')) $('btnCancelMarkPosted').addEventListener('click', closeMarkPostedModal);
+    if ($('btnSubmitMarkPosted')) $('btnSubmitMarkPosted').addEventListener('click', submitMarkPosted);
+    if ($('p0MarkPostedModal')) {
+      $('p0MarkPostedModal').addEventListener('click', (e) => {
+        if (e.target === $('p0MarkPostedModal')) closeMarkPostedModal();
+      });
+    }
 
     const copyVal = (id, label) => {
       const txt = $(id)?.value || '';
