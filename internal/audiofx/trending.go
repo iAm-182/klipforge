@@ -311,7 +311,7 @@ func (l *Library) FetchTrendingSounds(ctx context.Context, category, customQuery
 	spec := resolveTrendingQuery(catKey, customQuery)
 	args := []string{"--flat-playlist", "--no-warnings", "-J", spec.Query}
 	if _, err := exec.LookPath("node"); err == nil {
-		args = append(args, "--js-runtimes", "node")
+		args = append(args, "--js-runtimes", "node", "--remote-components", "ejs:github")
 	}
 	if settings.CookiesFile != "" {
 		if tmpC, cleanC := cloneTempCookies(settings.CookiesFile); tmpC != "" {
@@ -442,7 +442,7 @@ func (l *Library) ImportSoundFromURL(ctx context.Context, rawURL, name, kind, ca
 		"-o", rawTpl,
 	}
 	if _, err := exec.LookPath("node"); err == nil {
-		ytArgs = append(ytArgs, "--js-runtimes", "node")
+		ytArgs = append(ytArgs, "--js-runtimes", "node", "--remote-components", "ejs:github")
 	}
 	if dir := l.Deps.FFmpegDir(); dir != "" {
 		ytArgs = append(ytArgs, "--ffmpeg-location", dir)

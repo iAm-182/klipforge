@@ -54,7 +54,7 @@ func (c *Client) baseArgs(settings model.AppSettings) ([]string, func()) {
 		"--no-warnings",
 	}
 	if _, err := exec.LookPath("node"); err == nil {
-		args = append(args, "--js-runtimes", "node")
+		args = append(args, "--js-runtimes", "node", "--remote-components", "ejs:github")
 	}
 	if dir := c.Deps.FFmpegDir(); dir != "" {
 		args = append(args, "--ffmpeg-location", dir)
@@ -88,7 +88,7 @@ func (c *Client) FetchChannelVideos(ctx context.Context, channelURL string, limi
 		channelURL,
 	}
 	if _, err := exec.LookPath("node"); err == nil {
-		args = append(args, "--js-runtimes", "node")
+		args = append(args, "--js-runtimes", "node", "--remote-components", "ejs:github")
 	}
 	if settings.CookiesFile != "" {
 		if tmpCookie, clean := CloneReadOnlyCookies(settings.CookiesFile); tmpCookie != "" {

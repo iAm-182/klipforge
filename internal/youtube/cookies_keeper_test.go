@@ -137,3 +137,53 @@ func TestCookieKeeper_ProtectsAgainstCorruptProbeOutputAndRecoversFromGoodBackup
 		t.Fatalf("expected cookies.txt recovered from .good backup")
 	}
 }
+
+func TestCookieKeeper_YtDlpEJSChallengeErrorSuggestsUpdateAndPreservesCookies(t *testing.T) {
+	dir := t.TempDir()
+	cookiePath := filepath.Join(dir, "cookies.txt")
+	if err := os.WriteFile(cookiePath, []byte(sampleValidCookies), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	alerts := 0
+	keeper := NewCookieKeeper(nil, func() model.AppSettings {
+		return model.AppSettings{CookiesFile: cookiePath}
+	})
+	keeper.OnExpired = func(reason string) {
+		alerts++
+	}
+
+	// First establish healthy state
+	keeper.probeFn = func(ctx context.Context, tmpCookiePath string) (string, error) {
+		return "", nil
+	}
+	st0, err := keeper.RefreshNow(context.Background())
+	if err != nil || st0.State != "healthy" {
+		t.Fatalf("expected initial healthy state, got err=%v st=%+v", err, st0)
+	}
+
+	// Simulate outdated yt-dlp failing YouTube's JS n-challenge ("No video formats found!")
+	keeper.probeFn = func(ctx context.Context, tmpCookiePath string) (string, error) {
+		return "WARNING: [youtube] jNQXAC9IVRw: n challenge solving failed\nERROR: [youtube] jNQXAC9IVRw: No video formats found!", errors.New("exit status 1")
+	}
+	st1, err := keeper.RefreshNow(context.Background())
+	if err == nil {
+		t.Fatalf("expected probe error on EJS challenge failure")
+	}
+	if st1.State != "healthy" {
+		t.Fatalf("expected previous healthy state to be preserved (not expired), got %q", st1.State)
+	}
+	if !strings.Contains(st1.Message, "Update yt-dlp") {
+		t.Fatalf("expected actionable Update yt-dlp guidance in message, got %q", st1.Message)
+	}
+	if st1.LastError == "" || !strings.Contains(st1.LastError, "No video formats found") {
+		t.Fatalf("expected compact probe stderr in LastError, got %q", st1.LastError)
+	}
+	if alerts != 0 {
+		t.Fatalf("EJS challenge error must not fire OnExpired alert, got %d", alerts)
+	}
+	got, _ := os.ReadFile(cookiePath)
+	if !strings.Contains(string(got), "test-sid-token-1") {
+		t.Fatalf("cookies.txt must remain intact on yt-dlp EJS error")
+	}
+}

@@ -342,11 +342,15 @@ func (k *CookieKeeper) RefreshNow(ctx context.Context) (CookieHealthStatus, erro
 			k.log("warn", "Cookie YouTube terdeteksi kedaluwarsa di InstaBox. Upload ulang cookies.txt (Incognito) di Pengaturan Engine.")
 			k.notifyExpiredOnce(st.Message)
 		} else {
-			// Transient network error: preserve previous healthy state if known, do not falsely alarm
+			// Transient network or yt-dlp EJS challenge error: preserve previous healthy state, do not falsely alarm
 			if prev.State == "healthy" {
 				st.State = "healthy"
 			}
-			st.Message = "Cek keep-alive gagal sementara (jaringan/yt-dlp), cookie lama tetap dipertahankan"
+			if strings.Contains(lower, "n challenge") || strings.Contains(lower, "no video formats found") {
+				st.Message = "yt-dlp perlu di-update (klik Update yt-dlp di Pengaturan); cookie lama tetap aman"
+			} else {
+				st.Message = "Cek keep-alive gagal sementara (jaringan/yt-dlp), cookie lama tetap dipertahankan"
+			}
 			k.setStatus(st)
 			k.log("info", "Cookie keep-alive tertunda sementara: "+st.LastError)
 		}
@@ -408,7 +412,7 @@ func (k *CookieKeeper) runProbe(ctx context.Context, tmpCookiePath string) (stri
 		"--quiet",
 	}
 	if _, err := exec.LookPath("node"); err == nil {
-		args = append(args, "--js-runtimes", "node")
+		args = append(args, "--js-runtimes", "node", "--remote-components", "ejs:github")
 	}
 	args = append(args, probeURL)
 

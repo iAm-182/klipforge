@@ -657,9 +657,20 @@ func (s *Server) handleRefreshCookiesNow(w http.ResponseWriter, r *http.Request)
 	}
 	st, err := s.Cookies.RefreshNow(r.Context())
 	if err != nil {
+		errMsg := strings.TrimSpace(st.Message)
+		if st.LastError != "" {
+			if errMsg != "" {
+				errMsg += " — " + st.LastError
+			} else {
+				errMsg = st.LastError
+			}
+		}
+		if errMsg == "" {
+			errMsg = err.Error()
+		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"ok":           false,
-			"error":        err.Error(),
+			"error":        errMsg,
 			"cookieHealth": st,
 		})
 		return
