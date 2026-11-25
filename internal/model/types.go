@@ -305,9 +305,11 @@ type RenderOptions struct {
 	VideoFX      VideoFXConfig   `json:"videoFx"`
 	AudioNorm    bool            `json:"audioNorm"`
 	UseWatermark bool            `json:"useWatermark"`
-	UseOutro     bool            `json:"useOutro"`
-	UseIntro     bool            `json:"useIntro"`
-	SilenceTrim  bool            `json:"silenceTrim,omitempty"` // Ported auto-editor dead-air trim (never trims peakSec!)
+	UseOutro        bool            `json:"useOutro"`
+	UseIntro        bool            `json:"useIntro"`
+	RequireVerified bool            `json:"requireVerified,omitempty"`
+	FrameVerified   bool            `json:"frameVerified,omitempty"`
+	SilenceTrim     bool            `json:"silenceTrim,omitempty"` // Ported auto-editor dead-air trim (never trims peakSec!)
 	SceneSnap    bool            `json:"sceneSnap,omitempty"`   // Snap start/end to nearest real shot boundary
 	PickCover    bool            `json:"pickCover,omitempty"`   // Pick sharpest face-present frame near peakSec
 	Encoder      string          `json:"encoder"` // auto, libx264, h264_qsv, h264_nvenc, h264_amf

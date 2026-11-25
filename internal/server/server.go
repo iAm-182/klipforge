@@ -1860,6 +1860,10 @@ func (s *Server) handleRenderSingle(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "Format render options tidak valid")
 		return
 	}
+	if code, err := s.validateCandidateRenderGuardrail(p, opts); err != nil {
+		writeErr(w, code, err.Error())
+		return
+	}
 	opts.ActorID = p.ID
 	opts.ActorName = p.Name
 	opts.ActorVia = p.Via
@@ -1886,9 +1890,20 @@ func (s *Server) handleRenderBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var jobs []*model.RenderJob
+	var guardrailErr error
+	guardrailCode := 0
+	guardrailRejected := 0
 	for _, item := range req.Items {
 		if err := s.checkMemberQueueLimit(p); err != nil {
 			break
+		}
+		if code, err := s.validateCandidateRenderGuardrail(p, item); err != nil {
+			guardrailRejected++
+			if guardrailErr == nil || (guardrailCode != http.StatusConflict && code == http.StatusConflict) {
+				guardrailCode = code
+				guardrailErr = err
+			}
+			continue
 		}
 		item.ActorID = p.ID
 		item.ActorName = p.Name
@@ -1901,6 +1916,13 @@ func (s *Server) handleRenderBatch(w http.ResponseWriter, r *http.Request) {
 		jobs = append(jobs, job)
 	}
 	if len(jobs) == 0 {
+		if guardrailRejected == len(req.Items) && guardrailErr != nil {
+			if guardrailCode == 0 {
+				guardrailCode = http.StatusConflict
+			}
+			writeErr(w, guardrailCode, guardrailErr.Error())
+			return
+		}
 		writeErr(w, http.StatusTooManyRequests, "Batas antrean aktif anggota tercapai atau tidak ada item valid")
 		return
 	}

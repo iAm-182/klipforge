@@ -28,8 +28,26 @@ type Scheduler struct {
 	Broker  *events.Broker
 	Analyze AnalyzeFunc
 
-	mu      sync.Mutex
-	running map[string]bool
+	mu           sync.Mutex
+	running      map[string]bool
+	fetchChannel func(ctx context.Context, channelURL string, limit int, settings model.AppSettings) ([]model.ChannelVideo, error)
+}
+
+// SelectVerifiedCandidates enforces the Score-Ban Guardrail (I-05) for Autopilot:
+// it NEVER selects candidates solely by auto-detection Score, and ONLY returns
+// candidates whose Verdict is explicitly "keep" (respecting limit when limit > 0).
+func SelectVerifiedCandidates(cands []model.ClipCandidate, limit int) []model.ClipCandidate {
+	var selected []model.ClipCandidate
+	for _, c := range cands {
+		if c.Verdict == nil || !strings.EqualFold(strings.TrimSpace(c.Verdict.Verdict), "keep") {
+			continue
+		}
+		selected = append(selected, c)
+		if limit > 0 && len(selected) >= limit {
+			break
+		}
+	}
+	return selected
 }
 
 func NewScheduler(st *store.Store, yt *youtube.Client, wp *renderer.WorkerPool, broker *events.Broker, analyze AnalyzeFunc) *Scheduler {
@@ -110,7 +128,11 @@ func (sc *Scheduler) RunRule(ruleID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	videos, err := sc.YT.FetchChannelVideos(ctx, rule.ChannelURL, 15, sc.Store.GetSettings())
+	fetchFn := sc.fetchChannel
+	if fetchFn == nil {
+		fetchFn = sc.YT.FetchChannelVideos
+	}
+	videos, err := fetchFn(ctx, rule.ChannelURL, 15, sc.Store.GetSettings())
 	if err != nil {
 		rule.LastStatus = "Gagal scan channel: " + err.Error()
 		_ = sc.Store.SaveAutopilot(rule)
@@ -163,13 +185,11 @@ func (sc *Scheduler) RunRule(ruleID string) {
 			continue
 		}
 
-		limit := rule.TopClipsPerVideo
-		if limit > len(proj.Candidates) {
-			limit = len(proj.Candidates)
+		verified := SelectVerifiedCandidates(proj.Candidates, rule.TopClipsPerVideo)
+		if len(verified) == 0 {
+			sc.Broker.Log("autopilot", "info", fmt.Sprintf("[%s] %s: VOD dianalisis — 0 klip auto-render (Score-Ban aktif: wajib verifikasi transkrip + frame & verdict 'keep' dulu).", rule.Name, vid.Title))
 		}
-
-		for i := 0; i < limit; i++ {
-			cand := proj.Candidates[i]
+		for _, cand := range verified {
 			opts := buildCampaignRenderOptions(proj, cand, camp)
 			job, err := sc.Worker.EnqueueWithReview(opts, "pending_review", rule.ID)
 			if err == nil {
@@ -184,10 +204,17 @@ func (sc *Scheduler) RunRule(ruleID string) {
 		}
 	}
 
-	rule.LastStatus = fmt.Sprintf("Sukses! %d VOD baru diproses → %d klip masuk Review Inbox (Menunggu Approval Anda).", len(matched), totalQueued)
-	_ = sc.Store.SaveAutopilot(rule)
-	sc.Broker.Publish("autopilot_update", rule)
-	sc.Broker.Log("autopilot", "success", fmt.Sprintf("[%s] %s", rule.Name, rule.LastStatus))
+	if totalQueued == 0 {
+		rule.LastStatus = "VOD dianalisis — 0 klip auto-render (Score-Ban aktif: wajib verifikasi transkrip + frame & verdict 'keep' dulu)."
+		_ = sc.Store.SaveAutopilot(rule)
+		sc.Broker.Publish("autopilot_update", rule)
+		sc.Broker.Log("autopilot", "info", fmt.Sprintf("[%s] %s", rule.Name, rule.LastStatus))
+	} else {
+		rule.LastStatus = fmt.Sprintf("Sukses! %d VOD baru diproses → %d klip masuk Review Inbox (Menunggu Approval Anda).", len(matched), totalQueued)
+		_ = sc.Store.SaveAutopilot(rule)
+		sc.Broker.Publish("autopilot_update", rule)
+		sc.Broker.Log("autopilot", "success", fmt.Sprintf("[%s] %s", rule.Name, rule.LastStatus))
+	}
 
 	// Fire optional n8n / Discord Webhook notification!
 	if rule.NotifyWebhookURL != "" && totalQueued > 0 {
