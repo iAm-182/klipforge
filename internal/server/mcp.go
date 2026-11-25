@@ -66,8 +66,8 @@ func propBool(desc string) map[string]interface{} {
 	return map[string]interface{}{"type": "boolean", "description": desc}
 }
 
-// mcpTools defines all 26 strictly least-privilege MCP tools exposed at /api/mcp.
-// Zero destructive tools: NO DELETE, NO QC approve/reject, NO /api/team management, NO /api/publish/accounts, NO cookie refresh.
+// mcpTools defines all 29 strictly least-privilege MCP tools exposed at /api/mcp.
+// Zero destructive tools: NO DELETE, NO QC approve/reject, NO manual mark-posted/ledger writes, NO /api/team management, NO /api/publish/accounts, NO cookie refresh.
 var mcpTools = []mcpToolDef{
 	{
 		Name:        "klipforge_home_metrics",
@@ -319,6 +319,25 @@ var mcpTools = []mcpToolDef{
 		Description: "Read non-secret team presence, active WIP counts, turnaround, approval rates, and 7-day sparklines (zero keys exposed).",
 		InputSchema: schemaObj(map[string]interface{}{}),
 	},
+	{
+		Name:        "klipforge_inventory",
+		Description: "Read-only IN-SAMPLE audit of all KlipForge jobs vs MP4 files on disk (publishable, posted, pending_review, rejected_recoverable, broken_missing_file, failed, orphan MP4s, and rejection reason histogram).",
+		InputSchema: schemaObj(map[string]interface{}{}),
+	},
+	{
+		Name:        "klipforge_publishable_queue",
+		Description: "List FIFO queue of approved clips with existing MP4 files ready for manual posting (postedPlatforms, remainingPlatforms, downloadUrl, caption, recorded views). Posting is strictly manual (zero auto-post).",
+		InputSchema: schemaObj(map[string]interface{}{}),
+	},
+	{
+		Name:        "klipforge_views_ledger",
+		Description: "Read manually logged post performance entries and summary (totalViews, medianViews, IN-SAMPLE vs HELD-OUT breakdowns). Strictly read-only for agents.",
+		InputSchema: schemaObj(map[string]interface{}{
+			"jobId":    propStr("Optional RenderJob ID filter"),
+			"platform": propStr("Optional platform filter: tiktok | youtube | instagram"),
+			"split":    propStr("Optional sample split filter: IN-SAMPLE | HELD-OUT"),
+		}),
+	},
 }
 
 // handleMCP exposes KlipForge's native Streamable HTTP MCP JSON-RPC 2.0 server at /api/mcp (POST/GET/DELETE).
@@ -473,7 +492,7 @@ func (s *Server) handleSingleMCPRequest(r *http.Request, req mcpRequest) (mcpRes
 					"name":    "klipforge-mcp",
 					"version": "1.1.0",
 				},
-				"instructions": "KlipForge least-privilege MCP orchestrator (26 tools). Audio-first by default; supports Live Chat Replay Pro, AutoClip compact transcript windows, Vision Storyboards, and shot-aware face_track_smart while honoring RBAC, Fair Queue, and campaign forbiddenWords.",
+				"instructions": "KlipForge least-privilege MCP orchestrator (29 tools). Audio-first by default; enforces I-05 Score-Ban Guardrail (verdict='keep' + frame/storyboard proof before candidate render), read-only P0 Ops observability (inventory, manual publishable queue, views ledger), Live Chat Replay Pro, AutoClip compact transcript windows, Vision Storyboards, and shot-aware face_track_smart while honoring RBAC, Fair Queue, and campaign forbiddenWords.",
 			},
 		}, true
 
@@ -867,6 +886,32 @@ func (s *Server) dispatchMCPTool(outer *http.Request, name string, args map[stri
 
 	case "klipforge_team_metrics":
 		code, body := invoke(http.MethodGet, "/api/team/metrics", nil, nil, s.handleTeamMetrics)
+		return formatMCPResult(code, body), nil
+
+	case "klipforge_inventory":
+		code, body := invoke(http.MethodGet, "/api/inventory", nil, nil, s.handleGetInventory)
+		return formatMCPResult(code, body), nil
+
+	case "klipforge_publishable_queue":
+		code, body := invoke(http.MethodGet, "/api/publishable", nil, nil, s.handleListPublishable)
+		return formatMCPResult(code, body), nil
+
+	case "klipforge_views_ledger":
+		qv := url.Values{}
+		if jid := strArg("jobId"); jid != "" {
+			qv.Set("jobId", jid)
+		}
+		if plat := strArg("platform"); plat != "" {
+			qv.Set("platform", plat)
+		}
+		if sp := strArg("split"); sp != "" {
+			qv.Set("split", sp)
+		}
+		target := "/api/ledger/views"
+		if enc := qv.Encode(); enc != "" {
+			target += "?" + enc
+		}
+		code, body := invoke(http.MethodGet, target, nil, nil, s.handleListViewsLedger)
 		return formatMCPResult(code, body), nil
 
 	default:

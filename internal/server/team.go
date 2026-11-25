@@ -164,6 +164,7 @@ func isRoleAllowed(p model.Principal, method, path string) bool {
 			"/api/audio/presets":         true,
 			"/api/audio/trending/import": true,
 			"/api/board/move":            true,
+			"/api/ledger/views":          true,
 			"/api/mcp":                   true,
 		}
 		if allowedClipperExact[path] {
@@ -197,8 +198,8 @@ func isRoleAllowed(p model.Principal, method, path string) bool {
 				strings.HasSuffix(path, "/analytics/sync") {
 				return true
 			}
-			// Only QC (and Owner) can Approve / Reject clips in Review!
-			if p.Role == "qc" && (strings.HasSuffix(path, "/review") || path == "/api/jobs/review/batch") {
+			// Only QC (and Owner) can Approve / Reject clips in Review or Mark Clips Posted Manually!
+			if p.Role == "qc" && (strings.HasSuffix(path, "/review") || path == "/api/jobs/review/batch" || strings.HasSuffix(path, "/mark-posted")) {
 				return true
 			}
 		}

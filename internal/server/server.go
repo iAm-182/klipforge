@@ -275,11 +275,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/mcp", s.handleMCP)
 	mux.HandleFunc("DELETE /api/mcp", s.handleMCP)
 
-	// Kanban Board, Activity Feed & Home Metrics (B1)
+	// Kanban Board, Activity Feed & Home Metrics (B1) + P0 Operations (I-02, I-03, I-04)
 	mux.HandleFunc("GET /api/activity", s.handleListActivity)
 	mux.HandleFunc("GET /api/metrics/home", s.handleHomeMetrics)
 	mux.HandleFunc("GET /api/board", s.handleGetBoard)
 	mux.HandleFunc("POST /api/board/move", s.handleBoardMove)
+	mux.HandleFunc("GET /api/inventory", s.handleGetInventory)
+	mux.HandleFunc("GET /api/publishable", s.handleListPublishable)
+	mux.HandleFunc("GET /api/ledger/views", s.handleListViewsLedger)
+	mux.HandleFunc("POST /api/ledger/views", s.handleAddViewsLedger)
 
 	// Campaigns & Asset uploads (Watermark / Outro / Intro)
 	mux.HandleFunc("GET /api/campaigns", s.handleListCampaigns)
@@ -296,6 +300,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/projects/analyze", s.handleAnalyzeProject)
 	mux.HandleFunc("POST /api/projects/{id}/reanalyze", s.handleReanalyzeProject)
 	mux.HandleFunc("GET /api/projects/{id}/search", s.handleSearchTranscript)
+	mux.HandleFunc("GET /api/projects/{id}/transcript", s.handleGetProjectTranscript)
 	mux.HandleFunc("GET /api/projects/{id}/transcript-windows", s.handleGetTranscriptWindows)
 	mux.HandleFunc("POST /api/projects/{id}/scan-audio", s.handleScanAudioOnly)
 	mux.HandleFunc("POST /api/projects/{id}/scan-livechat", s.handleScanLiveChat)
@@ -328,6 +333,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/jobs/{id}/draft/download", s.handleDownloadJianyingDraft)
 	mux.HandleFunc("POST /api/jobs/{id}/publish-kit", s.handleGeneratePublishKit)
 	mux.HandleFunc("POST /api/jobs/{id}/publish", s.handlePublishJob)
+	mux.HandleFunc("POST /api/jobs/{id}/mark-posted", s.handleMarkJobPosted)
 	mux.HandleFunc("POST /api/jobs/{id}/analytics/sync", s.handleSyncJobAnalytics)
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.handleCancelJob)
 
