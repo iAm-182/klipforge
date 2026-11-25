@@ -534,6 +534,50 @@ type AnalyticsSnapshot struct {
 	FetchedAt time.Time `json:"fetchedAt"`
 }
 
+// ViewsLedgerEntry records manually observed post-publish performance for a rendered clip.
+type ViewsLedgerEntry struct {
+	ID          string    `json:"id"`
+	JobID       string    `json:"jobId"`
+	ProjectID   string    `json:"projectId,omitempty"`
+	Title       string    `json:"title"`
+	Platform    string    `json:"platform"` // tiktok, youtube, instagram
+	PostURL     string    `json:"postUrl,omitempty"`
+	PostedAt    time.Time `json:"postedAt"`
+	RecordedAt  time.Time `json:"recordedAt"`
+	Views       int64     `json:"views"`
+	Likes       int64     `json:"likes"`
+	Comments    int64     `json:"comments"`
+	Shares      int64     `json:"shares"`
+	WatchSec    float64   `json:"watchSec,omitempty"`
+	Format      string    `json:"format,omitempty"` // e.g. "16:9", "9:16"
+	SampleSplit string    `json:"sampleSplit"`      // "IN-SAMPLE" | "HELD-OUT"
+	Note        string    `json:"note,omitempty"`
+	RecordedBy  string    `json:"recordedBy,omitempty"`
+}
+
+// ViewsBucketStats aggregates views ledger metrics for a single platform or sampleSplit bucket.
+type ViewsBucketStats struct {
+	Entries       int   `json:"entries"`
+	TotalViews    int64 `json:"totalViews"`
+	TotalLikes    int64 `json:"totalLikes"`
+	TotalComments int64 `json:"totalComments"`
+	TotalShares   int64 `json:"totalShares"`
+	MedianViews   int64 `json:"medianViews"`
+}
+
+// ViewsLedgerSummary aggregates recorded views across entries, grouped by platform and sample split.
+type ViewsLedgerSummary struct {
+	TotalEntries  int                         `json:"totalEntries"`
+	TotalViews    int64                       `json:"totalViews"`
+	TotalLikes    int64                       `json:"totalLikes"`
+	TotalComments int64                       `json:"totalComments"`
+	TotalShares   int64                       `json:"totalShares"`
+	MedianViews   int64                       `json:"medianViews"`
+	ByPlatform    map[string]ViewsBucketStats `json:"byPlatform"`
+	BySplit       map[string]ViewsBucketStats `json:"bySplit"`
+	DataScopeNote string                      `json:"dataScopeNote"`
+}
+
 // JianyingDraftInfo describes an exported CapCut / Jianying desktop draft bundle.
 type JianyingDraftInfo struct {
 	FileName      string    `json:"fileName"`

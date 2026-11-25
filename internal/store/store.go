@@ -31,6 +31,7 @@ type Store struct {
 	publishAccounts map[string]*model.PublishAccount
 	agentTrendQuota map[string]int
 	activity        []model.ActivityEntry
+	viewsLedger     []*model.ViewsLedgerEntry
 	settings        model.AppSettings
 }
 
@@ -212,6 +213,18 @@ func (s *Store) loadAll() {
 				s.publishAccounts[a.ID] = a
 			}
 		}
+	}
+
+	// Load persisted views ledger
+	var ledger []*model.ViewsLedgerEntry
+	if readJSONWithBackupFallback(filepath.Join(s.DataDir, "views_ledger.json"), &ledger) {
+		filtered := make([]*model.ViewsLedgerEntry, 0, len(ledger))
+		for _, e := range ledger {
+			if e != nil && e.ID != "" {
+				filtered = append(filtered, e)
+			}
+		}
+		s.viewsLedger = filtered
 	}
 
 	// Load persisted activity feed
