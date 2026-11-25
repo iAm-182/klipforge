@@ -483,16 +483,29 @@ func (s *Server) handleMarkJobPosted(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Platform     string `json:"platform"`
-		PublishedURL string `json:"publishedUrl"`
-		PostURL      string `json:"postUrl"`
-		Note         string `json:"note"`
-		Views        *int64 `json:"views"`
-		Likes        *int64 `json:"likes"`
-		Comments     *int64 `json:"comments"`
-		Shares       *int64 `json:"shares"`
-		SampleSplit  string `json:"sampleSplit"`
-		RecordLedger *bool  `json:"recordLedger"`
+		Platform         string `json:"platform"`
+		PublishedURL     string `json:"publishedUrl"`
+		PostURL          string `json:"postUrl"`
+		Note             string `json:"note"`
+		Views            *int64 `json:"views"`
+		Likes            *int64 `json:"likes"`
+		Comments         *int64 `json:"comments"`
+		Shares           *int64 `json:"shares"`
+		SampleSplit      string `json:"sampleSplit"`
+		CohortTag        string `json:"cohortTag"`
+		HookType         string `json:"hookType"`
+		TriggerSource    string `json:"triggerSource"`
+		Views24h         *int64 `json:"views24h"`
+		Views7d          *int64 `json:"views7d"`
+		ChannelState     string `json:"channelState"`
+		PostedDayTime    string `json:"postedDayTime"`
+		ThumbnailTs      string `json:"thumbnailTs"`
+		CueSelectionUsed bool   `json:"cueSelectionUsed"`
+		H1TawaFacecam    bool   `json:"h1TawaFacecam"`
+		H1VisualKejadian bool   `json:"h1VisualKejadian"`
+		H1ArcUtuh        bool   `json:"h1ArcUtuh"`
+		H1HookMutePass   bool   `json:"h1HookMutePass"`
+		RecordLedger     *bool  `json:"recordLedger"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "Format JSON mark-posted tidak valid")
@@ -505,13 +518,27 @@ func (s *Server) handleMarkJobPosted(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var views, likes, comments, shares int64
+	var views, likes, comments, shares, views24h, views7d int64
 	if req.Views != nil {
 		if *req.Views < 0 {
 			writeErr(w, http.StatusBadRequest, "views harus >= 0")
 			return
 		}
 		views = *req.Views
+	}
+	if req.Views24h != nil {
+		if *req.Views24h < 0 {
+			writeErr(w, http.StatusBadRequest, "views24h harus >= 0")
+			return
+		}
+		views24h = *req.Views24h
+	}
+	if req.Views7d != nil {
+		if *req.Views7d < 0 {
+			writeErr(w, http.StatusBadRequest, "views7d harus >= 0")
+			return
+		}
+		views7d = *req.Views7d
 	}
 	if req.Likes != nil {
 		if *req.Likes < 0 {
@@ -541,6 +568,22 @@ func (s *Server) handleMarkJobPosted(w http.ResponseWriter, r *http.Request) {
 	}
 	if split != "IN-SAMPLE" && split != "HELD-OUT" {
 		writeErr(w, http.StatusBadRequest, "sampleSplit harus IN-SAMPLE atau HELD-OUT")
+		return
+	}
+
+	cohortTag, err := store.NormalizeCohortTag(req.CohortTag)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	hookType, err := store.NormalizeHookType(req.HookType)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	triggerSource, err := store.NormalizeTriggerSource(req.TriggerSource)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -583,28 +626,45 @@ func (s *Server) handleMarkJobPosted(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("%s menandai klip '%s' diposting manual ke %s", p.Name, updated.Title, strings.ToUpper(platform)),
 		publishedURL, "success")
 
-	hasExplicitMetric := req.Views != nil || req.Likes != nil || req.Comments != nil || req.Shares != nil
-	hasPositiveMetric := views > 0 || likes > 0 || comments > 0 || shares > 0
+	hasExplicitMetric := req.Views != nil || req.Likes != nil || req.Comments != nil || req.Shares != nil || req.Views24h != nil || req.Views7d != nil
+	hasPositiveMetric := views > 0 || likes > 0 || comments > 0 || shares > 0 || views24h > 0 || views7d > 0
+	hasV12Metadata := strings.TrimSpace(req.CohortTag) != "" || hookType != "" || triggerSource != "" ||
+		strings.TrimSpace(req.ChannelState) != "" || strings.TrimSpace(req.PostedDayTime) != "" ||
+		strings.TrimSpace(req.ThumbnailTs) != "" || req.CueSelectionUsed ||
+		req.H1TawaFacecam || req.H1VisualKejadian || req.H1ArcUtuh || req.H1HookMutePass
 	allowLedger := req.RecordLedger == nil || *req.RecordLedger
 
 	var ledgerEntry *model.ViewsLedgerEntry
-	if allowLedger && (hasPositiveMetric || hasExplicitMetric || publishedURL != "") {
+	if allowLedger && (hasPositiveMetric || hasExplicitMetric || publishedURL != "" || hasV12Metadata) {
 		saved, err := s.Store.AddViewsLedgerEntry(model.ViewsLedgerEntry{
-			JobID:       updated.ID,
-			ProjectID:   updated.ProjectID,
-			Title:       updated.Title,
-			Platform:    platform,
-			PostURL:     publishedURL,
-			PostedAt:    now,
-			RecordedAt:  now,
-			Views:       views,
-			Likes:       likes,
-			Comments:    comments,
-			Shares:      shares,
-			Format:      inferJobAspectRatio(updated),
-			SampleSplit: split,
-			Note:        note,
-			RecordedBy:  p.Name,
+			JobID:            updated.ID,
+			ProjectID:        updated.ProjectID,
+			Title:            updated.Title,
+			Platform:         platform,
+			PostURL:          publishedURL,
+			PostedAt:         now,
+			RecordedAt:       now,
+			Views:            views,
+			Views24h:         views24h,
+			Views7d:          views7d,
+			Likes:            likes,
+			Comments:         comments,
+			Shares:           shares,
+			Format:           inferJobAspectRatio(updated),
+			SampleSplit:      split,
+			CohortTag:        cohortTag,
+			HookType:         hookType,
+			TriggerSource:    triggerSource,
+			ChannelState:     req.ChannelState,
+			PostedDayTime:    req.PostedDayTime,
+			ThumbnailTs:      req.ThumbnailTs,
+			CueSelectionUsed: req.CueSelectionUsed,
+			H1TawaFacecam:    req.H1TawaFacecam,
+			H1VisualKejadian: req.H1VisualKejadian,
+			H1ArcUtuh:        req.H1ArcUtuh,
+			H1HookMutePass:   req.H1HookMutePass,
+			Note:             note,
+			RecordedBy:       p.Name,
 		})
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "Klip ditandai diposting tetapi gagal menyimpan views ledger: "+err.Error())

@@ -377,14 +377,19 @@ type AppliedEditPlan struct {
 
 // CandidateVerdict stores a human or agent (Muse) judgment directly on a ClipCandidate.
 type CandidateVerdict struct {
-	Verdict    string    `json:"verdict"`              // "keep", "drop", "maybe"
-	Funny      int       `json:"funny"`                // 0 - 5
-	Note       string    `json:"note,omitempty"`
-	MomentType string    `json:"momentType,omitempty"` // crash, fail, hype, twist, victory, meme, custom
-	VerdictBy  string    `json:"verdictBy"`            // e.g. "Budi (agent)" or "Owner (web)"
-	MemberID   string    `json:"memberId,omitempty"`
-	Via        string    `json:"via,omitempty"`        // web, agent, token
-	UpdatedAt  time.Time `json:"updatedAt"`
+	Verdict          string    `json:"verdict"`                    // "keep", "drop", "maybe"
+	Funny            int       `json:"funny"`                      // 0 - 5
+	Note             string    `json:"note,omitempty"`
+	MomentType       string    `json:"momentType,omitempty"`       // crash, fail, hype, twist, victory, meme, custom
+	HookLine         string    `json:"hookLine,omitempty"`         // Standalone 1-line hook (P1 I-15 metadata)
+	H1TawaFacecam    bool      `json:"h1TawaFacecam,omitempty"`    // H1 F1: streamer laugh/reaction visible on facecam
+	H1VisualKejadian bool      `json:"h1VisualKejadian,omitempty"` // H1 F2: incident/physics visible in frame
+	H1ArcUtuh        bool      `json:"h1ArcUtuh,omitempty"`        // H1 F3: complete 20-55s arc
+	H1HookMutePass   bool      `json:"h1HookMutePass,omitempty"`   // H1 F4: 1-3s hook passes mute test
+	VerdictBy        string    `json:"verdictBy"`                  // e.g. "Budi (agent)" or "Owner (web)"
+	MemberID         string    `json:"memberId,omitempty"`
+	Via              string    `json:"via,omitempty"`              // web, agent, token
+	UpdatedAt        time.Time `json:"updatedAt"`
 }
 
 // CompileSegment is one clip slot inside a Top-N Countdown, Rapid Compilation, or CapCut-Pro Edit Script video.
@@ -538,23 +543,37 @@ type AnalyticsSnapshot struct {
 
 // ViewsLedgerEntry records manually observed post-publish performance for a rendered clip.
 type ViewsLedgerEntry struct {
-	ID          string    `json:"id"`
-	JobID       string    `json:"jobId"`
-	ProjectID   string    `json:"projectId,omitempty"`
-	Title       string    `json:"title"`
-	Platform    string    `json:"platform"` // tiktok, youtube, instagram
-	PostURL     string    `json:"postUrl,omitempty"`
-	PostedAt    time.Time `json:"postedAt"`
-	RecordedAt  time.Time `json:"recordedAt"`
-	Views       int64     `json:"views"`
-	Likes       int64     `json:"likes"`
-	Comments    int64     `json:"comments"`
-	Shares      int64     `json:"shares"`
-	WatchSec    float64   `json:"watchSec,omitempty"`
-	Format      string    `json:"format,omitempty"` // e.g. "16:9", "9:16"
-	SampleSplit string    `json:"sampleSplit"`      // "IN-SAMPLE" | "HELD-OUT"
-	Note        string    `json:"note,omitempty"`
-	RecordedBy  string    `json:"recordedBy,omitempty"`
+	ID               string    `json:"id"`
+	JobID            string    `json:"jobId"`
+	ProjectID        string    `json:"projectId,omitempty"`
+	Title            string    `json:"title"`
+	Platform         string    `json:"platform"` // tiktok, youtube, instagram
+	PostURL          string    `json:"postUrl,omitempty"`
+	PostedAt         time.Time `json:"postedAt"`
+	RecordedAt       time.Time `json:"recordedAt"`
+	Views            int64     `json:"views"`
+	Likes            int64     `json:"likes"`
+	Comments         int64     `json:"comments"`
+	Shares           int64     `json:"shares"`
+	WatchSec         float64   `json:"watchSec,omitempty"`
+	Format           string    `json:"format,omitempty"` // e.g. "16:9", "9:16"
+	SampleSplit      string    `json:"sampleSplit"`      // "IN-SAMPLE" | "HELD-OUT"
+	CohortTag        string    `json:"cohortTag,omitempty"`        // "PRE-v1.2" | "POST-v1.2"
+	HookType         string    `json:"hookType,omitempty"`         // "" | "tableau" | "reaksi" | "aksi" | "text_on_screen"
+	TriggerSource    string    `json:"triggerSource,omitempty"`    // "" | "manual" | "transcript" | "chat" | "audio" | "llm"
+	Views24h         int64     `json:"views24h,omitempty"`
+	Views7d          int64     `json:"views7d,omitempty"`
+	ChannelState     string    `json:"channelState,omitempty"`
+	PostedDayTime    string    `json:"postedDayTime,omitempty"`
+	ThumbnailTs      string    `json:"thumbnailTs,omitempty"`
+	CueSelectionUsed bool      `json:"cueSelectionUsed,omitempty"`
+	H1TawaFacecam    bool      `json:"h1TawaFacecam,omitempty"`
+	H1VisualKejadian bool      `json:"h1VisualKejadian,omitempty"`
+	H1ArcUtuh        bool      `json:"h1ArcUtuh,omitempty"`
+	H1HookMutePass   bool      `json:"h1HookMutePass,omitempty"`
+	H1PassCount      int       `json:"h1PassCount,omitempty"`
+	Note             string    `json:"note,omitempty"`
+	RecordedBy       string    `json:"recordedBy,omitempty"`
 }
 
 // ViewsBucketStats aggregates views ledger metrics for a single platform or sampleSplit bucket.
@@ -567,17 +586,23 @@ type ViewsBucketStats struct {
 	MedianViews   int64 `json:"medianViews"`
 }
 
-// ViewsLedgerSummary aggregates recorded views across entries, grouped by platform and sample split.
+// ViewsLedgerSummary aggregates recorded views across entries, grouped by platform, split, cohort, trigger, and hook type.
 type ViewsLedgerSummary struct {
-	TotalEntries  int                         `json:"totalEntries"`
-	TotalViews    int64                       `json:"totalViews"`
-	TotalLikes    int64                       `json:"totalLikes"`
-	TotalComments int64                       `json:"totalComments"`
-	TotalShares   int64                       `json:"totalShares"`
-	MedianViews   int64                       `json:"medianViews"`
-	ByPlatform    map[string]ViewsBucketStats `json:"byPlatform"`
-	BySplit       map[string]ViewsBucketStats `json:"bySplit"`
-	DataScopeNote string                      `json:"dataScopeNote"`
+	TotalEntries    int                         `json:"totalEntries"`
+	TotalViews      int64                       `json:"totalViews"`
+	TotalLikes      int64                       `json:"totalLikes"`
+	TotalComments   int64                       `json:"totalComments"`
+	TotalShares     int64                       `json:"totalShares"`
+	MedianViews     int64                       `json:"medianViews"`
+	RamaiThreshold  int64                       `json:"ramaiThreshold"`
+	RamaiStatus     string                      `json:"ramaiStatus"`
+	ByPlatform      map[string]ViewsBucketStats `json:"byPlatform"`
+	BySplit         map[string]ViewsBucketStats `json:"bySplit"`
+	ByCohort        map[string]ViewsBucketStats `json:"byCohort,omitempty"`
+	ByTrigger       map[string]ViewsBucketStats `json:"byTrigger,omitempty"`
+	ByHookType      map[string]ViewsBucketStats `json:"byHookType,omitempty"`
+	H1FullPassCount int                         `json:"h1FullPassCount"`
+	DataScopeNote   string                      `json:"dataScopeNote"`
 }
 
 // JianyingDraftInfo describes an exported CapCut / Jianying desktop draft bundle.

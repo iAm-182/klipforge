@@ -15,6 +15,60 @@ const viewsLedgerScopeNote = "PERINGATAN DATA SCOPE: Metrik IN-SAMPLE hanya obse
 
 var viewsLedgerSeq atomic.Uint64
 
+// NormalizeCohortTag validates and normalizes a v1.2a cohortTag ("PRE-v1.2" | "POST-v1.2", default "POST-v1.2").
+func NormalizeCohortTag(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "POST-v1.2", nil
+	}
+	if strings.EqualFold(trimmed, "PRE-v1.2") {
+		return "PRE-v1.2", nil
+	}
+	if strings.EqualFold(trimmed, "POST-v1.2") {
+		return "POST-v1.2", nil
+	}
+	return "", fmt.Errorf("invalid cohortTag %q: must be PRE-v1.2 or POST-v1.2", raw)
+}
+
+// NormalizeHookType validates and normalizes a v1.2a hookType ("" | "tableau" | "reaksi" | "aksi" | "text_on_screen").
+func NormalizeHookType(raw string) (string, error) {
+	norm := strings.ToLower(strings.TrimSpace(raw))
+	switch norm {
+	case "", "tableau", "reaksi", "aksi", "text_on_screen":
+		return norm, nil
+	default:
+		return "", fmt.Errorf("invalid hookType %q: must be tableau, reaksi, aksi, or text_on_screen", raw)
+	}
+}
+
+// NormalizeTriggerSource validates and normalizes a v1.2a triggerSource ("" | "manual" | "transcript" | "chat" | "audio" | "llm").
+func NormalizeTriggerSource(raw string) (string, error) {
+	norm := strings.ToLower(strings.TrimSpace(raw))
+	switch norm {
+	case "", "manual", "transcript", "chat", "audio", "llm":
+		return norm, nil
+	default:
+		return "", fmt.Errorf("invalid triggerSource %q: must be manual, transcript, chat, audio, or llm", raw)
+	}
+}
+
+func countH1Flags(tawa, visual, arc, mute bool) int {
+	n := 0
+	if tawa {
+		n++
+	}
+	if visual {
+		n++
+	}
+	if arc {
+		n++
+	}
+	if mute {
+		n++
+	}
+	return n
+}
+
 // AddViewsLedgerEntry validates, normalizes, and atomically persists a manual post performance record to data/views_ledger.json.
 func (s *Store) AddViewsLedgerEntry(entry model.ViewsLedgerEntry) (*model.ViewsLedgerEntry, error) {
 	entry.JobID = strings.TrimSpace(entry.JobID)
@@ -31,6 +85,19 @@ func (s *Store) AddViewsLedgerEntry(entry model.ViewsLedgerEntry) (*model.ViewsL
 
 	if entry.Views < 0 {
 		return nil, fmt.Errorf("views must be >= 0")
+	}
+	if entry.Views24h < 0 {
+		return nil, fmt.Errorf("views24h must be >= 0")
+	}
+	if entry.Views7d < 0 {
+		return nil, fmt.Errorf("views7d must be >= 0")
+	}
+	if entry.Views == 0 {
+		if entry.Views7d > 0 {
+			entry.Views = entry.Views7d
+		} else if entry.Views24h > 0 {
+			entry.Views = entry.Views24h
+		}
 	}
 	if entry.Likes < 0 {
 		return nil, fmt.Errorf("likes must be >= 0")
@@ -54,10 +121,33 @@ func (s *Store) AddViewsLedgerEntry(entry model.ViewsLedgerEntry) (*model.ViewsL
 	}
 	entry.SampleSplit = split
 
+	cohort, err := NormalizeCohortTag(entry.CohortTag)
+	if err != nil {
+		return nil, err
+	}
+	entry.CohortTag = cohort
+
+	hookType, err := NormalizeHookType(entry.HookType)
+	if err != nil {
+		return nil, err
+	}
+	entry.HookType = hookType
+
+	triggerSource, err := NormalizeTriggerSource(entry.TriggerSource)
+	if err != nil {
+		return nil, err
+	}
+	entry.TriggerSource = triggerSource
+
+	entry.H1PassCount = countH1Flags(entry.H1TawaFacecam, entry.H1VisualKejadian, entry.H1ArcUtuh, entry.H1HookMutePass)
+
 	entry.ProjectID = strings.TrimSpace(entry.ProjectID)
 	entry.Title = strings.TrimSpace(entry.Title)
 	entry.PostURL = strings.TrimSpace(entry.PostURL)
 	entry.Format = strings.TrimSpace(entry.Format)
+	entry.ChannelState = strings.TrimSpace(entry.ChannelState)
+	entry.PostedDayTime = strings.TrimSpace(entry.PostedDayTime)
+	entry.ThumbnailTs = strings.TrimSpace(entry.ThumbnailTs)
 	entry.Note = strings.TrimSpace(entry.Note)
 	entry.RecordedBy = strings.TrimSpace(entry.RecordedBy)
 
@@ -121,12 +211,16 @@ func (s *Store) ListViewsLedger(jobID, platform, sampleSplit string) []*model.Vi
 	return out
 }
 
-// SummarizeViewsLedger computes totals, median views, and platform/sampleSplit breakdowns
+// SummarizeViewsLedger computes totals, median views, adaptive Ramai threshold/status,
+// and platform/sampleSplit/cohort/trigger/hookType breakdowns plus H1 4/4 pass count,
 // along with an explicit warning never to conflate IN-SAMPLE observations with HELD-OUT proof.
 func SummarizeViewsLedger(entries []*model.ViewsLedgerEntry) model.ViewsLedgerSummary {
 	summary := model.ViewsLedgerSummary{
 		ByPlatform:    make(map[string]model.ViewsBucketStats),
 		BySplit:       make(map[string]model.ViewsBucketStats),
+		ByCohort:      make(map[string]model.ViewsBucketStats),
+		ByTrigger:     make(map[string]model.ViewsBucketStats),
+		ByHookType:    make(map[string]model.ViewsBucketStats),
 		DataScopeNote: viewsLedgerScopeNote,
 	}
 
@@ -138,6 +232,9 @@ func SummarizeViewsLedger(entries []*model.ViewsLedgerEntry) model.ViewsLedgerSu
 	allViews := make([]int64, 0, len(entries))
 	platAcc := make(map[string]*bucketAcc)
 	splitAcc := make(map[string]*bucketAcc)
+	cohortAcc := make(map[string]*bucketAcc)
+	triggerAcc := make(map[string]*bucketAcc)
+	hookAcc := make(map[string]*bucketAcc)
 
 	addToBucket := func(m map[string]*bucketAcc, key string, e *model.ViewsLedgerEntry) {
 		acc, ok := m[key]
@@ -175,17 +272,49 @@ func SummarizeViewsLedger(entries []*model.ViewsLedgerEntry) model.ViewsLedgerSu
 			split = "IN-SAMPLE"
 		}
 		addToBucket(splitAcc, split, e)
+
+		cohort, err := NormalizeCohortTag(e.CohortTag)
+		if err != nil {
+			cohort = strings.TrimSpace(e.CohortTag)
+		}
+		addToBucket(cohortAcc, cohort, e)
+
+		if trig := strings.ToLower(strings.TrimSpace(e.TriggerSource)); trig != "" {
+			addToBucket(triggerAcc, trig, e)
+		}
+		if hook := strings.ToLower(strings.TrimSpace(e.HookType)); hook != "" {
+			addToBucket(hookAcc, hook, e)
+		}
+
+		if e.H1TawaFacecam && e.H1VisualKejadian && e.H1ArcUtuh && e.H1HookMutePass {
+			summary.H1FullPassCount++
+		}
 	}
 
 	summary.MedianViews = computeMedianInt64(allViews)
-	for k, acc := range platAcc {
-		acc.stats.MedianViews = computeMedianInt64(acc.views)
-		summary.ByPlatform[k] = acc.stats
+	switch {
+	case summary.TotalEntries < 3:
+		summary.RamaiThreshold = 0
+		summary.RamaiStatus = "PLACEHOLDER_DUGAAN_N_LT_3"
+	case summary.TotalEntries < 10:
+		summary.RamaiThreshold = 2 * summary.MedianViews
+		summary.RamaiStatus = "BASELINE_AWAL_DUGAAN_N_LT_10"
+	default:
+		summary.RamaiThreshold = 2 * summary.MedianViews
+		summary.RamaiStatus = "AKTIF_2X_MEDIAN_N_GE_10"
 	}
-	for k, acc := range splitAcc {
-		acc.stats.MedianViews = computeMedianInt64(acc.views)
-		summary.BySplit[k] = acc.stats
+
+	finalizeBuckets := func(src map[string]*bucketAcc, dst map[string]model.ViewsBucketStats) {
+		for k, acc := range src {
+			acc.stats.MedianViews = computeMedianInt64(acc.views)
+			dst[k] = acc.stats
+		}
 	}
+	finalizeBuckets(platAcc, summary.ByPlatform)
+	finalizeBuckets(splitAcc, summary.BySplit)
+	finalizeBuckets(cohortAcc, summary.ByCohort)
+	finalizeBuckets(triggerAcc, summary.ByTrigger)
+	finalizeBuckets(hookAcc, summary.ByHookType)
 
 	return summary
 }

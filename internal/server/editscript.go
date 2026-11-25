@@ -431,8 +431,8 @@ func isValidMomentType(mt string) bool {
 	}
 }
 
-// handleCandidateVerdict stores a human or agent (Muse) judgment ("keep"|"drop"|"maybe", funny 0-5, note, momentType)
-// directly on a project candidate. NEVER auto-renders on "keep".
+// handleCandidateVerdict stores a human or agent (Muse) judgment ("keep"|"drop"|"maybe", funny 0-5, note, momentType,
+// optional hookLine + 4 H1 checklist flags) directly on a project candidate. NEVER auto-renders on "keep".
 func (s *Server) handleCandidateVerdict(w http.ResponseWriter, r *http.Request) {
 	projID := r.PathValue("id")
 	candID := r.PathValue("candId")
@@ -443,10 +443,15 @@ func (s *Server) handleCandidateVerdict(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req struct {
-		Verdict    string `json:"verdict"`    // keep | drop | maybe
-		Funny      int    `json:"funny"`      // 0 - 5
-		Note       string `json:"note"`       // free-form note
-		MomentType string `json:"momentType"` // optional override
+		Verdict          string `json:"verdict"`          // keep | drop | maybe
+		Funny            int    `json:"funny"`            // 0 - 5
+		Note             string `json:"note"`             // free-form note
+		MomentType       string `json:"momentType"`       // optional override
+		HookLine         string `json:"hookLine"`         // optional standalone 1-line hook (I-15)
+		H1TawaFacecam    bool   `json:"h1TawaFacecam"`    // optional H1 F1 flag
+		H1VisualKejadian bool   `json:"h1VisualKejadian"` // optional H1 F2 flag
+		H1ArcUtuh        bool   `json:"h1ArcUtuh"`        // optional H1 F3 flag
+		H1HookMutePass   bool   `json:"h1HookMutePass"`   // optional H1 F4 flag
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "Format JSON verdict tidak valid")
@@ -467,6 +472,13 @@ func (s *Server) handleCandidateVerdict(w http.ResponseWriter, r *http.Request) 
 	if mt != "" && !isValidMomentType(mt) {
 		writeErr(w, http.StatusBadRequest, "momentType harus salah satu dari: crash, fail, hype, twist, victory, meme, custom")
 		return
+	}
+	hookLine := strings.TrimSpace(req.HookLine)
+	if hookLine != "" {
+		if forbidden := s.campaignForbiddenWords(proj.CampaignID); len(forbidden) > 0 && analyzer.ContainsForbiddenWord(hookLine, forbidden) {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("hookLine mengandung kata terlarang campaign: %q", hookLine))
+			return
+		}
 	}
 
 	p := getPrincipal(r)
@@ -502,14 +514,19 @@ func (s *Server) handleCandidateVerdict(w http.ResponseWriter, r *http.Request) 
 	}
 
 	cv := &model.CandidateVerdict{
-		Verdict:    v,
-		Funny:      funny,
-		Note:       strings.TrimSpace(req.Note),
-		MomentType: mt,
-		VerdictBy:  verdictBy,
-		MemberID:   p.ID,
-		Via:        p.Via,
-		UpdatedAt:  time.Now(),
+		Verdict:          v,
+		Funny:            funny,
+		Note:             strings.TrimSpace(req.Note),
+		MomentType:       mt,
+		HookLine:         hookLine,
+		H1TawaFacecam:    req.H1TawaFacecam,
+		H1VisualKejadian: req.H1VisualKejadian,
+		H1ArcUtuh:        req.H1ArcUtuh,
+		H1HookMutePass:   req.H1HookMutePass,
+		VerdictBy:        verdictBy,
+		MemberID:         p.ID,
+		Via:              p.Via,
+		UpdatedAt:        time.Now(),
 	}
 	cands[foundIdx].Verdict = cv
 	proj.Candidates = cands

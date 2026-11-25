@@ -750,3 +750,280 @@ func TestP0Ops_TranscriptBrowserPaginationAndFilters(t *testing.T) {
 		t.Fatalf("expected limit clamped to 200, got %d", pageLim.Limit)
 	}
 }
+
+func TestP0Ops_ViewsLedgerV12FullRoundTripAndMarkPosted(t *testing.T) {
+	srv, st, h, qc, clipper := setupP0OpsTestServer(t)
+
+	// 1. POST /api/ledger/views with full v1.2a fields (views omitted -> derived from views7d)
+	body1 := `{
+		"jobId":"job-pub-old",
+		"platform":"tiktok",
+		"sampleSplit":"HELD-OUT",
+		"cohortTag":"pre-v1.2",
+		"hookType":"reaksi",
+		"triggerSource":"transcript",
+		"views24h":1200,
+		"views7d":4500,
+		"channelState":"fresh",
+		"postedDayTime":"Selasa 19:00 WIB",
+		"thumbnailTs":"00:08.5",
+		"cueSelectionUsed":true,
+		"h1TawaFacecam":true,
+		"h1VisualKejadian":true,
+		"h1ArcUtuh":true,
+		"h1HookMutePass":true
+	}`
+	req1 := httptest.NewRequest(http.MethodPost, "/api/ledger/views", bytes.NewBufferString(body1))
+	req1.Header.Set("X-Access-Key", clipper.AccessKey)
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for v1.2a POST /api/ledger/views, got %d: %s", rec1.Code, rec1.Body.String())
+	}
+	var addResp struct {
+		OK      bool                     `json:"ok"`
+		Entry   model.ViewsLedgerEntry   `json:"entry"`
+		Summary model.ViewsLedgerSummary `json:"summary"`
+	}
+	if err := json.Unmarshal(rec1.Body.Bytes(), &addResp); err != nil {
+		t.Fatalf("decode add ledger v1.2a: %v", err)
+	}
+	e := addResp.Entry
+	if e.Views != 4500 || e.Views24h != 1200 || e.Views7d != 4500 ||
+		e.CohortTag != "PRE-v1.2" || e.HookType != "reaksi" || e.TriggerSource != "transcript" ||
+		e.ChannelState != "fresh" || e.PostedDayTime != "Selasa 19:00 WIB" || e.ThumbnailTs != "00:08.5" ||
+		!e.CueSelectionUsed || e.H1PassCount != 4 ||
+		!e.H1TawaFacecam || !e.H1VisualKejadian || !e.H1ArcUtuh || !e.H1HookMutePass {
+		t.Fatalf("unexpected v1.2a ledger entry round-trip: %+v", e)
+	}
+	if addResp.Summary.RamaiThreshold != 0 || addResp.Summary.RamaiStatus != "PLACEHOLDER_DUGAAN_N_LT_3" || addResp.Summary.H1FullPassCount != 1 {
+		t.Fatalf("unexpected v1.2a summary after 1st entry: %+v", addResp.Summary)
+	}
+
+	// 2. Invalid v1.2a fields on POST /api/ledger/views -> 400 Bad Request
+	for _, badBody := range []string{
+		`{"jobId":"job-pub-old","platform":"tiktok","cohortTag":"INVALID"}`,
+		`{"jobId":"job-pub-old","platform":"tiktok","hookType":"clickbait"}`,
+		`{"jobId":"job-pub-old","platform":"tiktok","triggerSource":"score"}`,
+		`{"jobId":"job-pub-old","platform":"tiktok","views24h":-1}`,
+		`{"jobId":"job-pub-old","platform":"tiktok","views7d":-5}`,
+	} {
+		reqBad := httptest.NewRequest(http.MethodPost, "/api/ledger/views", bytes.NewBufferString(badBody))
+		reqBad.Header.Set("X-Engine-Token", srv.EngineToken)
+		recBad := httptest.NewRecorder()
+		h.ServeHTTP(recBad, reqBad)
+		if recBad.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for bad v1.2a payload %s, got %d: %s", badBody, recBad.Code, recBad.Body.String())
+		}
+	}
+
+	// 3. POST /api/jobs/{id}/mark-posted forwards full v1.2a ledger fields
+	markBody := `{
+		"platform":"youtube",
+		"publishedUrl":"https://youtube.com/shorts/abc123",
+		"sampleSplit":"HELD-OUT",
+		"cohortTag":"POST-v1.2",
+		"hookType":"tableau",
+		"triggerSource":"chat",
+		"views24h":1800,
+		"channelState":"warm",
+		"postedDayTime":"Rabu 20:00 WIB",
+		"thumbnailTs":"00:04.0",
+		"cueSelectionUsed":true,
+		"h1TawaFacecam":true,
+		"h1VisualKejadian":true,
+		"h1ArcUtuh":true,
+		"h1HookMutePass":false
+	}`
+	reqMark := httptest.NewRequest(http.MethodPost, "/api/jobs/job-pub-old/mark-posted", bytes.NewBufferString(markBody))
+	reqMark.Header.Set("X-Access-Key", qc.AccessKey)
+	recMark := httptest.NewRecorder()
+	h.ServeHTTP(recMark, reqMark)
+	if recMark.Code != http.StatusOK {
+		t.Fatalf("expected 200 for mark-posted with v1.2a fields, got %d: %s", recMark.Code, recMark.Body.String())
+	}
+	var markResp struct {
+		OK          bool                    `json:"ok"`
+		LedgerEntry *model.ViewsLedgerEntry `json:"ledgerEntry"`
+	}
+	if err := json.Unmarshal(recMark.Body.Bytes(), &markResp); err != nil {
+		t.Fatalf("decode mark-posted v1.2a: %v", err)
+	}
+	if markResp.LedgerEntry == nil {
+		t.Fatalf("expected ledgerEntry created by mark-posted with v1.2a fields")
+	}
+	me := markResp.LedgerEntry
+	if me.Views != 1800 || me.Views24h != 1800 || me.CohortTag != "POST-v1.2" ||
+		me.HookType != "tableau" || me.TriggerSource != "chat" ||
+		me.ChannelState != "warm" || me.PostedDayTime != "Rabu 20:00 WIB" || me.ThumbnailTs != "00:04.0" ||
+		!me.CueSelectionUsed || me.H1PassCount != 3 ||
+		!me.H1TawaFacecam || !me.H1VisualKejadian || !me.H1ArcUtuh || me.H1HookMutePass {
+		t.Fatalf("unexpected mark-posted v1.2a ledgerEntry: %+v", me)
+	}
+
+	// 4. Invalid v1.2a field on mark-posted -> 400 Bad Request and job NOT mutated
+	reqMarkBad := httptest.NewRequest(http.MethodPost, "/api/jobs/job-pub-new/mark-posted",
+		bytes.NewBufferString(`{"platform":"instagram","hookType":"illegal_hook","views7d":500}`))
+	reqMarkBad.Header.Set("X-Engine-Token", srv.EngineToken)
+	recMarkBad := httptest.NewRecorder()
+	h.ServeHTTP(recMarkBad, reqMarkBad)
+	if recMarkBad.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid hookType on mark-posted, got %d: %s", recMarkBad.Code, recMarkBad.Body.String())
+	}
+	if untouched, ok := st.GetJob("job-pub-new"); !ok || untouched.BoardColumn == "diposting" {
+		t.Fatalf("invalid mark-posted request must not mutate job: %+v", untouched)
+	}
+
+	// 5. Add 3rd entry -> GET /api/ledger/views summary enters BASELINE_AWAL_DUGAAN_N_LT_10 with RamaiThreshold=2*Median
+	req3 := httptest.NewRequest(http.MethodPost, "/api/ledger/views", bytes.NewBufferString(`{
+		"jobId":"job-pub-new","platform":"instagram","views":3000,"sampleSplit":"HELD-OUT",
+		"cohortTag":"POST-v1.2","hookType":"aksi","triggerSource":"manual",
+		"h1TawaFacecam":true,"h1VisualKejadian":true,"h1ArcUtuh":true,"h1HookMutePass":true
+	}`))
+	req3.Header.Set("X-Access-Key", qc.AccessKey)
+	rec3 := httptest.NewRecorder()
+	h.ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for 3rd ledger entry, got %d: %s", rec3.Code, rec3.Body.String())
+	}
+
+	reqGet := httptest.NewRequest(http.MethodGet, "/api/ledger/views", nil)
+	reqGet.Header.Set("X-Agent-Key", srv.AgentKey)
+	recGet := httptest.NewRecorder()
+	h.ServeHTTP(recGet, reqGet)
+	if recGet.Code != http.StatusOK {
+		t.Fatalf("expected 200 GET /api/ledger/views, got %d", recGet.Code)
+	}
+	var listResp struct {
+		OK      bool                     `json:"ok"`
+		Summary model.ViewsLedgerSummary `json:"summary"`
+	}
+	if err := json.Unmarshal(recGet.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("decode GET /api/ledger/views: %v", err)
+	}
+	// Views: [1800, 3000, 4500] -> Median=3000, RamaiThreshold=6000
+	if listResp.Summary.MedianViews != 3000 || listResp.Summary.RamaiThreshold != 6000 || listResp.Summary.RamaiStatus != "BASELINE_AWAL_DUGAAN_N_LT_10" {
+		t.Fatalf("unexpected v1.2a summary for n=3: %+v", listResp.Summary)
+	}
+	if listResp.Summary.H1FullPassCount != 2 {
+		t.Fatalf("expected H1FullPassCount=2, got %d", listResp.Summary.H1FullPassCount)
+	}
+	if listResp.Summary.ByCohort["PRE-v1.2"].Entries != 1 || listResp.Summary.ByCohort["POST-v1.2"].Entries != 2 {
+		t.Fatalf("unexpected ByCohort: %+v", listResp.Summary.ByCohort)
+	}
+	if listResp.Summary.ByTrigger["transcript"].Entries != 1 || listResp.Summary.ByTrigger["chat"].Entries != 1 || listResp.Summary.ByTrigger["manual"].Entries != 1 {
+		t.Fatalf("unexpected ByTrigger: %+v", listResp.Summary.ByTrigger)
+	}
+	if listResp.Summary.ByHookType["reaksi"].Entries != 1 || listResp.Summary.ByHookType["tableau"].Entries != 1 || listResp.Summary.ByHookType["aksi"].Entries != 1 {
+		t.Fatalf("unexpected ByHookType: %+v", listResp.Summary.ByHookType)
+	}
+}
+
+func TestP0Ops_CandidateVerdictHookLineAndH1Flags(t *testing.T) {
+	srv, st, h, _, _ := setupP0OpsTestServer(t)
+
+	// Seed campaign forbidden words + project with candidate
+	camp, ok := st.GetCampaign("windah-gtavi-motionklip")
+	if !ok {
+		t.Fatalf("expected default campaign windah-gtavi-motionklip")
+	}
+	camp.ForbiddenWords = []string{"judol", "gacor"}
+	if err := st.SaveCampaign(camp); err != nil {
+		t.Fatalf("SaveCampaign: %v", err)
+	}
+
+	proj := &model.Project{
+		ID:          "proj-verdict-v12",
+		VideoID:     "vidVerdict12",
+		Title:       "Windah GTA VI Verdict Test",
+		CampaignID:  "windah-gtavi-motionklip",
+		DurationSec: 3600,
+		Status:      "ready",
+		Candidates: []model.ClipCandidate{
+			{
+				ID:       "cand-v12-1",
+				Rank:     1,
+				Title:    "Red Hulk Smash",
+				StartSec: 120,
+				EndSec:   155,
+				PeakSec:  140,
+			},
+		},
+		CreatedAt: time.Now(),
+	}
+	if err := st.SaveProject(proj); err != nil {
+		t.Fatalf("SaveProject: %v", err)
+	}
+
+	// 1. Valid verdict with hookLine + 4 H1 flags -> 200 OK & persisted
+	payload := `{
+		"verdict":"keep",
+		"funny":5,
+		"note":"Tawa facecam pecah + mobil mental terlihat jelas",
+		"momentType":"crash",
+		"hookLine":"  Detik-detik Red Hulk lempar mobil polisi!  ",
+		"h1TawaFacecam":true,
+		"h1VisualKejadian":true,
+		"h1ArcUtuh":true,
+		"h1HookMutePass":false
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/projects/proj-verdict-v12/candidates/cand-v12-1/verdict", bytes.NewBufferString(payload))
+	req.Header.Set("X-Agent-Key", srv.AgentKey)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for verdict with hookLine+H1 flags, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		OK      bool                   `json:"ok"`
+		Verdict model.CandidateVerdict `json:"verdict"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode verdict response: %v", err)
+	}
+	if resp.Verdict.HookLine != "Detik-detik Red Hulk lempar mobil polisi!" ||
+		!resp.Verdict.H1TawaFacecam || !resp.Verdict.H1VisualKejadian || !resp.Verdict.H1ArcUtuh || resp.Verdict.H1HookMutePass {
+		t.Fatalf("unexpected verdict hookLine/H1 flags: %+v", resp.Verdict)
+	}
+
+	// Verify round-trip via GET /api/projects/{id}
+	reqGet := httptest.NewRequest(http.MethodGet, "/api/projects/proj-verdict-v12", nil)
+	reqGet.Header.Set("X-Engine-Token", srv.EngineToken)
+	recGet := httptest.NewRecorder()
+	h.ServeHTTP(recGet, reqGet)
+	if recGet.Code != http.StatusOK {
+		t.Fatalf("expected 200 GET project, got %d", recGet.Code)
+	}
+	var gotProj model.Project
+	if err := json.Unmarshal(recGet.Body.Bytes(), &gotProj); err != nil {
+		t.Fatalf("decode project: %v", err)
+	}
+	if len(gotProj.Candidates) != 1 || gotProj.Candidates[0].Verdict == nil {
+		t.Fatalf("expected persisted verdict on cand-v12-1")
+	}
+	cv := gotProj.Candidates[0].Verdict
+	if cv.HookLine != "Detik-detik Red Hulk lempar mobil polisi!" ||
+		!cv.H1TawaFacecam || !cv.H1VisualKejadian || !cv.H1ArcUtuh || cv.H1HookMutePass {
+		t.Fatalf("persisted verdict mismatch: %+v", cv)
+	}
+
+	// 2. Forbidden word in hookLine -> 400 Bad Request (previous verdict untouched)
+	badPayload := `{
+		"verdict":"keep",
+		"funny":4,
+		"hookLine":"Promo JUDOL paling gacor hari ini!",
+		"h1TawaFacecam":true
+	}`
+	reqBad := httptest.NewRequest(http.MethodPost, "/api/projects/proj-verdict-v12/candidates/cand-v12-1/verdict", bytes.NewBufferString(badPayload))
+	reqBad.Header.Set("X-Agent-Key", srv.AgentKey)
+	recBad := httptest.NewRecorder()
+	h.ServeHTTP(recBad, reqBad)
+	if recBad.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for forbidden word in hookLine, got %d: %s", recBad.Code, recBad.Body.String())
+	}
+	savedProj, _ := st.GetProject("proj-verdict-v12")
+	if savedProj.Candidates[0].Verdict.HookLine != "Detik-detik Red Hulk lempar mobil polisi!" {
+		t.Fatalf("forbidden hookLine must not overwrite existing verdict: %+v", savedProj.Candidates[0].Verdict)
+	}
+}

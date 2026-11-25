@@ -48,7 +48,7 @@ Use this skill whenever orchestrating clipping workflows on **KlipForge** (`http
    - `klipforge_diarize_project` → assigns `SPEAKER_0` (main streamer) vs `SPEAKER_1` (NPC/guest) for speaker-colored karaoke.
 5. **Frame Verification + Mandatory Agent Verdict (I-05 Gate)**:
    - Call `klipforge_verify_frames` (or `klipforge_sample_storyboard`) and inspect visual proof.
-   - Save evaluation with `klipforge_set_verdict` (`verdict: "keep" | "drop" | "maybe"`, `funny: 0..5`, `momentType: "fail" | "meme" | "crash" | "victory" | "hype" | "twist"`). Verdicts never auto-render, and only `verdict: "keep"` + visual proof can pass I-05 candidate render checks.
+   - Save evaluation with `klipforge_set_verdict` (`verdict: "keep" | "drop" | "maybe"`, `funny: 0..5`, `momentType: "fail" | "meme" | "crash" | "victory" | "hype" | "twist"`, plus optional P1 `I-15` `hookLine` and 4 H1 checklist flags: `h1TawaFacecam`, `h1VisualKejadian`, `h1ArcUtuh`, `h1HookMutePass`). `hookLine` is validated against campaign `forbiddenWords` (`400` if blocked). Verdicts never auto-render, and only `verdict: "keep"` + visual proof can pass I-05 candidate render checks.
 6. **Single-Pass CapCut-Pro Render (`klipforge_render_edit_script` / `klipforge_render_single`)**:
    - Use `layout.cropMode`: **`face_track_smart`** (shot-aware YuNet crop on face shots + blurred full-frame `fit` on landscape/menu shots), `face_track`, `facecam_top_neon` / `gaming_cinema` (split gameplay + auto facecam), or `16:9` widescreen when requested by campaign.
    - Use `subtitles`: `enabled: true, preset: "karaoke"`.

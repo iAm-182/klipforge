@@ -344,3 +344,230 @@ func TestViewsLedgerBackupRecovery(t *testing.T) {
 		t.Fatalf("expected job-recover-1 recovered from .bak.1, got %+v", got)
 	}
 }
+
+func TestViewsLedgerV12SchemaFieldsAndH1PassCount(t *testing.T) {
+	tmp := t.TempDir()
+	st, err := NewStore(tmp)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+
+	// 1. Full v1.2a fields: Views=0 falls back to Views7d; CohortTag/HookType/TriggerSource normalized; H1PassCount=4
+	e1, err := st.AddViewsLedgerEntry(model.ViewsLedgerEntry{
+		JobID:            "job-v12-1",
+		Title:            "Red Hulk Smash v1.2",
+		Platform:         "tiktok",
+		Views:            0,
+		Views24h:         1200,
+		Views7d:          4800,
+		CohortTag:        " pre-v1.2 ",
+		HookType:         " Reaksi ",
+		TriggerSource:    " Transcript ",
+		ChannelState:     "  fresh-account  ",
+		PostedDayTime:    "  Selasa 19:30 WIB  ",
+		ThumbnailTs:      "  00:12.5  ",
+		CueSelectionUsed: true,
+		H1TawaFacecam:    true,
+		H1VisualKejadian: true,
+		H1ArcUtuh:        true,
+		H1HookMutePass:   true,
+	})
+	if err != nil {
+		t.Fatalf("AddViewsLedgerEntry e1 failed: %v", err)
+	}
+	if e1.Views != 4800 || e1.Views24h != 1200 || e1.Views7d != 4800 {
+		t.Fatalf("expected Views=4800 from Views7d fallback, got views=%d v24h=%d v7d=%d", e1.Views, e1.Views24h, e1.Views7d)
+	}
+	if e1.CohortTag != "PRE-v1.2" {
+		t.Fatalf("expected CohortTag 'PRE-v1.2', got %q", e1.CohortTag)
+	}
+	if e1.HookType != "reaksi" {
+		t.Fatalf("expected HookType 'reaksi', got %q", e1.HookType)
+	}
+	if e1.TriggerSource != "transcript" {
+		t.Fatalf("expected TriggerSource 'transcript', got %q", e1.TriggerSource)
+	}
+	if e1.ChannelState != "fresh-account" || e1.PostedDayTime != "Selasa 19:30 WIB" || e1.ThumbnailTs != "00:12.5" || !e1.CueSelectionUsed {
+		t.Fatalf("expected trimmed confounder/cue metadata, got %+v", e1)
+	}
+	if e1.H1PassCount != 4 {
+		t.Fatalf("expected auto-computed H1PassCount=4, got %d", e1.H1PassCount)
+	}
+
+	// 2. Default CohortTag="POST-v1.2", Views=0 falls back to Views24h, partial H1 flags override bogus H1PassCount
+	e2, err := st.AddViewsLedgerEntry(model.ViewsLedgerEntry{
+		JobID:            "job-v12-2",
+		Title:            "Ikan Loncat v1.2",
+		Platform:         "youtube",
+		Views:            0,
+		Views24h:         950,
+		HookType:         "TEXT_ON_SCREEN",
+		TriggerSource:    "CHAT",
+		H1TawaFacecam:    true,
+		H1VisualKejadian: false,
+		H1ArcUtuh:        true,
+		H1HookMutePass:   false,
+		H1PassCount:      99,
+	})
+	if err != nil {
+		t.Fatalf("AddViewsLedgerEntry e2 failed: %v", err)
+	}
+	if e2.CohortTag != "POST-v1.2" {
+		t.Fatalf("expected default CohortTag 'POST-v1.2', got %q", e2.CohortTag)
+	}
+	if e2.Views != 950 || e2.Views24h != 950 || e2.Views7d != 0 {
+		t.Fatalf("expected Views=950 from Views24h fallback, got views=%d v24h=%d v7d=%d", e2.Views, e2.Views24h, e2.Views7d)
+	}
+	if e2.HookType != "text_on_screen" || e2.TriggerSource != "chat" {
+		t.Fatalf("expected normalized hookType/triggerSource, got %q / %q", e2.HookType, e2.TriggerSource)
+	}
+	if e2.H1PassCount != 2 {
+		t.Fatalf("expected auto-computed H1PassCount=2 (overriding bogus 99), got %d", e2.H1PassCount)
+	}
+
+	// 3. Explicit Views is preserved even when Views7d/Views24h differ; 0 H1 flags -> H1PassCount=0
+	e3, err := st.AddViewsLedgerEntry(model.ViewsLedgerEntry{
+		JobID:         "job-v12-3",
+		Platform:      "instagram",
+		Views:         7000,
+		Views24h:      1000,
+		Views7d:       3000,
+		CohortTag:     "post-v1.2",
+		HookType:      "tableau",
+		TriggerSource: "llm",
+	})
+	if err != nil {
+		t.Fatalf("AddViewsLedgerEntry e3 failed: %v", err)
+	}
+	if e3.Views != 7000 || e3.CohortTag != "POST-v1.2" || e3.H1PassCount != 0 {
+		t.Fatalf("unexpected e3: %+v", e3)
+	}
+
+	// 4. Reload persistence check
+	st2, err := NewStore(tmp)
+	if err != nil {
+		t.Fatalf("NewStore reload failed: %v", err)
+	}
+	reloaded := st2.ListViewsLedger("job-v12-1", "", "")
+	if len(reloaded) != 1 || reloaded[0].H1PassCount != 4 || reloaded[0].CohortTag != "PRE-v1.2" ||
+		reloaded[0].HookType != "reaksi" || reloaded[0].TriggerSource != "transcript" ||
+		reloaded[0].Views24h != 1200 || reloaded[0].Views7d != 4800 ||
+		reloaded[0].ChannelState != "fresh-account" || reloaded[0].PostedDayTime != "Selasa 19:30 WIB" ||
+		reloaded[0].ThumbnailTs != "00:12.5" || !reloaded[0].CueSelectionUsed {
+		t.Fatalf("v1.2a fields did not survive reload: %+v", reloaded)
+	}
+}
+
+func TestViewsLedgerV12Validation(t *testing.T) {
+	st, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+
+	cases := []struct {
+		name  string
+		entry model.ViewsLedgerEntry
+	}{
+		{
+			name:  "invalid cohortTag",
+			entry: model.ViewsLedgerEntry{JobID: "j1", Platform: "tiktok", Views: 100, CohortTag: "v1.0"},
+		},
+		{
+			name:  "invalid hookType",
+			entry: model.ViewsLedgerEntry{JobID: "j1", Platform: "tiktok", Views: 100, HookType: "clickbait"},
+		},
+		{
+			name:  "invalid triggerSource",
+			entry: model.ViewsLedgerEntry{JobID: "j1", Platform: "tiktok", Views: 100, TriggerSource: "virality_score"},
+		},
+		{
+			name:  "negative views24h",
+			entry: model.ViewsLedgerEntry{JobID: "j1", Platform: "tiktok", Views24h: -10},
+		},
+		{
+			name:  "negative views7d",
+			entry: model.ViewsLedgerEntry{JobID: "j1", Platform: "youtube", Views7d: -5},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := st.AddViewsLedgerEntry(tc.entry)
+			if err == nil {
+				t.Fatalf("expected validation error for %s, got %+v", tc.name, got)
+			}
+		})
+	}
+	if len(st.ListViewsLedger("", "", "")) != 0 {
+		t.Fatalf("expected 0 entries stored after rejected v1.2a validations")
+	}
+}
+
+func TestSummarizeViewsLedgerV12AdaptiveRamaiAndBreakdowns(t *testing.T) {
+	// 1. n < 3 (0 entries & 2 entries) -> PLACEHOLDER_DUGAAN_N_LT_3, RamaiThreshold=0
+	empty := SummarizeViewsLedger(nil)
+	if empty.RamaiThreshold != 0 || empty.RamaiStatus != "PLACEHOLDER_DUGAAN_N_LT_3" || empty.H1FullPassCount != 0 {
+		t.Fatalf("unexpected empty v1.2a summary: %+v", empty)
+	}
+
+	two := SummarizeViewsLedger([]*model.ViewsLedgerEntry{
+		{ID: "1", JobID: "j1", Platform: "tiktok", Views: 1000, CohortTag: "PRE-v1.2"},
+		{ID: "2", JobID: "j2", Platform: "youtube", Views: 3000, CohortTag: "POST-v1.2"},
+	})
+	if two.RamaiThreshold != 0 || two.RamaiStatus != "PLACEHOLDER_DUGAAN_N_LT_3" {
+		t.Fatalf("expected PLACEHOLDER_DUGAAN_N_LT_3 and RamaiThreshold=0 for n=2, got threshold=%d status=%q", two.RamaiThreshold, two.RamaiStatus)
+	}
+
+	// 2. 3 <= n < 10 -> BASELINE_AWAL_DUGAAN_N_LT_10, RamaiThreshold = 2 * MedianViews
+	three := SummarizeViewsLedger([]*model.ViewsLedgerEntry{
+		{
+			ID: "1", JobID: "j1", Platform: "tiktok", SampleSplit: "IN-SAMPLE", Views: 1000,
+			CohortTag: "PRE-v1.2", TriggerSource: "manual", HookType: "tableau",
+			H1TawaFacecam: true, H1VisualKejadian: true, H1ArcUtuh: true, H1HookMutePass: true, H1PassCount: 4,
+		},
+		{
+			ID: "2", JobID: "j2", Platform: "tiktok", SampleSplit: "HELD-OUT", Views: 5000,
+			CohortTag: "POST-v1.2", TriggerSource: "transcript", HookType: "reaksi",
+			H1TawaFacecam: true, H1VisualKejadian: true, H1ArcUtuh: true, H1HookMutePass: true, H1PassCount: 4,
+		},
+		{
+			ID: "3", JobID: "j3", Platform: "youtube", SampleSplit: "HELD-OUT", Views: 2000,
+			CohortTag: "POST-v1.2", TriggerSource: "transcript", HookType: "aksi",
+			H1TawaFacecam: true, H1VisualKejadian: true, H1ArcUtuh: true, H1HookMutePass: false, H1PassCount: 3,
+		},
+	})
+	if three.MedianViews != 2000 || three.RamaiThreshold != 4000 || three.RamaiStatus != "BASELINE_AWAL_DUGAAN_N_LT_10" {
+		t.Fatalf("expected Median=2000 RamaiThreshold=4000 Status=BASELINE_AWAL_DUGAAN_N_LT_10, got %+v", three)
+	}
+	if three.H1FullPassCount != 2 {
+		t.Fatalf("expected H1FullPassCount=2 (only 4/4 entries), got %d", three.H1FullPassCount)
+	}
+	if three.ByCohort["PRE-v1.2"].Entries != 1 || three.ByCohort["PRE-v1.2"].TotalViews != 1000 {
+		t.Fatalf("unexpected ByCohort PRE-v1.2: %+v", three.ByCohort)
+	}
+	if three.ByCohort["POST-v1.2"].Entries != 2 || three.ByCohort["POST-v1.2"].TotalViews != 7000 || three.ByCohort["POST-v1.2"].MedianViews != 3500 {
+		t.Fatalf("unexpected ByCohort POST-v1.2: %+v", three.ByCohort)
+	}
+	if three.ByTrigger["transcript"].Entries != 2 || three.ByTrigger["transcript"].MedianViews != 3500 || three.ByTrigger["manual"].Entries != 1 {
+		t.Fatalf("unexpected ByTrigger: %+v", three.ByTrigger)
+	}
+	if three.ByHookType["tableau"].Entries != 1 || three.ByHookType["reaksi"].Entries != 1 || three.ByHookType["aksi"].Entries != 1 {
+		t.Fatalf("unexpected ByHookType: %+v", three.ByHookType)
+	}
+
+	// 3. n >= 10 -> AKTIF_2X_MEDIAN_N_GE_10, RamaiThreshold = 2 * MedianViews
+	ten := make([]*model.ViewsLedgerEntry, 0, 10)
+	for i := 1; i <= 10; i++ {
+		ten = append(ten, &model.ViewsLedgerEntry{
+			ID:        "e",
+			JobID:     "j",
+			Platform:  "tiktok",
+			CohortTag: "POST-v1.2",
+			Views:     int64(i * 100), // 100..1000 -> median (500+600)/2 = 550
+		})
+	}
+	sumTen := SummarizeViewsLedger(ten)
+	if sumTen.TotalEntries != 10 || sumTen.MedianViews != 550 || sumTen.RamaiThreshold != 1100 || sumTen.RamaiStatus != "AKTIF_2X_MEDIAN_N_GE_10" {
+		t.Fatalf("expected n=10 Median=550 RamaiThreshold=1100 Status=AKTIF_2X_MEDIAN_N_GE_10, got %+v", sumTen)
+	}
+}
