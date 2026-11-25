@@ -186,26 +186,117 @@ test('formatRangeSummary returns duration label, validation error, and soft dura
   assert.equal(longRange.warning, 'Cukup panjang (>2 menit)');
 });
 
-test('preset16x9TopCenterWM returns exact verified preset as a fresh object', () => {
+test('preset16x9TopCenterWM returns exact proven 3-clip recipe as a fresh object', () => {
   const p1 = cutter.preset16x9TopCenterWM();
   assert.deepEqual(p1, {
     aspectRatio: '16:9',
     cropMode: 'original',
     resolution: '1080p',
+    subtitlesEnabled: false,
+    sceneSnap: false,
+    silenceTrim: false,
     watermark: {
+      enabled: true,
       position: 'custom',
-      customX: 0.40,
-      customY: 0.36,
+      customX: 0.375,
+      customY: 0.0,
+      scale: 0.25,
+      opacity: 0.96,
+      onOutro: false,
     },
   });
 
   // Ensure defensive fresh copy
   p1.aspectRatio = '9:16';
+  p1.subtitlesEnabled = true;
   p1.watermark.customX = 0.99;
+  p1.watermark.scale = 0.5;
   const p2 = cutter.preset16x9TopCenterWM();
   assert.equal(p2.aspectRatio, '16:9');
-  assert.equal(p2.watermark.customX, 0.40);
-  assert.equal(p2.watermark.customY, 0.36);
+  assert.equal(p2.subtitlesEnabled, false);
+  assert.equal(p2.sceneSnap, false);
+  assert.equal(p2.silenceTrim, false);
+  assert.equal(p2.watermark.enabled, true);
+  assert.equal(p2.watermark.customX, 0.375);
+  assert.equal(p2.watermark.customY, 0.0);
+  assert.equal(p2.watermark.scale, 0.25);
+  assert.equal(p2.watermark.opacity, 0.96);
+  assert.equal(p2.watermark.onOutro, false);
+});
+
+test('evaluateH1Checklist scores 4 H1 criteria and lists exact Indonesian missing labels', () => {
+  const allMissing = [
+    'F1 Tawa keras di facecam',
+    'F2 Kejadian/fisika terlihat di frame',
+    'F3 Arc setup→payoff 20–55 dtk utuh',
+    'F4 Hook 1–3 dtk lolos mute test / 1,5 dtk wajah+event',
+  ];
+
+  assert.deepEqual(cutter.evaluateH1Checklist(), {
+    passedCount: 0,
+    total: 4,
+    publishable: false,
+    missing: allMissing,
+  });
+
+  assert.deepEqual(cutter.evaluateH1Checklist(null), {
+    passedCount: 0,
+    total: 4,
+    publishable: false,
+    missing: allMissing,
+  });
+
+  assert.deepEqual(
+    cutter.evaluateH1Checklist({
+      h1TawaFacecam: true,
+      h1VisualKejadian: false,
+      h1ArcUtuh: true,
+      h1HookMutePass: false,
+    }),
+    {
+      passedCount: 2,
+      total: 4,
+      publishable: false,
+      missing: [
+        'F2 Kejadian/fisika terlihat di frame',
+        'F4 Hook 1–3 dtk lolos mute test / 1,5 dtk wajah+event',
+      ],
+    }
+  );
+
+  assert.deepEqual(
+    cutter.evaluateH1Checklist({
+      h1TawaFacecam: true,
+      h1VisualKejadian: true,
+      h1ArcUtuh: true,
+      h1HookMutePass: true,
+    }),
+    {
+      passedCount: 4,
+      total: 4,
+      publishable: true,
+      missing: [],
+    }
+  );
+
+  // Handles truthy/falsy coercion cleanly
+  assert.deepEqual(
+    cutter.evaluateH1Checklist({
+      h1TawaFacecam: 1,
+      h1VisualKejadian: 0,
+      h1ArcUtuh: 'yes',
+      h1HookMutePass: undefined,
+    }),
+    {
+      passedCount: 2,
+      total: 4,
+      publishable: false,
+      missing: [
+        'F2 Kejadian/fisika terlihat di frame',
+        'F4 Hook 1–3 dtk lolos mute test / 1,5 dtk wajah+event',
+      ],
+    }
+  );
 });
 
 test('UMD module attaches window.KFCutter in a browser environment', () => {
@@ -227,10 +318,24 @@ test('UMD module attaches window.KFCutter in a browser environment', () => {
     'Durasi: 37 dtk (1:28:38 → 1:29:15)'
   );
   assert.deepEqual({ ...sandbox.window.KFCutter.preset16x9TopCenterWM().watermark }, {
+    enabled: true,
     position: 'custom',
-    customX: 0.40,
-    customY: 0.36,
+    customX: 0.375,
+    customY: 0.0,
+    scale: 0.25,
+    opacity: 0.96,
+    onOutro: false,
   });
+  const h1Res = sandbox.window.KFCutter.evaluateH1Checklist({
+    h1TawaFacecam: true,
+    h1VisualKejadian: true,
+    h1ArcUtuh: true,
+    h1HookMutePass: true,
+  });
+  assert.equal(h1Res.passedCount, 4);
+  assert.equal(h1Res.total, 4);
+  assert.equal(h1Res.publishable, true);
+  assert.equal(h1Res.missing.length, 0);
 });
 
 console.log(`\nSummary: ${passed} passed, ${failed} failed`);

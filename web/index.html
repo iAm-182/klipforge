@@ -510,7 +510,7 @@
 
                 <div class="cutter-action-row">
                   <button class="btn btn-xs btn-secondary" id="btnPreviewRangeSB" type="button" title="Periksa contact-sheet 3x3 pada range Start..End ini sebelum render!">🖼️ Cek Frame Range</button>
-                  <button class="btn btn-xs btn-secondary" id="btnPreset16x9WM" type="button" title="Terapkan cepat 16:9 Original 1080p + Watermark Tengah-Atas di Studio preview">🎬 Preset 16:9 + WM Tengah-Atas</button>
+                  <button class="btn btn-xs btn-secondary" id="btnPreset16x9WM" type="button" title="Terapkan resep terbukti 16:9 1080p Original · Sub OFF · WM custom (0.375, 0.0) skala 25% di Studio preview">🎬 Preset Proven 16:9 + WM</button>
                   <div class="head-actions ml-auto">
                     <button class="btn btn-sm btn-secondary" id="btnAddManualToTopN" type="button">➕ Top-N</button>
                     <button class="btn btn-sm btn-primary" id="btnRenderManual" type="button">✂️ Render Range</button>
@@ -1257,12 +1257,63 @@
                     <option value="HELD-OUT">HELD-OUT</option>
                   </select>
                 </label>
-                <label class="text-xs">Views
+                <label class="text-xs">Cohort
+                  <select id="p0LedgerCohort" class="input input-sm">
+                    <option value="POST-v1.2" selected>POST-v1.2</option>
+                    <option value="PRE-v1.2">PRE-v1.2</option>
+                  </select>
+                </label>
+                <label class="text-xs">Hook Type
+                  <select id="p0LedgerHookType" class="input input-sm">
+                    <option value="">— Pilih —</option>
+                    <option value="tableau">tableau</option>
+                    <option value="reaksi">reaksi</option>
+                    <option value="aksi">aksi</option>
+                    <option value="text_on_screen">text_on_screen</option>
+                  </select>
+                </label>
+                <label class="text-xs">Trigger Source
+                  <select id="p0LedgerTrigger" class="input input-sm">
+                    <option value="manual" selected>manual</option>
+                    <option value="transcript">transcript</option>
+                    <option value="chat">chat</option>
+                    <option value="audio">audio</option>
+                    <option value="llm">llm</option>
+                  </select>
+                </label>
+                <label class="text-xs">Views Total
                   <input type="number" id="p0LedgerViews" class="input input-sm mono" min="0" placeholder="0" />
                 </label>
                 <label class="text-xs">Likes
                   <input type="number" id="p0LedgerLikes" class="input input-sm mono" min="0" placeholder="0" />
                 </label>
+                <label class="text-xs">Views 24h
+                  <input type="number" id="p0LedgerViews24h" class="input input-sm mono" min="0" placeholder="0" />
+                </label>
+                <label class="text-xs">Views 7d
+                  <input type="number" id="p0LedgerViews7d" class="input input-sm mono" min="0" placeholder="0" />
+                </label>
+                <label class="text-xs">Thumbnail TS
+                  <input type="text" id="p0LedgerThumbTs" class="input input-sm mono" placeholder="1:49:20" />
+                </label>
+              </div>
+              <div class="p0-ledger-form-meta mt-4">
+                <input type="text" id="p0LedgerChannelState" class="input input-sm" placeholder="Channel state (cth: normal / live / habis upload)" />
+                <label class="check-inline text-xs" title="Tandai jika klip ini dipakai untuk seleksi cue/tuning sehingga dikecualikan dari ranker">
+                  <input type="checkbox" id="p0LedgerCueSel" /> Dipakai untuk seleksi cue — exclude dari ranker
+                </label>
+              </div>
+              <div class="p0-ledger-h1-bar mt-4">
+                <div class="p0-ledger-h1-head">
+                  <span class="text-xs muted">4-Flag H1 + Mute Test 1,5 dtk:</span>
+                  <span id="p0LedgerH1Badge" class="h1-score-badge">H1: 0/4</span>
+                </div>
+                <div class="h1-checks-grid">
+                  <label class="h1-chk-pill" title="F1 Tawa keras di facecam"><input type="checkbox" id="p0LedgerF1" /> <span>F1 Tawa</span></label>
+                  <label class="h1-chk-pill" title="F2 Kejadian/fisika terlihat di frame"><input type="checkbox" id="p0LedgerF2" /> <span>F2 Visual</span></label>
+                  <label class="h1-chk-pill" title="F3 Arc setup→payoff 20–55 dtk utuh"><input type="checkbox" id="p0LedgerF3" /> <span>F3 Arc 20-55s</span></label>
+                  <label class="h1-chk-pill" title="F4 Hook 1–3 dtk lolos mute test / 1,5 dtk wajah+event"><input type="checkbox" id="p0LedgerF4" /> <span>F4 Mute 1.5s</span></label>
+                </div>
               </div>
               <div class="p0-ledger-form-row2 mt-4">
                 <input type="url" id="p0LedgerUrl" class="input input-sm" placeholder="Link postingan (opsional, https://...)" />
@@ -1816,6 +1867,19 @@
       <div id="rsFrames" class="review-frames-compare hidden"></div>
       <div id="rsVirality" class="text-xs muted mt-8"></div>
       <div id="rsVerdict" class="text-xs mt-4" style="color:#34d399;"></div>
+      <div id="rsH1Reminder" class="h1-review-strip mt-8">
+        <div class="h1-review-head">
+          <span>Checklist 4-Flag H1 + AutoClip Mute Test 1,5 dtk</span>
+          <span id="rsH1Badge" class="h1-score-badge">H1: 0/4</span>
+        </div>
+        <div id="rsH1Pills" class="h1-review-pills">
+          <span class="h1-pill" data-flag="h1TawaFacecam">○ F1 Tawa keras di facecam</span>
+          <span class="h1-pill" data-flag="h1VisualKejadian">○ F2 Kejadian/fisika terlihat di frame</span>
+          <span class="h1-pill" data-flag="h1ArcUtuh">○ F3 Arc setup→payoff 20–55 dtk utuh</span>
+          <span class="h1-pill" data-flag="h1HookMutePass">○ F4 Hook 1–3 dtk lolos mute test / 1,5 dtk wajah+event</span>
+        </div>
+        <div id="rsH1HookLine" class="text-xs muted mt-4 hidden"></div>
+      </div>
       <div class="mt-12">
         <div class="text-xs muted">Alasan penolakan (wajib jika ditolak):</div>
         <div class="reject-chips">

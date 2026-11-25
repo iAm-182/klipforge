@@ -582,8 +582,8 @@
         marginPx: parseInt($('cWmMargin').value, 10) || 24,
         scale: (parseInt($('cWmScale').value, 10) || 20) / 100,
         opacity: (parseInt($('cWmOpacity').value, 10) || 92) / 100,
-        customX: parseFloat($('cWmCustomX').value) || 0.72,
-        customY: parseFloat($('cWmCustomY').value) || 0.06,
+        customX: Number.isFinite(parseFloat($('cWmCustomX').value)) ? parseFloat($('cWmCustomX').value) : 0.72,
+        customY: Number.isFinite(parseFloat($('cWmCustomY').value)) ? parseFloat($('cWmCustomY').value) : 0.06,
         onOutro: $('cWmOnOutro').checked,
       },
       outro: {
@@ -1112,6 +1112,26 @@
     });
   }
 
+  function evalH1ChecklistSafe(flags) {
+    if (window.KFCutter && typeof window.KFCutter.evaluateH1Checklist === 'function') {
+      return window.KFCutter.evaluateH1Checklist(flags);
+    }
+    const f = flags && typeof flags === 'object' ? flags : {};
+    const items = [
+      ['h1TawaFacecam', 'F1 Tawa keras di facecam'],
+      ['h1VisualKejadian', 'F2 Kejadian/fisika terlihat di frame'],
+      ['h1ArcUtuh', 'F3 Arc setup→payoff 20–55 dtk utuh'],
+      ['h1HookMutePass', 'F4 Hook 1–3 dtk lolos mute test / 1,5 dtk wajah+event'],
+    ];
+    const missing = [];
+    let passedCount = 0;
+    items.forEach(([k, lbl]) => {
+      if (Boolean(f[k])) passedCount += 1;
+      else missing.push(lbl);
+    });
+    return { passedCount, total: 4, publishable: passedCount === 4, missing };
+  }
+
   // ==================== Candidates List ====================
   function renderCandidates() {
     const proj = state.activeProject;
@@ -1167,6 +1187,16 @@
       const extraMetaHtml = extraMetaBadges.length > 0 ? `<div class="cand-reasons">${extraMetaBadges.join('')}</div>` : '';
       const curVerdict = (c.verdict?.verdict || '').toLowerCase();
       const curMoment = (c.momentType || 'hype').toLowerCase();
+      const curHookLine = c.verdict?.hookLine || '';
+      const curReasonNote = c.verdict?.note || '';
+      const curH1 = {
+        h1TawaFacecam: Boolean(c.verdict?.h1TawaFacecam),
+        h1VisualKejadian: Boolean(c.verdict?.h1VisualKejadian),
+        h1ArcUtuh: Boolean(c.verdict?.h1ArcUtuh),
+        h1HookMutePass: Boolean(c.verdict?.h1HookMutePass),
+      };
+      const h1Eval = evalH1ChecklistSafe(curH1);
+      const h1OpenAttr = (curHookLine || curReasonNote || h1Eval.passedCount > 0) ? 'open' : '';
 
       const framesHtml = (c.startFrameUrl || c.peakFrameUrl)
         ? `<div class="cand-frames-row">
@@ -1196,6 +1226,32 @@
             ${['hype', 'fail', 'crash', 'meme', 'twist', 'victory', 'custom'].map((m) => `<option value="${m}" ${curMoment === m ? 'selected' : ''}>${m}</option>`).join('')}
           </select>
         </div>
+        <details class="cand-h1-box" ${h1OpenAttr}>
+          <summary class="cand-h1-summary">
+            <span>I-15 Hook Line, Alasan &amp; 4-Flag H1 + Mute 1,5 dtk</span>
+            <span class="h1-score-badge cand-h1-badge ${h1Eval.publishable ? 'pass' : ''}" title="${escapeAttr(h1Eval.missing.length ? 'Belum lolos: ' + h1Eval.missing.join(' · ') : 'Semua 4 pilar H1 lolos!')}">H1: ${h1Eval.passedCount}/${h1Eval.total}</span>
+          </summary>
+          <div class="cand-h1-body">
+            <div class="h1-checks-grid">
+              <label class="h1-chk-pill" title="F1 Tawa keras di facecam"><input type="checkbox" class="cand-h1-chk" data-h1="h1TawaFacecam" ${curH1.h1TawaFacecam ? 'checked' : ''} /> <span>F1 Tawa</span></label>
+              <label class="h1-chk-pill" title="F2 Kejadian/fisika terlihat di frame"><input type="checkbox" class="cand-h1-chk" data-h1="h1VisualKejadian" ${curH1.h1VisualKejadian ? 'checked' : ''} /> <span>F2 Visual</span></label>
+              <label class="h1-chk-pill" title="F3 Arc setup→payoff 20–55 dtk utuh"><input type="checkbox" class="cand-h1-chk" data-h1="h1ArcUtuh" ${curH1.h1ArcUtuh ? 'checked' : ''} /> <span>F3 Arc 20-55s</span></label>
+              <label class="h1-chk-pill" title="F4 Hook 1–3 dtk lolos mute test / 1,5 dtk wajah+event"><input type="checkbox" class="cand-h1-chk" data-h1="h1HookMutePass" ${curH1.h1HookMutePass ? 'checked' : ''} /> <span>F4 Mute 1.5s</span></label>
+            </div>
+            <div class="cand-h1-inputs">
+              <label class="text-xs">Hook Line
+                <input type="text" class="input input-sm cand-hookline-input" value="${escapeAttr(curHookLine)}" placeholder="1 baris hook pembuka (1–3 dtk)..." />
+              </label>
+              <label class="text-xs">Alasan (1 kalimat)
+                <input type="text" class="input input-sm cand-reason-input" value="${escapeAttr(curReasonNote)}" placeholder="Kenapa momen ini layak klip..." />
+              </label>
+            </div>
+            <div class="cand-h1-foot">
+              <span class="text-xs muted cand-h1-hint">${h1Eval.publishable ? '4/4 pilar H1 + mute test 1,5 dtk lolos!' : 'Belum: ' + escapeHtml(h1Eval.missing.join(' · '))}</span>
+              <button type="button" class="btn btn-2xs btn-secondary btn-save-h1">Simpan H1 &amp; Hook</button>
+            </div>
+          </div>
+        </details>
         ${arcHtml}
         <div class="text-xs muted">${sigLine}</div>
         ${framesHtml}
@@ -1221,19 +1277,77 @@
       `;
 
       const momentSel = el.querySelector('.cand-moment-sel');
+      const hookLineInp = el.querySelector('.cand-hookline-input');
+      const reasonInp = el.querySelector('.cand-reason-input');
+      const h1BadgeEl = el.querySelector('.cand-h1-badge');
+      const h1HintEl = el.querySelector('.cand-h1-hint');
+      const h1Chks = el.querySelectorAll('.cand-h1-chk');
+
+      const readCardH1Flags = () => {
+        const flags = {
+          h1TawaFacecam: false,
+          h1VisualKejadian: false,
+          h1ArcUtuh: false,
+          h1HookMutePass: false,
+        };
+        h1Chks.forEach((chk) => {
+          if (chk.dataset.h1 in flags) flags[chk.dataset.h1] = chk.checked;
+        });
+        return flags;
+      };
+
+      const syncCardH1UI = () => {
+        const evalRes = evalH1ChecklistSafe(readCardH1Flags());
+        if (h1BadgeEl) {
+          h1BadgeEl.textContent = `H1: ${evalRes.passedCount}/${evalRes.total}`;
+          h1BadgeEl.classList.toggle('pass', evalRes.publishable);
+          h1BadgeEl.title = evalRes.missing.length ? 'Belum lolos: ' + evalRes.missing.join(' · ') : 'Semua 4 pilar H1 lolos!';
+        }
+        if (h1HintEl) {
+          h1HintEl.textContent = evalRes.publishable
+            ? '4/4 pilar H1 + mute test 1,5 dtk lolos!'
+            : 'Belum: ' + evalRes.missing.join(' · ');
+        }
+        return evalRes;
+      };
+
+      const persistCardVerdict = async (overrideVerdict, { rerender = false, toastMsg = '' } = {}) => {
+        const vVal = overrideVerdict || c.verdict?.verdict || 'maybe';
+        const funnyVal = overrideVerdict
+          ? (vVal === 'keep' ? 4 : (vVal === 'maybe' ? 2 : 0))
+          : (typeof c.verdict?.funny === 'number' ? c.verdict.funny : (vVal === 'keep' ? 4 : (vVal === 'maybe' ? 2 : 0)));
+        const flags = readCardH1Flags();
+        const payload = {
+          verdict: vVal,
+          funny: funnyVal,
+          momentType: momentSel?.value || c.momentType || '',
+          hookLine: (hookLineInp?.value || '').trim(),
+          note: (reasonInp?.value || '').trim(),
+          h1TawaFacecam: flags.h1TawaFacecam,
+          h1VisualKejadian: flags.h1VisualKejadian,
+          h1ArcUtuh: flags.h1ArcUtuh,
+          h1HookMutePass: flags.h1HookMutePass,
+        };
+        const res = await api(`/api/projects/${encodeURIComponent(proj.id)}/candidates/${encodeURIComponent(c.id)}/verdict`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        c.verdict = {
+          ...(c.verdict || {}),
+          ...payload,
+          ...(res.verdict || {}),
+        };
+        if (res.candidate) Object.assign(c, res.candidate);
+        if (toastMsg) toast(toastMsg, vVal === 'drop' ? 'info' : 'ok');
+        if (rerender) renderCandidates();
+      };
+
       el.querySelectorAll('.cand-verdict-btn').forEach((vb) => {
         vb.addEventListener('click', async () => {
           const v = vb.dataset.v;
           try {
-            const res = await api(`/api/projects/${encodeURIComponent(proj.id)}/candidates/${encodeURIComponent(c.id)}/verdict`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ verdict: v, funny: v === 'keep' ? 4 : (v === 'maybe' ? 2 : 0), momentType: momentSel?.value || c.momentType || '' }),
-            });
-            c.verdict = res.verdict;
-            if (res.candidate) Object.assign(c, res.candidate);
-            toast(`Verdict #${c.rank}: ${v.toUpperCase()}`, v === 'drop' ? 'info' : 'ok');
-            renderCandidates();
+            await persistCardVerdict(v, { rerender: true, toastMsg: `Verdict #${c.rank}: ${v.toUpperCase()}` });
           } catch (err) {
             toast('Gagal simpan verdict: ' + err.message, 'err');
           }
@@ -1243,18 +1357,41 @@
         momentSel.addEventListener('change', async () => {
           c.momentType = momentSel.value;
           try {
-            const res = await api(`/api/projects/${encodeURIComponent(proj.id)}/candidates/${encodeURIComponent(c.id)}/verdict`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ verdict: c.verdict?.verdict || 'maybe', funny: c.verdict?.funny || 2, momentType: c.momentType }),
-            });
-            if (res.candidate) Object.assign(c, res.candidate);
-            toast(`Tipe momen #${c.rank} -> ${c.momentType}`, 'ok');
+            await persistCardVerdict(null, { rerender: false, toastMsg: `Tipe momen #${c.rank} -> ${c.momentType}` });
           } catch (err) {
             toast(err.message, 'err');
           }
         });
       }
+      h1Chks.forEach((chk) => {
+        chk.addEventListener('change', async () => {
+          const evalRes = syncCardH1UI();
+          try {
+            await persistCardVerdict(null, { rerender: false });
+          } catch (err) {
+            toast(`Gagal simpan checklist H1 (${evalRes.passedCount}/4): ${err.message}`, 'err');
+          }
+        });
+      });
+      const saveH1Btn = el.querySelector('.btn-save-h1');
+      const handleSaveH1 = async () => {
+        const evalRes = syncCardH1UI();
+        try {
+          await persistCardVerdict(null, { rerender: false, toastMsg: `H1 & Hook #${c.rank} tersimpan (H1: ${evalRes.passedCount}/${evalRes.total})` });
+        } catch (err) {
+          toast('Gagal simpan H1 & Hook: ' + err.message, 'err');
+        }
+      };
+      if (saveH1Btn) saveH1Btn.addEventListener('click', handleSaveH1);
+      [hookLineInp, reasonInp].forEach((inp) => {
+        if (!inp) return;
+        inp.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            handleSaveH1();
+          }
+        });
+      });
 
       el.querySelector('.cand-chk').addEventListener('change', (ev) => {
         c.selected = ev.target.checked;
@@ -1597,7 +1734,7 @@
         else if (wm.position === 'bottom-left') { wx = m; wy = oh - wmH - m; }
         else if (wm.position === 'bottom-right') { wx = ow - wmW - m; wy = oh - wmH - m; }
         else if (wm.position === 'center-top') { wx = (ow - wmW) / 2; wy = m; }
-        else if (wm.position === 'custom') { wx = ow * (wm.customX || 0.72); wy = oh * (wm.customY || 0.06); }
+        else if (wm.position === 'custom') { wx = ow * (Number.isFinite(wm.customX) ? wm.customX : 0.72); wy = oh * (Number.isFinite(wm.customY) ? wm.customY : 0.06); }
 
         if (state.wmImg) {
           oCtx.drawImage(state.wmImg, wx, wy, wmW, wmH);
@@ -1808,6 +1945,13 @@
       const byTxt = v.verdictBy ? ` · ${escapeHtml(v.verdictBy)}` : '';
       const noteTxt = v.note ? ` — “${escapeHtml(v.note)}”` : '';
       pills.push(`<span class="reason-chip" style="background:${st.bg};color:${st.fg};font-weight:600;">${st.icon} ${escapeHtml(v.verdict.toUpperCase())}${funnyTxt}${byTxt}${noteTxt}</span>`);
+    }
+    if (v && (v.h1TawaFacecam || v.h1VisualKejadian || v.h1ArcUtuh || v.h1HookMutePass)) {
+      const h1 = evalH1ChecklistSafe(v);
+      pills.push(`<span class="h1-score-badge ${h1.publishable ? 'pass' : ''}">H1: ${h1.passedCount}/${h1.total}</span>`);
+    }
+    if (v && v.hookLine) {
+      pills.push(`<span class="reason-chip" title="Hook Line">🎯 ${escapeHtml(v.hookLine)}</span>`);
     }
     if (pills.length === 0) return '';
     return `<div style="display:flex;gap:5px;flex-wrap:wrap;margin:4px 0;">${pills.join('')}</div>`;
@@ -2424,33 +2568,63 @@
     $('btnPreset16x9WM').addEventListener('click', () => {
       const preset = window.KFCutter && typeof window.KFCutter.preset16x9TopCenterWM === 'function'
         ? window.KFCutter.preset16x9TopCenterWM()
-        : { aspectRatio: '16:9', cropMode: 'original', resolution: '1080p', watermark: { position: 'custom', customX: 0.40, customY: 0.36 } };
+        : {
+            aspectRatio: '16:9',
+            cropMode: 'original',
+            resolution: '1080p',
+            subtitlesEnabled: false,
+            sceneSnap: false,
+            silenceTrim: false,
+            watermark: {
+              enabled: true,
+              position: 'custom',
+              customX: 0.375,
+              customY: 0.0,
+              scale: 0.25,
+              opacity: 0.96,
+              onOutro: false,
+            },
+          };
       if ($('selAspect')) $('selAspect').value = preset.aspectRatio;
       if ($('selCropMode')) $('selCropMode').value = preset.cropMode;
       if ($('selRes')) $('selRes').value = preset.resolution;
-      if ($('chkUseWatermark')) $('chkUseWatermark').checked = true;
+      if ($('chkSubtitles')) $('chkSubtitles').checked = Boolean(preset.subtitlesEnabled);
+      if ($('chkSceneSnap')) $('chkSceneSnap').checked = Boolean(preset.sceneSnap);
+      if ($('chkSilenceTrim')) $('chkSilenceTrim').checked = Boolean(preset.silenceTrim);
+      if ($('chkUseWatermark')) $('chkUseWatermark').checked = Boolean(preset.watermark?.enabled ?? true);
       state.layout.aspectRatio = preset.aspectRatio;
       state.layout.cropMode = preset.cropMode;
       state.layout.resolution = preset.resolution;
       // In-memory Studio preview only — does NOT mutate campaign on server unless user explicitly clicks Save!
       const camp = getActiveCampaign();
-      if (camp) {
+      if (camp && preset.watermark) {
         camp.watermark = {
           ...(camp.watermark || {}),
-          enabled: true,
+          enabled: Boolean(preset.watermark.enabled),
           position: preset.watermark.position,
           customX: preset.watermark.customX,
           customY: preset.watermark.customY,
+          scale: preset.watermark.scale,
+          opacity: preset.watermark.opacity,
+          onOutro: Boolean(preset.watermark.onOutro),
         };
         if (state.editingCampaignId === camp.id && $('cWmPos')) {
-          $('cWmPos').value = preset.watermark.position;
+          if ($('cWmEnabled')) $('cWmEnabled').checked = Boolean(camp.watermark.enabled);
+          $('cWmPos').value = camp.watermark.position;
           if ($('wmCustomXY')) $('wmCustomXY').classList.remove('hidden');
           if ($('cWmCustomX')) $('cWmCustomX').value = camp.watermark.customX;
           if ($('cWmCustomY')) $('cWmCustomY').value = camp.watermark.customY;
+          const scPct = Math.round((camp.watermark.scale || 0.25) * 100);
+          const opPct = Math.round((camp.watermark.opacity || 0.96) * 100);
+          if ($('cWmScale')) $('cWmScale').value = scPct;
+          if ($('lblWmScale')) $('lblWmScale').textContent = scPct + '%';
+          if ($('cWmOpacity')) $('cWmOpacity').value = opPct;
+          if ($('lblWmOpacity')) $('lblWmOpacity').textContent = opPct + '%';
+          if ($('cWmOnOutro')) $('cWmOnOutro').checked = Boolean(camp.watermark.onOutro);
         }
       }
       drawCropCanvases();
-      toast('🎬 Preset 16:9 + WM Tengah-Atas (X 40%, Y 36%) aktif di Studio! (Campaign server tidak diubah.)', 'ok');
+      toast('🎬 Preset Proven aktif: 16:9 1080p · Sub OFF · WM custom 0.375, 0.0 (Campaign server tidak diubah)', 'ok');
     });
   }
 

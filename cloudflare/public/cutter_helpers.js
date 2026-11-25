@@ -197,16 +197,50 @@
     };
   }
 
+  const H1_CRITERIA = [
+    { key: 'h1TawaFacecam', label: 'F1 Tawa keras di facecam' },
+    { key: 'h1VisualKejadian', label: 'F2 Kejadian/fisika terlihat di frame' },
+    { key: 'h1ArcUtuh', label: 'F3 Arc setup→payoff 20–55 dtk utuh' },
+    { key: 'h1HookMutePass', label: 'F4 Hook 1–3 dtk lolos mute test / 1,5 dtk wajah+event' },
+  ];
+
   function preset16x9TopCenterWM() {
     return {
       aspectRatio: '16:9',
       cropMode: 'original',
       resolution: '1080p',
+      subtitlesEnabled: false,
+      sceneSnap: false,
+      silenceTrim: false,
       watermark: {
+        enabled: true,
         position: 'custom',
-        customX: 0.40,
-        customY: 0.36,
+        customX: 0.375,
+        customY: 0.0,
+        scale: 0.25,
+        opacity: 0.96,
+        onOutro: false,
       },
+    };
+  }
+
+  function evaluateH1Checklist(flags) {
+    const src = flags && typeof flags === 'object' ? flags : {};
+    const missing = [];
+    let passedCount = 0;
+    for (let i = 0; i < H1_CRITERIA.length; i += 1) {
+      const item = H1_CRITERIA[i];
+      if (Boolean(src[item.key])) {
+        passedCount += 1;
+      } else {
+        missing.push(item.label);
+      }
+    }
+    return {
+      passedCount,
+      total: H1_CRITERIA.length,
+      publishable: passedCount === H1_CRITERIA.length,
+      missing,
     };
   }
 
@@ -216,5 +250,6 @@
     nudgeRange,
     formatRangeSummary,
     preset16x9TopCenterWM,
+    evaluateH1Checklist,
   };
 });

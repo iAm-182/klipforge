@@ -702,6 +702,26 @@
     }
   }
 
+  function evalH1B1(flags) {
+    if (window.KFCutter && typeof window.KFCutter.evaluateH1Checklist === 'function') {
+      return window.KFCutter.evaluateH1Checklist(flags);
+    }
+    const f = flags && typeof flags === 'object' ? flags : {};
+    const items = [
+      ['h1TawaFacecam', 'F1 Tawa keras di facecam'],
+      ['h1VisualKejadian', 'F2 Kejadian/fisika terlihat di frame'],
+      ['h1ArcUtuh', 'F3 Arc setup→payoff 20–55 dtk utuh'],
+      ['h1HookMutePass', 'F4 Hook 1–3 dtk lolos mute test / 1,5 dtk wajah+event'],
+    ];
+    const missing = [];
+    let passedCount = 0;
+    items.forEach(([k, lbl]) => {
+      if (Boolean(f[k])) passedCount += 1;
+      else missing.push(lbl);
+    });
+    return { passedCount, total: 4, publishable: passedCount === 4, missing };
+  }
+
   function openReviewSheet(job, cand) {
     b1.reviewSheetJob = job;
     b1.selectedRejectReason = '';
@@ -730,6 +750,39 @@
     $('rsVerdict').innerHTML = cand?.verdict
       ? `Verdict Fase 4: <strong>${esc(cand.verdict.verdict.toUpperCase())}</strong> (${cand.verdict.funny}/5) — ${esc(cand.verdict.note || '')} (${esc(cand.verdict.verdictBy || '')})`
       : '';
+
+    const vFlags = cand?.verdict || {};
+    const h1 = evalH1B1(vFlags);
+    if ($('rsH1Badge')) {
+      $('rsH1Badge').textContent = `H1: ${h1.passedCount}/${h1.total}`;
+      $('rsH1Badge').classList.toggle('pass', h1.publishable);
+      $('rsH1Badge').title = h1.missing.length ? 'Belum lolos: ' + h1.missing.join(' · ') : 'Semua 4 pilar H1 lolos!';
+    }
+    const pillLabels = {
+      h1TawaFacecam: 'F1 Tawa keras di facecam',
+      h1VisualKejadian: 'F2 Kejadian/fisika terlihat di frame',
+      h1ArcUtuh: 'F3 Arc setup→payoff 20–55 dtk utuh',
+      h1HookMutePass: 'F4 Hook 1–3 dtk lolos mute test / 1,5 dtk wajah+event',
+    };
+    if ($('rsH1Pills')) {
+      $('rsH1Pills').querySelectorAll('.h1-pill').forEach((pill) => {
+        const flagKey = pill.dataset.flag;
+        const ok = Boolean(vFlags[flagKey]);
+        pill.classList.toggle('ok', ok);
+        pill.textContent = `${ok ? '✓' : '○'} ${pillLabels[flagKey] || flagKey}`;
+      });
+    }
+    if ($('rsH1HookLine')) {
+      const hl = String(vFlags.hookLine || '').trim();
+      if (hl) {
+        $('rsH1HookLine').textContent = `Hook Line: “${hl}”`;
+        $('rsH1HookLine').classList.remove('hidden');
+      } else {
+        $('rsH1HookLine').textContent = 'Pastikan 1,5–3 dtk pertama lolos mute test (wajah + kejadian terlihat) sebelum menyetujui.';
+        $('rsH1HookLine').classList.remove('hidden');
+      }
+    }
+
     $('rsNote').value = job.reviewNote || '';
     document.querySelectorAll('.reject-chip').forEach((c) => c.classList.remove('active'));
 
@@ -1252,6 +1305,24 @@
     if (prev && byId.has(prev)) sel.value = prev;
   }
 
+  function readP0LedgerH1Flags() {
+    return {
+      h1TawaFacecam: Boolean($('p0LedgerF1')?.checked),
+      h1VisualKejadian: Boolean($('p0LedgerF2')?.checked),
+      h1ArcUtuh: Boolean($('p0LedgerF3')?.checked),
+      h1HookMutePass: Boolean($('p0LedgerF4')?.checked),
+    };
+  }
+
+  function updateP0LedgerH1Badge() {
+    const badge = $('p0LedgerH1Badge');
+    if (!badge) return;
+    const res = evalH1B1(readP0LedgerH1Flags());
+    badge.textContent = `H1: ${res.passedCount}/${res.total}`;
+    badge.classList.toggle('pass', res.publishable);
+    badge.title = res.missing.length ? 'Belum lolos: ' + res.missing.join(' · ') : 'Semua 4 pilar H1 lolos!';
+  }
+
   function renderP0Ledger() {
     const sumBox = $('p0LedgerSummary');
     const listBox = $('p0LedgerList');
@@ -1267,15 +1338,41 @@
       const hoStats = bySplit['HELD-OUT'] || { entries: 0, totalViews: 0 };
       const scopeNote = summary.dataScopeNote || 'PERINGATAN DATA SCOPE: Metrik IN-SAMPLE hanya observasi historis/internal dan TIDAK BOLEH dianggap sebagai bukti performa HELD-OUT.';
 
+      const ramaiThreshold = typeof summary.ramaiThreshold === 'number'
+        ? summary.ramaiThreshold
+        : (totalEntries >= 3 ? medianViews * 2 : 0);
+      const ramaiStatus = String(summary.ramaiStatus || (
+        totalEntries < 3
+          ? 'PLACEHOLDER_DUGAAN_N_LT_3'
+          : (totalEntries < 10 ? 'BASELINE_AWAL_DUGAAN_N_LT_10' : 'AKTIF_2X_MEDIAN_N_GE_10')
+      ));
+      const isRamaiActive = totalEntries >= 10 && ramaiStatus === 'AKTIF_2X_MEDIAN_N_GE_10';
+      const ramaiLabel = isRamaiActive
+        ? `Ambang Ramai (2× Median): ${ramaiThreshold.toLocaleString('id-ID')} views`
+        : `PLACEHOLDER / DUGAAN (n=${totalEntries} < 10) · Ambang: ${ramaiThreshold > 0 ? ramaiThreshold.toLocaleString('id-ID') + ' views' : 'belum aktif'}`;
+      const h1FullCount = typeof summary.h1FullPassCount === 'number'
+        ? summary.h1FullPassCount
+        : entries.filter((e) => (typeof e.h1PassCount === 'number' ? e.h1PassCount : evalH1B1(e).passedCount) === 4).length;
+      const byCohort = summary.byCohort || {};
+      const cohortPills = Object.keys(byCohort).map((k) => {
+        const st = byCohort[k] || {};
+        return `<span class="p0-meta-pill cohort">${esc(k)}: ${st.entries || 0} (${Number(st.totalViews || 0).toLocaleString('id-ID')}v)</span>`;
+      }).join('');
+
       sumBox.innerHTML = `
         <div class="p0-ledger-kpis">
           <div class="tim-metric-box"><div class="lbl">Total Views</div><div class="val">${totalViews.toLocaleString('id-ID')}</div></div>
           <div class="tim-metric-box"><div class="lbl">Median Views</div><div class="val">${medianViews.toLocaleString('id-ID')}</div></div>
-          <div class="tim-metric-box"><div class="lbl">Total Entri</div><div class="val">${totalEntries}</div></div>
+          <div class="tim-metric-box"><div class="lbl">Entri / H1 4/4</div><div class="val">${totalEntries} <span class="text-xs muted">(${h1FullCount})</span></div></div>
+        </div>
+        <div class="p0-ramai-banner ${isRamaiActive ? 'active' : 'placeholder'}" title="Status adaptif ambang ramai: ${esc(ramaiStatus)}">
+          <span>${esc(ramaiLabel)}</span>
+          <span>${esc(ramaiStatus)}</span>
         </div>
         <div class="p0-split-row">
           <span class="p0-split-badge">IN-SAMPLE: ${inStats.entries || 0} entri (${Number(inStats.totalViews || 0).toLocaleString('id-ID')} views)</span>
           <span class="p0-split-badge held-out">HELD-OUT: ${hoStats.entries || 0} entri (${Number(hoStats.totalViews || 0).toLocaleString('id-ID')} views)</span>
+          ${cohortPills}
         </div>
         <div class="p0-scope-warn">${esc(scopeNote)}</div>
       `;
@@ -1289,24 +1386,41 @@
       listBox.innerHTML = entries.slice(0, 12).map((e) => {
         const split = String(e.sampleSplit || 'IN-SAMPLE').toUpperCase();
         const isHeldOut = split === 'HELD-OUT';
+        const cohort = String(e.cohortTag || 'POST-v1.2');
+        const hookType = String(e.hookType || '').trim();
+        const triggerSrc = String(e.triggerSource || '').trim();
+        const h1Count = typeof e.h1PassCount === 'number' ? e.h1PassCount : evalH1B1(e).passedCount;
         const ts = e.recordedAt ? new Date(e.recordedAt).toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
         const urlHtml = e.postUrl && /^https?:\/\//i.test(e.postUrl)
           ? ` · <a href="${esc(e.postUrl)}" target="_blank" rel="noopener" style="color:#38bdf8;">Link ↗</a>`
           : '';
+        const extraViews = [];
+        if (Number(e.views24h || 0) > 0) extraViews.push(`24h:${Number(e.views24h).toLocaleString('id-ID')}`);
+        if (Number(e.views7d || 0) > 0) extraViews.push(`7d:${Number(e.views7d).toLocaleString('id-ID')}`);
+        const confParts = [];
+        if (e.channelState) confParts.push(`ch:${e.channelState}`);
+        if (e.thumbnailTs) confParts.push(`thumb:${e.thumbnailTs}`);
+
         return `
           <div class="p0-ledger-row">
             <div style="min-width:0;">
               <div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(e.title || e.jobId)}</div>
-              <div class="text-xs muted" style="display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin-top:2px;">
+              <div class="text-xs muted" style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-top:3px;">
                 <span class="strip-role">${esc((e.platform || '').toUpperCase())}</span>
                 <span class="p0-split-badge ${isHeldOut ? 'held-out' : ''}">${esc(split)}</span>
+                <span class="p0-meta-pill cohort">${esc(cohort)}</span>
+                ${hookType ? `<span class="p0-meta-pill">hook:${esc(hookType)}</span>` : ''}
+                ${triggerSrc ? `<span class="p0-meta-pill">src:${esc(triggerSrc)}</span>` : ''}
+                <span class="p0-meta-pill ${h1Count === 4 ? 'h1-pass' : ''}">H1 ${h1Count}/4</span>
+                ${e.cueSelectionUsed ? '<span class="p0-meta-pill cue-excl" title="Dipakai untuk seleksi cue — exclude dari ranker">cue-sel</span>' : ''}
                 <span>${esc(ts)}${urlHtml}</span>
+                ${confParts.length ? `<span>· ${esc(confParts.join(' · '))}</span>` : ''}
                 ${e.note ? `<span>· ${esc(e.note)}</span>` : ''}
               </div>
             </div>
             <div class="mono" style="text-align:right;flex-shrink:0;">
               <div style="font-weight:700;color:var(--text);">${Number(e.views || 0).toLocaleString('id-ID')} views</div>
-              <div class="text-xs muted">${Number(e.likes || 0).toLocaleString('id-ID')} likes</div>
+              <div class="text-xs muted">${Number(e.likes || 0).toLocaleString('id-ID')} likes${extraViews.length ? ' · ' + esc(extraViews.join(' ')) : ''}</div>
             </div>
           </div>
         `;
@@ -1323,12 +1437,28 @@
     const platform = ($('p0LedgerPlatform')?.value || 'tiktok').trim().toLowerCase();
     const views = parseInt($('p0LedgerViews')?.value || '0', 10);
     const likes = parseInt($('p0LedgerLikes')?.value || '0', 10);
+    const rawV24 = ($('p0LedgerViews24h')?.value || '').trim();
+    const rawV7d = ($('p0LedgerViews7d')?.value || '').trim();
+    const views24h = rawV24 === '' ? 0 : parseInt(rawV24, 10);
+    const views7d = rawV7d === '' ? 0 : parseInt(rawV7d, 10);
     const sampleSplit = ($('p0LedgerSplit')?.value || 'IN-SAMPLE').trim().toUpperCase();
+    const cohortTag = ($('p0LedgerCohort')?.value || 'POST-v1.2').trim();
+    const hookType = ($('p0LedgerHookType')?.value || '').trim();
+    const triggerSource = ($('p0LedgerTrigger')?.value || 'manual').trim();
+    const channelState = ($('p0LedgerChannelState')?.value || '').trim();
+    const thumbnailTs = ($('p0LedgerThumbTs')?.value || '').trim();
+    const cueSelectionUsed = Boolean($('p0LedgerCueSel')?.checked);
+    const h1Flags = readP0LedgerH1Flags();
     const postUrl = ($('p0LedgerUrl')?.value || '').trim();
     const note = ($('p0LedgerNote')?.value || '').trim();
 
-    if (Number.isNaN(views) || views < 0 || Number.isNaN(likes) || likes < 0) {
-      showToast('Views dan Likes harus angka >= 0!', 'err');
+    if (
+      Number.isNaN(views) || views < 0 ||
+      Number.isNaN(likes) || likes < 0 ||
+      Number.isNaN(views24h) || views24h < 0 ||
+      Number.isNaN(views7d) || views7d < 0
+    ) {
+      showToast('Views, Likes, Views 24h, dan Views 7d harus angka >= 0!', 'err');
       return;
     }
 
@@ -1346,7 +1476,19 @@
           platform,
           views,
           likes,
+          views24h,
+          views7d,
           sampleSplit,
+          cohortTag,
+          hookType,
+          triggerSource,
+          channelState,
+          thumbnailTs,
+          cueSelectionUsed,
+          h1TawaFacecam: h1Flags.h1TawaFacecam,
+          h1VisualKejadian: h1Flags.h1VisualKejadian,
+          h1ArcUtuh: h1Flags.h1ArcUtuh,
+          h1HookMutePass: h1Flags.h1HookMutePass,
           postUrl,
           note,
           format: meta.format || '',
@@ -1354,9 +1496,20 @@
       });
       if ($('p0LedgerViews')) $('p0LedgerViews').value = '';
       if ($('p0LedgerLikes')) $('p0LedgerLikes').value = '';
+      if ($('p0LedgerViews24h')) $('p0LedgerViews24h').value = '';
+      if ($('p0LedgerViews7d')) $('p0LedgerViews7d').value = '';
+      if ($('p0LedgerHookType')) $('p0LedgerHookType').value = '';
+      if ($('p0LedgerChannelState')) $('p0LedgerChannelState').value = '';
+      if ($('p0LedgerThumbTs')) $('p0LedgerThumbTs').value = '';
+      if ($('p0LedgerCueSel')) $('p0LedgerCueSel').checked = false;
+      ['p0LedgerF1', 'p0LedgerF2', 'p0LedgerF3', 'p0LedgerF4'].forEach((id) => {
+        if ($(id)) $(id).checked = false;
+      });
+      updateP0LedgerH1Badge();
       if ($('p0LedgerUrl')) $('p0LedgerUrl').value = '';
       if ($('p0LedgerNote')) $('p0LedgerNote').value = '';
-      showToast(`📊 Catatan views (${sampleSplit}) tersimpan!`, 'ok');
+      const h1Res = evalH1B1(h1Flags);
+      showToast(`📊 Catatan views (${sampleSplit} · ${cohortTag} · H1 ${h1Res.passedCount}/4) tersimpan!`, 'ok');
       refreshP0Ops();
     } catch (e) {
       showToast('Gagal simpan views ledger: ' + e.message, 'err');
@@ -1569,6 +1722,10 @@
       });
     }
     if ($('btnSaveLedgerEntry')) $('btnSaveLedgerEntry').addEventListener('click', submitLedgerEntry);
+    ['p0LedgerF1', 'p0LedgerF2', 'p0LedgerF3', 'p0LedgerF4'].forEach((id) => {
+      if ($(id)) $(id).addEventListener('change', updateP0LedgerH1Badge);
+    });
+    updateP0LedgerH1Badge();
     if ($('btnCloseMarkPosted')) $('btnCloseMarkPosted').addEventListener('click', closeMarkPostedModal);
     if ($('btnCancelMarkPosted')) $('btnCancelMarkPosted').addEventListener('click', closeMarkPostedModal);
     if ($('btnSubmitMarkPosted')) $('btnSubmitMarkPosted').addEventListener('click', submitMarkPosted);
